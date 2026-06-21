@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ship Factory Change"
+  short_description: "PR, wait for CI, then merge"
+  default_prompt: "Use $ship to finish the current factory change, create or update a PR, wait for CI, and merge."

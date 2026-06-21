@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Factory PR"
+  short_description: "Commit, push, PR, and wait for CI"
+  default_prompt: "Use $pr to finish the current factory change, open a GitHub PR, and wait for CI without merging."
