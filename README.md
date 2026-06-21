@@ -8,6 +8,35 @@ question only when it genuinely can't proceed.
 Built to run one instance per git worktree (a "fleet"), each in its own tmux
 window, triaged via the existing window orange/bell alerts.
 
+## Install
+
+Prebuilt binaries are published on GitHub Releases for macOS and Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/evansolomon/factory/master/install.sh | bash
+```
+
+By default the installer writes `factory` to `/usr/local/bin`. Override it with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/evansolomon/factory/master/install.sh | \
+  FACTORY_INSTALL_DIR="$HOME/.local/bin" bash
+```
+
+You can also run from a clone:
+
+```bash
+bun install
+bun run src/cli.ts
+```
+
+For development, run `bun run test` (`biome check` + `tsc --noEmit` + `bun test`);
+run `bun run fix` to autofix.
+
+- **Runtime requirement:** the `codex` and `claude` CLIs on `PATH`. Those are the
+  two built-in agent adapters; adding a third (e.g. gemini) is a small adapter in
+  `agents.ts` plus an enum entry, not config (see Configuration).
+
 ## Mental model
 
 Your job is to **feed vetted tasks faster than `factory` drains them** — shovel
@@ -103,9 +132,7 @@ ready tasks (never idle). You answer async; the running instance picks it back u
 
 ## Usage
 
-`factory` is the package `bin` (`src/cli.ts`, run under Bun). Install it globally
-(`npm i -g` / `bun add -g`) to put `factory` on PATH, or run `bun run src/cli.ts`
-from a clone (see *Install*).
+`factory` is the CLI binary.
 
 ```bash
 factory add "<intent...>" [--verify "<cmd...>"]   # queue a task (also reads intent from stdin)
@@ -582,22 +609,6 @@ dollar figure, so there's no consistent number across both models.)
 - `git.ts` — diff / commit / repo root
 - `exec.ts` — subprocess helper
 - `log.ts` — CLI output
-
-## Install
-
-A self-contained Bun package: it owns its `package.json` (its `zod` dep, the
-`factory` bin, `engines.bun`), `tsconfig.json`, `biome.json`, and `.gitignore`; the
-code has **zero imports outside `src/`**; and the bin (`src/cli.ts`) carries a
-`#!/usr/bin/env bun` shebang and is executable, so it works as a real installed
-`bin`.
-
-- **Global:** `npm i -g <git-url-or-package>` / `bun add -g …` puts `factory` on
-  PATH.
-- **From a clone:** `bun install`, then run `bun run src/cli.ts` (or `bun link`).
-- **Dev:** `bun run test` (`biome check` + `tsc --noEmit`); `bun run fix` to autofix.
-- **Runtime requirement:** the `codex` and `claude` CLIs on `PATH`. Those are the
-  two built-in agent adapters; adding a third (e.g. gemini) is a small adapter in
-  `agents.ts` plus an enum entry, not config (see Configuration).
 
 ## Security
 
