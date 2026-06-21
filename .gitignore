@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+
+# Private working notes / agent handoff — not part of the published package.
+.handoff/

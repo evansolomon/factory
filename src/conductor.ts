@@ -1,0 +1,954 @@
+import { mkdir } from 'node:fs/promises'
+import { type AgentResult, agentLabel, runAgent } from './agents.ts'
+import type { Agent, WorkContext } from './config.ts'
+import { run } from './exec.ts'
+import { commitAll, currentBranch, hasChanges, headSha, worktreeDiff } from './git.ts'
+import { emit } from './hooks.ts'
+import { appendCandidate, readLessons } from './lessons.ts'
+import { log } from './log.ts'
+import {
+  parseConvergenceVerdict,
+  parseReconcileDecision,
+  parseReviewVerdict,
+  parseShip,
+  parseTriage,
+} from './markers.ts'
+import { recordRun, type StageStat } from './metrics.ts'
+import {
+  consolidatePrompt,
+  convergePrompt,
+  critiquePrompt,
+  fixPrompt,
+  implementPrompt,
+  type Labeled,
+  namePrompt,
+  planPrompt,
+  postmortemPrompt,
+  reconcilePrompt,
+  researchPrompt,
+  reviewPrompt,
+  revisePrompt,
+  securityPrompt,
+  selectPrompt,
+  shipPrompt,
+  triagePrompt,
+  uxPlanCritiquePrompt,
+  uxReviewPrompt,
+} from './prompts.ts'
+import {
+  appendFailure,
+  type Failure,
+  readAnswers,
+  readFailures,
+  readIntent,
+  readPlan,
+  saveMeta,
+  setStatus,
+  type Task,
+  writeArtifact,
+} from './task.ts'
+
+export type TaskOutcome =
+  | { ok: true }
+  | { ok: false; kind: 'blocked'; reason: string; detail?: string }
+  | { ok: false; kind: 'needs-input'; questions: string }
+  | { ok: false; kind: 'retrying'; reason: string; retryAt: string; autoRetries: number }
+
+// Print a descriptive stage header and emit the `stage.change` hook, so the pane
+// explains what's happening and the environment (e.g. tmux) can reflect the stage.
+async function progress(ctx: WorkContext, task: Task, stage: string, desc: string): Promise<void> {
+  log.step(`${task.id}: ${desc}`)
+  await emit(ctx.root, ctx.config.hooks, 'stage.change', { task: task.id, stage, active: true })
+}
+
+function fmtSecs(ms: number): string {
+  const s = Math.round(ms / 1000)
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
+}
+
+function fmtTok(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`
+}
+
+// Per-task running tally of tokens + wall time, plus a per-stage breakdown that
+// feeds the telemetry record (one StageStat per agent call + the verify run).
+type Meter = { inTok: number; outTok: number; startedAt: number; stages: StageStat[] }
+function newMeter(): Meter {
+  return { inTok: 0, outTok: 0, startedAt: Date.now(), stages: [] }
+}
+
+// A long stage is a single await with no output until it finishes, so it can
+// look hung. Show a single in-place line that ticks elapsed time while any stage
+// runs — it overwrites itself (no scrolling), and concurrent agents (the parallel
+// planners) share ONE line. Permanent lines (the ✓ completions) print above it.
+const HEARTBEAT_MS = 1000
+const running = new Map<number, { label: string; start: number }>()
+let beatId = 0
+let beatTimer: ReturnType<typeof setInterval> | null = null
+
+function renderBeat(): void {
+  if (running.size === 0) {
+    return
+  }
+  const now = Date.now()
+  const parts = [...running.values()].map((r) => `${r.label} ${fmtSecs(now - r.start)}`)
+  log.status(`  · working… ${parts.join(' · ')}`)
+}
+
+async function withHeartbeat<T>(label: string, start: number, work: Promise<T>): Promise<T> {
+  const id = beatId++
+  running.set(id, { label, start })
+  if (!beatTimer) {
+    beatTimer = setInterval(renderBeat, HEARTBEAT_MS)
+  }
+  renderBeat()
+  try {
+    return await work
+  } finally {
+    running.delete(id)
+    if (running.size === 0) {
+      if (beatTimer) {
+        clearInterval(beatTimer)
+      }
+      beatTimer = null
+      log.clearStatus()
+    } else {
+      renderBeat()
+    }
+  }
+}
+
+// Run an agent call; on return, print a completion line with elapsed time and
+// token usage (so a long stage shows steady progress), tally it (totals +
+// per-stage), hand back text.
+async function agentStep(
+  meter: Meter,
+  stage: string,
+  label: string,
+  work: Promise<AgentResult>
+): Promise<string> {
+  const start = Date.now()
+  const { text, usage } = await withHeartbeat(label, start, work)
+  const ms = Date.now() - start
+  meter.inTok += usage.inputTokens
+  meter.outTok += usage.outputTokens
+  meter.stages.push({
+    stage,
+    agent: label,
+    inTok: usage.inputTokens,
+    outTok: usage.outputTokens,
+    ms,
+  })
+  log.done(
+    `${label} ${fmtSecs(ms)} · ${fmtTok(usage.inputTokens)}→${fmtTok(usage.outputTokens)} tok`
+  )
+  return text
+}
+
+function logTotal(meter: Meter): void {
+  log.info(
+    `task total · ${fmtTok(meter.inTok)}→${fmtTok(meter.outTok)} tok · ${fmtSecs(Date.now() - meter.startedAt)}`
+  )
+}
+
+function firstLine(text: string): string {
+  return (
+    text
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) ?? text.trim()
+  )
+}
+
+function slugify(text: string): string {
+  const slug = text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60)
+    .replace(/-+$/g, '')
+  return slug.length > 0 ? slug : 'plan'
+}
+
+// A model id (e.g. "grok-4", "anthropic/claude-x") made filesystem/label-safe.
+function labelSafe(s: string): string {
+  return s.replace(/[^a-zA-Z0-9.-]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+// Filesystem/label-safe names for the planner ensemble. When several planners
+// share a cli (e.g. two codex backends on different providers), the model name
+// disambiguates the artifacts (plan.grok-4.md vs plan.codex.md) — far more legible
+// than codex-1/codex-2; a -N suffix is the final fallback for any collision.
+function plannerLabels(planners: Agent[]): string[] {
+  const cliCount = new Map<string, number>()
+  for (const a of planners) {
+    cliCount.set(a.cli, (cliCount.get(a.cli) ?? 0) + 1)
+  }
+  const bases = planners.map((a) =>
+    (cliCount.get(a.cli) ?? 0) > 1 && a.model ? labelSafe(a.model) : a.cli
+  )
+  const baseCount = new Map<string, number>()
+  for (const b of bases) {
+    baseCount.set(b, (baseCount.get(b) ?? 0) + 1)
+  }
+  const seen = new Map<string, number>()
+  return bases.map((b) => {
+    if ((baseCount.get(b) ?? 0) === 1) {
+      return b
+    }
+    const n = (seen.get(b) ?? 0) + 1
+    seen.set(b, n)
+    return `${b}-${n}`
+  })
+}
+
+// Run-level facts for the telemetry record, mutated as the task progresses so
+// whatever terminal path fires has the current values.
+type RunStats = {
+  triage: 'trivial' | 'complex' | null
+  retries: number
+  verifyFirstTry: boolean | null
+}
+
+// Persist one telemetry record for this pass. Best-effort: recordRun never throws,
+// so a telemetry failure can't break the task.
+function recordTask(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  outcome: 'done' | 'blocked' | 'needs-input',
+  stats: RunStats
+): void {
+  recordRun(ctx.metricsPath, {
+    task: task.id,
+    ts: new Date().toISOString(),
+    createdAt: task.meta.createdAt,
+    outcome,
+    triage: stats.triage,
+    retries: stats.retries,
+    verifyFirstTry: stats.verifyFirstTry,
+    ms: Date.now() - meter.startedAt,
+    inTokens: meter.inTok,
+    outTokens: meter.outTok,
+    stages: meter.stages,
+  })
+}
+
+// A blocked outcome also drops a raw signal into the lesson candidates, so
+// recurring failure modes become visible for the meta loop.
+async function blocked(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  stats: RunStats,
+  reason: string,
+  detail?: string
+): Promise<TaskOutcome> {
+  logTotal(meter)
+  recordTask(ctx, task, meter, 'blocked', stats)
+  await postmortem(ctx, task, meter, reason)
+  return { ok: false, kind: 'blocked', reason, detail }
+}
+
+// Diagnose a block: write a postmortem (a fast human-triage briefing) and append a
+// distilled, generalizable lesson candidate — richer than the raw block reason, and
+// classified by root cause. Best-effort: any failure (or postmortem disabled)
+// falls back to the raw signal so the candidate is always recorded.
+async function postmortem(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  reason: string
+): Promise<void> {
+  if (!ctx.config.postmortem) {
+    await appendCandidate(ctx, `blocked · ${task.id} · ${reason}`)
+    return
+  }
+  try {
+    const intent = await readIntent(task)
+    const history = (await readFailures(task)).map((f) => `${f.gate}: ${f.summary}`)
+    const diff = await worktreeDiff(ctx.root)
+    const out = await agentStep(
+      meter,
+      'postmortem',
+      agentLabel(ctx.agents.reviewer),
+      runAgent(ctx.agents.reviewer, {
+        root: ctx.root,
+        prompt: postmortemPrompt(intent, history, diff, reason),
+        access: 'read',
+        outFile: `${task.dir}/postmortem.md`,
+      })
+    )
+    const category = /CATEGORY:\s*(\w+)/i.exec(out)?.[1]?.toLowerCase() ?? 'other'
+    const lesson = /LESSON:\s*(.+)/i.exec(out)?.[1]?.trim()
+    await appendCandidate(
+      ctx,
+      lesson ? `blocked · ${task.id} · [${category}] ${lesson}` : `blocked · ${task.id} · ${reason}`
+    )
+  } catch (err) {
+    log.warn(`postmortem failed for ${task.id}: ${err instanceof Error ? err.message : err}`)
+    await appendCandidate(ctx, `blocked · ${task.id} · ${reason}`)
+  }
+}
+
+// Auto-resume policy for TRANSIENT gate failures (verify, ship): rather than
+// hard-block, set the task aside with a growing backoff so the run loop retries it
+// — up to AUTO_CAP times — letting an env/CI flake recover with no human action.
+// Once the cap is spent it escalates to a real block (the attention signal). Code-
+// judgment gates (review, security) never come here — they block immediately.
+export const AUTO_CAP = 5
+const BACKOFF_MS = [120_000, 300_000, 900_000, 1_800_000, 3_600_000] // 2m, 5m, 15m, 30m, 60m
+function backoffMs(n: number): number {
+  return BACKOFF_MS[Math.min(n, BACKOFF_MS.length - 1)] ?? 3_600_000
+}
+
+async function setAside(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  stats: RunStats,
+  reason: string,
+  detail?: string
+): Promise<TaskOutcome> {
+  if (task.meta.autoRetries >= AUTO_CAP) {
+    return await blocked(
+      ctx,
+      task,
+      meter,
+      stats,
+      `${reason} (gave up after ${AUTO_CAP} auto-retries)`,
+      detail
+    )
+  }
+  logTotal(meter)
+  const retryAt = new Date(Date.now() + backoffMs(task.meta.autoRetries)).toISOString()
+  return { ok: false, kind: 'retrying', reason, retryAt, autoRetries: task.meta.autoRetries + 1 }
+}
+
+// After a gate failure, decide whether to keep fixing. Replaces a blind retry
+// count: a convergence judge reads the whole failure history and says CONTINUE
+// (genuinely new problem — progress) or STUCK (same root cause recurring /
+// oscillating). The failure is logged either way (so the history spans resumes and
+// feeds the next fixer). `attempt` is 0-based; `hardCap` is the runaway backstop —
+// at/over it we stop without judging (also covers the no-re-implement resume pass).
+async function assessFailure(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  intent: string,
+  failures: Failure[],
+  attempt: number,
+  hardCap: number,
+  gate: string,
+  detail: string
+): Promise<'continue' | 'stop'> {
+  if (attempt + 1 >= hardCap) {
+    const entry: Failure = { attempt, gate, summary: firstLine(detail).slice(0, 200), detail }
+    failures.push(entry)
+    await appendFailure(task, entry)
+    return 'stop'
+  }
+  const priorSummaries = failures.map((f) => `${f.gate}: ${f.summary}`)
+  const judgment = await agentStep(
+    meter,
+    'converge',
+    agentLabel(ctx.agents.reviewer),
+    runAgent(ctx.agents.reviewer, {
+      root: ctx.root,
+      prompt: convergePrompt(intent, priorSummaries, detail),
+      access: 'read',
+      outFile: `${task.dir}/converge.md`,
+    })
+  )
+  const summary = /SUMMARY:\s*(.+)/i.exec(judgment)?.[1]?.trim() || firstLine(detail).slice(0, 200)
+  const verdict = parseConvergenceVerdict(judgment)
+  const stuck = verdict !== 'CONTINUE'
+  const entry: Failure = { attempt, gate, summary, detail }
+  failures.push(entry)
+  await appendFailure(task, entry)
+  return stuck ? 'stop' : 'continue'
+}
+
+type PlanResult = { plan: string } | { pause: TaskOutcome }
+
+// The planning ensemble: each planner drafts, they cross-critique (when ≥2), the
+// lead reconciles (may pause for the human), planners revise, the lead selects.
+async function planEnsemble(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  intent: string,
+  verify: string | null,
+  answers: string | null,
+  lessons: string | null,
+  userFacing: boolean
+): Promise<PlanResult> {
+  const planners = ctx.agents.planners
+  const labels = plannerLabels(planners)
+  const lead = ctx.agents.implementer
+  const labeled = (texts: string[]): Labeled[] =>
+    texts.map((text, i) => ({ label: labels[i] ?? `plan-${i + 1}`, text }))
+
+  // 1. RESEARCH — one subagent gathers the factual groundwork (relevant code,
+  // existing patterns, git history of the target areas, prior plans, gotchas)
+  // so the whole ensemble plans from grounded facts, not assumptions.
+  await setStatus(task, 'planning')
+  await progress(ctx, task, 'research', 'research — mapping the relevant code & history')
+  const research = await agentStep(
+    meter,
+    'research',
+    agentLabel(lead),
+    runAgent(lead, {
+      root: ctx.root,
+      prompt: researchPrompt(intent, verify, ctx.plansDir, userFacing),
+      access: 'research',
+      outFile: `${task.dir}/research.md`,
+    })
+  )
+
+  // 2. PLAN — every planner drafts in parallel (read-only).
+  await progress(ctx, task, 'plan', 'plan — drafting')
+  const plans = await Promise.all(
+    planners.map((agent, i) =>
+      agentStep(
+        meter,
+        'plan',
+        labels[i] ?? agent.cli,
+        runAgent(agent, {
+          root: ctx.root,
+          prompt: planPrompt(intent, verify, answers, lessons, research, userFacing),
+          access: 'read',
+          outFile: `${task.dir}/plan.${labels[i]}.md`,
+        })
+      )
+    )
+  )
+
+  // 3. CRITIQUE — each planner critiques the others' plans (only with ≥2).
+  let critiques: string[] = []
+  if (planners.length >= 2) {
+    await progress(ctx, task, 'crit', 'critique — cross-reviewing the plans')
+    critiques = await Promise.all(
+      planners.map((agent, i) => {
+        const others = plans.filter((_, j) => j !== i).join('\n\n---\n\n')
+        return agentStep(
+          meter,
+          'critique',
+          labels[i] ?? agent.cli,
+          runAgent(agent, {
+            root: ctx.root,
+            prompt: critiquePrompt(intent, others, answers, lessons, research),
+            access: 'read',
+            outFile: `${task.dir}/critique.${labels[i]}.md`,
+          })
+        )
+      })
+    )
+  }
+
+  // 3.6 UX/IA CRITIQUE — for user-facing work, an independent design pass (the
+  // reviewer agent) on the plan's information architecture and experience, separate
+  // from the code critique. Flows into reconcile/revise/select like any critique.
+  let uxCritique: string | null = null
+  if (userFacing) {
+    await progress(ctx, task, 'ux', 'ux — reviewing information architecture & UX')
+    uxCritique = await agentStep(
+      meter,
+      'ux',
+      agentLabel(ctx.agents.reviewer),
+      runAgent(ctx.agents.reviewer, {
+        root: ctx.root,
+        prompt: uxPlanCritiquePrompt(intent, labeled(plans), research),
+        access: 'read',
+        outFile: `${task.dir}/ux.plan.md`,
+      })
+    )
+  }
+  const critiquesForReconcile: Labeled[] = uxCritique
+    ? [...labeled(critiques), { label: 'ux/ia', text: uxCritique }]
+    : labeled(critiques)
+
+  // 3.5 RECONCILE — the lead decides proceed vs. pause for the human.
+  await progress(ctx, task, 'recon', 'reconcile — proceed or ask?')
+  const reconcile = await agentStep(
+    meter,
+    'reconcile',
+    agentLabel(lead),
+    runAgent(lead, {
+      root: ctx.root,
+      prompt: reconcilePrompt(intent, labeled(plans), critiquesForReconcile, answers),
+      access: 'read',
+      outFile: `${task.dir}/reconcile.md`,
+    })
+  )
+  if (parseReconcileDecision(reconcile) === 'ASK') {
+    const questions = reconcile.replace(/^\s*DECISION:\s*ASK\s*/i, '').trim() || reconcile
+    await writeArtifact(task, 'questions.md', questions)
+    await appendCandidate(ctx, `needs-input · ${task.id} · ${firstLine(questions)}`)
+    logTotal(meter)
+    return { pause: { ok: false, kind: 'needs-input', questions } }
+  }
+
+  // 4. REVISE — each planner improves its own plan using the critiques (≥2 only).
+  let revised = plans
+  if (planners.length >= 2) {
+    await progress(ctx, task, 'revise', 'revise — improving each plan')
+    const allCritiques =
+      critiques.map((text, i) => `## Critique (${labels[i]})\n${text}`).join('\n\n') +
+      (uxCritique ? `\n\n## Critique (ux/ia)\n${uxCritique}` : '')
+    revised = await Promise.all(
+      planners.map((agent, i) =>
+        agentStep(
+          meter,
+          'revise',
+          labels[i] ?? agent.cli,
+          runAgent(agent, {
+            root: ctx.root,
+            prompt: revisePrompt(intent, plans[i] ?? '', allCritiques),
+            access: 'read',
+            outFile: `${task.dir}/plan.${labels[i]}.v2.md`,
+          })
+        )
+      )
+    )
+  }
+
+  // 5. SELECT — the lead picks or merges the final plan.
+  await progress(ctx, task, 'select', 'select — choosing the final plan')
+  const finalPlan = await agentStep(
+    meter,
+    'select',
+    agentLabel(lead),
+    runAgent(lead, {
+      root: ctx.root,
+      prompt: selectPrompt(intent, labeled(revised), uxCritique),
+      access: 'read',
+      outFile: `${task.dir}/plan.final.md`,
+    })
+  )
+  return { plan: finalPlan }
+}
+
+// Run a single task. A trivial task (per triage) takes the fast path — straight
+// to implement — while a complex one goes through the full planning ensemble.
+// Both are then reviewed, verified, committed, and (if configured) shipped.
+export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome> {
+  const intent = await readIntent(task)
+  const verify = task.meta.verify
+  const meter = newMeter()
+  const lead = ctx.agents.implementer
+  const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null }
+  const baselineDiff = await worktreeDiff(ctx.root)
+  const baselineHasChanges = await hasChanges(ctx.root)
+  await writeArtifact(task, 'baseline.patch', baselineDiff)
+  if (baselineHasChanges) {
+    log.warn(
+      `${task.id}: worktree already has changes; factory will review and commit the whole worktree`
+    )
+  }
+  // Whether this task is user-facing (gates the UI/UX lenses). Set by triage on a
+  // fresh run; derived from the existing diff on resume (triage doesn't re-run).
+  let userFacing = false
+
+  // RESUME — reuse the saved plan + the existing worktree and pick up where the
+  // task left off, skipping the (expensive) planning ensemble. The marker + any
+  // human note are consumed here, so a later re-run starts fresh again.
+  const resuming = task.meta.resume
+  const resumeKind = task.meta.resumeKind
+  let resumeNote: string | null = null
+  let finalPlan: string
+  if (resuming) {
+    finalPlan = (await readPlan(task)) ?? intent
+    resumeNote = task.meta.resumeNote
+    task.meta.resume = false
+    task.meta.resumeNote = null
+    task.meta.resumeKind = null
+    await saveMeta(task)
+    log.info(
+      `${task.id}: resuming — reusing plan + existing work${resumeNote ? ' (with your note)' : ''}`
+    )
+  } else {
+    const answers = await readAnswers(task)
+    const lessons = await readLessons(ctx)
+
+    // 0. TRIAGE — classify the task; trivial ones skip the whole plan ensemble.
+    let trivial = false
+    if (ctx.config.triage) {
+      await progress(ctx, task, 'triage', 'triage — trivial or complex?')
+      const verdict = await agentStep(
+        meter,
+        'triage',
+        agentLabel(lead),
+        runAgent(lead, {
+          root: ctx.root,
+          prompt: triagePrompt(intent, verify),
+          access: 'read',
+          outFile: `${task.dir}/triage.md`,
+        })
+      )
+      const triage = parseTriage(verdict)
+      trivial = triage.trivial
+      stats.triage = trivial ? 'trivial' : 'complex'
+      userFacing = ctx.config.ux && triage.userFacing
+    }
+
+    if (trivial) {
+      log.info(`${task.id}: trivial — fast path (skipping the plan ensemble)`)
+      finalPlan = intent
+    } else {
+      const planned = await planEnsemble(
+        ctx,
+        task,
+        meter,
+        intent,
+        verify,
+        answers,
+        lessons,
+        userFacing
+      )
+      if ('pause' in planned) {
+        recordTask(ctx, task, meter, 'needs-input', stats)
+        return planned.pause
+      }
+      finalPlan = planned.plan
+    }
+
+    // Write the clean final plan to the committed plans dir under a descriptive,
+    // AI-summarized, number-free, collision-safe name. Skipped on the fast path.
+    if (ctx.plansDir && !trivial) {
+      await progress(ctx, task, 'name', 'name — summarizing the change for the plan filename')
+      const suggested = await agentStep(
+        meter,
+        'name',
+        agentLabel(lead),
+        runAgent(lead, {
+          root: ctx.root,
+          prompt: namePrompt(intent, finalPlan),
+          access: 'read',
+        })
+      )
+      await mkdir(ctx.plansDir, { recursive: true })
+      const base = slugify(firstLine(suggested) || task.id)
+      let name = base
+      for (let n = 2; await Bun.file(`${ctx.plansDir}/${name}.md`).exists(); n++) {
+        name = `${base}-${n}`
+      }
+      await Bun.write(`${ctx.plansDir}/${name}.md`, `# ${firstLine(intent)}\n\n${finalPlan}\n`)
+    }
+
+    // Persist the selected plan as a task artifact so a resume can reuse it.
+    await writeArtifact(task, 'plan.md', finalPlan)
+  }
+
+  // A resume whose work already committed only has delivery left — skip the build.
+  if (resuming && task.meta.commit) {
+    return shipAndFinish(ctx, task, intent, meter, stats)
+  }
+
+  // On resume, triage didn't run — derive user-facing from the existing diff so the
+  // fix pass still gets the design-context note. (The UX review gate detects it too.)
+  if (resuming && ctx.config.ux) {
+    userFacing = uiInDiff(await worktreeDiff(ctx.root))
+  }
+
+  // 5–7. IMPLEMENT → REVIEW → VERIFY with auto-fix: on a failed gate, feed the
+  // failure back into a fix pass. Termination is by the convergence judge (keep
+  // going while failures are genuinely new, stop when stuck — see assessFailure),
+  // with config.retries as the hard-cap backstop. Failures accumulate across the
+  // whole task (loaded here so the history survives resumes) and feed the fixer.
+  let attempt = 0
+  const hardCap = ctx.config.retries
+  const failures = await readFailures(task)
+  // On resume with an existing diff, re-enter at the gates: run them against the
+  // work already in the worktree, and only implement (a fix pass) if one fails.
+  let skipImplement = resuming && (await hasChanges(ctx.root))
+  // A note-less resume is a transient retry: re-run the gates on the existing diff
+  // but DON'T re-implement (a verify env-flake mustn't churn code) — so jump to the
+  // hard cap, letting any failure escalate at once (verify→backoff retry,
+  // review/security→block). A note means the human wants a change, so keep iterating.
+  if (skipImplement && resumeKind === 'auto-retry' && !resumeNote) {
+    attempt = hardCap
+  }
+  if (skipImplement && resumeNote) {
+    skipImplement = false
+    attempt = Math.max(1, failures.length)
+  }
+  while (true) {
+    stats.retries = attempt
+    if (skipImplement) {
+      skipImplement = false
+    } else {
+      await setStatus(task, 'implementing')
+      const fixing = attempt > 0
+      await progress(
+        ctx,
+        task,
+        'impl',
+        fixing ? `implement — fix attempt ${attempt}` : 'implement — writing code'
+      )
+      // Fix context: the most recent failure in full + the human's note (if any),
+      // plus a summary of every earlier attempt so the fixer doesn't re-tread them.
+      const latest = failures.at(-1)
+      const parts: string[] = []
+      if (latest) {
+        parts.push(latest.detail)
+      }
+      if (resumeNote) {
+        parts.push(`Human guidance on retry: ${resumeNote}`)
+      }
+      const failureCtx = parts.join('\n\n')
+      const priorSummaries = failures.slice(0, -1).map((f) => `${f.gate}: ${f.summary}`)
+      const stagePrompt = fixing
+        ? fixPrompt(
+            intent,
+            finalPlan,
+            failureCtx,
+            priorSummaries,
+            await worktreeDiff(ctx.root),
+            userFacing
+          )
+        : implementPrompt(intent, finalPlan, verify, userFacing)
+      await agentStep(
+        meter,
+        'implement',
+        agentLabel(lead),
+        runAgent(lead, {
+          root: ctx.root,
+          prompt: stagePrompt,
+          access: 'write',
+          outFile: `${task.dir}/implement.log.md`,
+        })
+      )
+
+      if (!(await hasChanges(ctx.root))) {
+        return blocked(ctx, task, meter, stats, 'implementation produced no changes')
+      }
+    }
+
+    // REVIEW PHASE — a parallel panel of independent expert finders, consolidated
+    // into ONE verdict + ONE fix list (mirrors the planning ensemble). Experts are
+    // read-only and run concurrently; only the consolidator decides blocking vs
+    // advisory, so adding an expert can't independently block or thrash. Verify
+    // stays a separate objective gate after this.
+    await setStatus(task, 'reviewing')
+    const diff = await worktreeDiff(ctx.root)
+    await writeArtifact(task, 'diff.patch', diff)
+    const reviewer = ctx.agents.reviewer
+    const panel: Array<{ key: string; label: string; prompt: string }> = [
+      {
+        key: 'review',
+        label: 'correctness',
+        prompt: reviewPrompt(
+          intent,
+          verify,
+          finalPlan,
+          diff,
+          baselineHasChanges ? baselineDiff : null
+        ),
+      },
+    ]
+    if (ctx.config.security) {
+      panel.push({
+        key: 'security',
+        label: 'security',
+        prompt: securityPrompt(intent, finalPlan, diff, baselineHasChanges ? baselineDiff : null),
+      })
+    }
+    if (ctx.config.ux && (userFacing || uiInDiff(diff))) {
+      panel.push({
+        key: 'ux',
+        label: 'ux/design',
+        prompt: uxReviewPrompt(intent, finalPlan, diff, baselineHasChanges ? baselineDiff : null),
+      })
+    }
+    await progress(ctx, task, 'review', `review — ${panel.length}-expert panel`)
+    const reports = await Promise.all(
+      panel.map((e) =>
+        agentStep(
+          meter,
+          e.key,
+          agentLabel(reviewer),
+          runAgent(reviewer, {
+            root: ctx.root,
+            prompt: e.prompt,
+            access: 'read',
+            outFile: `${task.dir}/${e.key}.md`,
+          })
+        ).then((text): Labeled => ({ label: e.label, text }))
+      )
+    )
+
+    // CONSOLIDATE — one judge dedupes, drops nits, resolves conflicts by priority,
+    // classifies blocking vs advisory, and emits one verdict + one fix list. A FAIL
+    // feeds the same auto-fix loop; advisory findings live in consolidated.md
+    // (read with `factory show <id> consolidate`) and never block.
+    await progress(ctx, task, 'consolidate', 'consolidate — judging the panel')
+    const consolidated = await agentStep(
+      meter,
+      'consolidate',
+      agentLabel(reviewer),
+      runAgent(reviewer, {
+        root: ctx.root,
+        prompt: consolidatePrompt(
+          intent,
+          finalPlan,
+          diff,
+          reports,
+          baselineHasChanges ? baselineDiff : null
+        ),
+        access: 'read',
+        outFile: `${task.dir}/consolidated.md`,
+      })
+    )
+    const verdict = parseReviewVerdict(consolidated)
+    if (verdict !== 'PASS') {
+      const detail = `The review panel found blocking issues:\n${consolidated}`
+      const action = await assessFailure(
+        ctx,
+        task,
+        meter,
+        intent,
+        failures,
+        attempt,
+        hardCap,
+        'review',
+        detail
+      )
+      if (action === 'continue') {
+        attempt++
+        continue
+      }
+      return blocked(
+        ctx,
+        task,
+        meter,
+        stats,
+        `review blocked after ${attempt + 1} attempts`,
+        consolidated
+      )
+    }
+
+    // VERIFY — actually run the task's verification command.
+    if (verify) {
+      await setStatus(task, 'verifying')
+      await progress(ctx, task, 'verify', `verify — ${verify}`)
+      const vstart = Date.now()
+      const result = await withHeartbeat(
+        'verify',
+        vstart,
+        run(['bash', '-lc', verify], { cwd: ctx.root })
+      )
+      const vms = Date.now() - vstart
+      meter.stages.push({ stage: 'verify', agent: '-', inTok: 0, outTok: 0, ms: vms })
+      log.done(`verify ${fmtSecs(vms)}`)
+      await writeArtifact(task, 'verify.log', `$ ${verify}\n\n${result.stdout}\n${result.stderr}`)
+      if (result.code !== 0) {
+        const detail = `Verify \`${verify}\` failed (exit ${result.code}):\n${`${result.stdout}\n${result.stderr}`.slice(-4000)}`
+        const action = await assessFailure(
+          ctx,
+          task,
+          meter,
+          intent,
+          failures,
+          attempt,
+          hardCap,
+          'verify',
+          detail
+        )
+        if (action === 'continue') {
+          attempt++
+          continue
+        }
+        return setAside(
+          ctx,
+          task,
+          meter,
+          stats,
+          `verify exited ${result.code} after ${attempt + 1} attempts`,
+          `${result.stdout}\n${result.stderr}`.trim()
+        )
+      }
+      // Passed verify — first try iff no prior fix attempts.
+      stats.verifyFirstTry = attempt === 0
+    } else {
+      log.warn(`${task.id}: no verify command — skipping verification gate`)
+    }
+
+    break // both gates passed
+  }
+
+  // Gate passed: record proof and commit on the branch.
+  const proof = [
+    `# Proof — ${task.id}`,
+    '',
+    '## Selected plan (head)',
+    finalPlan.split('\n').slice(0, 3).join('\n'),
+    '',
+    '## Review',
+    'VERDICT: PASS',
+    '',
+    `## Verify\n${verify ? `\`${verify}\` passed` : 'no verify command'}`,
+  ].join('\n')
+  await writeArtifact(task, 'proof.md', proof)
+
+  await commitAll(ctx.root, commitMessage(intent))
+  task.meta.commit = await headSha(ctx.root)
+  await saveMeta(task)
+
+  return shipAndFinish(ctx, task, intent, meter, stats)
+}
+
+// 8. onComplete — opt-in, outward-facing delivery via the delivery agent (run a
+// skill or follow a policy). Split out so a resume whose work already committed can
+// re-run just this step. A ship failure is transient (CI/network), so it feeds the
+// same backoff auto-retry as verify rather than hard-blocking.
+async function shipAndFinish(
+  ctx: WorkContext,
+  task: Task,
+  intent: string,
+  meter: Meter,
+  stats: RunStats
+): Promise<TaskOutcome> {
+  const onComplete = ctx.config.onComplete
+  if (onComplete) {
+    await setStatus(task, 'shipping')
+    await progress(ctx, task, 'ship', 'onComplete — delivering')
+    const branch = await currentBranch(ctx.root)
+    const shipOut = await agentStep(
+      meter,
+      'ship',
+      agentLabel(ctx.agents.delivery),
+      runAgent(ctx.agents.delivery, {
+        root: ctx.root,
+        prompt: shipPrompt(intent, branch, onComplete),
+        access: 'full',
+        outFile: `${task.dir}/ship.md`,
+      })
+    )
+    const ship = parseShip(shipOut)
+    if (!ship.ok) {
+      return setAside(ctx, task, meter, stats, `ship failed: ${ship.reason}`, shipOut)
+    }
+  }
+
+  logTotal(meter)
+  recordTask(ctx, task, meter, 'done', stats)
+  return { ok: true }
+}
+
+function commitMessage(intent: string): string {
+  const subject = (intent.trim().split('\n', 1)[0] ?? 'Apply task').replace(/\.$/, '').slice(0, 72)
+  return subject.length > 0 ? subject : 'Apply task'
+}
+
+// User-facing file extensions, used to fire the UX review on a diff even when
+// triage didn't flag the task (or wasn't run, e.g. on resume). Covers the common
+// web/component and server-template surfaces.
+const UI_FILE = /\.(tsx|jsx|vue|svelte|css|scss|sass|less|styl|html|astro|mdx|erb|haml|slim)$/i
+function uiInDiff(diff: string): boolean {
+  return diff
+    .split('\n')
+    .some(
+      (line) => line.startsWith('+++ ') && UI_FILE.test(line.replace(/^\+\+\+ (b\/)?/, '').trim())
+    )
+}
