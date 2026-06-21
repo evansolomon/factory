@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo="evansolomon/factory"
-install_dir="${FACTORY_INSTALL_DIR:-/usr/local/bin}"
+install_dir="${FACTORY_INSTALL_DIR:-${HOME}/.local/bin}"
 
 case "$(uname -s)" in
   Darwin)
