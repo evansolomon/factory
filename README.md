@@ -16,11 +16,12 @@ Prebuilt binaries are published on GitHub Releases for macOS and Linux:
 curl -fsSL https://raw.githubusercontent.com/evansolomon/factory/master/install.sh | bash
 ```
 
-By default the installer writes `factory` to `/usr/local/bin`. Override it with:
+By default the installer writes `factory` to `$HOME/.local/bin`. Make sure that
+directory is on `PATH`, or override it with:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/evansolomon/factory/master/install.sh | \
-  FACTORY_INSTALL_DIR="$HOME/.local/bin" bash
+  FACTORY_INSTALL_DIR="/usr/local/bin" bash
 ```
 
 You can also run from a clone:
