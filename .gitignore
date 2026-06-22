@@ -2,5 +2,9 @@ node_modules/
 *.log
 .DS_Store
 
+# Local build outputs.
+dist/
+*.bun-build
+
 # Private working notes / agent handoff — not part of the published package.
 .handoff/

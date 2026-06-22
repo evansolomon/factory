@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtemp, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { FACTORY_VERSION } from '../src/version.ts'
+import { FACTORY_VERSION, resolveFactoryVersion } from '../src/version.ts'
 
 const cliPath = fileURLToPath(new URL('../src/cli.ts', import.meta.url))
 
@@ -50,6 +50,12 @@ async function runFactory(
 }
 
 describe('version commands', () => {
+  test('resolveFactoryVersion uses a build version when present', () => {
+    expect(resolveFactoryVersion({ FACTORY_BUILD_VERSION: '0.1.1-dev.20260621010203' })).toBe(
+      '0.1.1-dev.20260621010203'
+    )
+  })
+
   test('factory --version works outside a git repo without touching FACTORY_HOME', async () => {
     const cwd = await tempDir('version-cwd')
     const home = await tempDir('version-home')
