@@ -30,3 +30,50 @@ jobs:
 
       - name: Run tests
         run: bun run test
+
+  release:
+    name: Build release binaries
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Determine release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_SHA: ${{ github.event.before }}
+        run: bash .github/scripts/determine-release.sh
+
+      - name: Install dependencies
+        if: steps.release.outputs.should_publish == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Build binaries
+        if: steps.release.outputs.should_publish == 'true'
+        run: bash .github/scripts/build-binaries.sh
+
+      - name: Generate checksums
+        if: steps.release.outputs.should_publish == 'true'
+        run: bash .github/scripts/generate-checksums.sh
+
+      - name: Publish release assets
+        if: steps.release.outputs.should_publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release.outputs.tag }}
+          TARGET_SHA: ${{ github.sha }}
+        run: bash .github/scripts/publish-release-assets.sh
