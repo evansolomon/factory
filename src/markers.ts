@@ -16,6 +16,12 @@ function finalNonemptyLine(text: string): string {
 export type TriageResult = { trivial: boolean; userFacing: boolean }
 export type ShipResult = { ok: true } | { ok: false; reason: string }
 export type ReconcileDecision = 'PROCEED' | 'ASK' | null
+// The verify-gate doctor's classification of a failure (see remediatePrompt):
+// ENV-FIXED — environment problem the doctor repaired (re-run verify);
+// ENV-BLOCKED — environment problem it couldn't fix (back off);
+// CODE — a real code/test defect (route to the code-fix loop);
+// FLAKE — a transient/external failure (back off and retry).
+export type RemedyVerdict = 'ENV-FIXED' | 'ENV-BLOCKED' | 'CODE' | 'FLAKE' | null
 
 export function parseTriage(text: string): TriageResult {
   const lines = nonemptyLines(text)
@@ -42,6 +48,15 @@ export function parseConvergenceVerdict(text: string): 'CONTINUE' | 'STUCK' | nu
   const match = /^VERDICT:\s*(CONTINUE|STUCK)\s*$/i.exec(finalNonemptyLine(text))
   const value = match?.[1]?.toUpperCase()
   return value === 'CONTINUE' || value === 'STUCK' ? value : null
+}
+
+export function parseRemedy(text: string): RemedyVerdict {
+  const match = /^VERDICT:\s*(ENV-FIXED|ENV-BLOCKED|CODE|FLAKE)\s*$/i.exec(finalNonemptyLine(text))
+  const value = match?.[1]?.toUpperCase()
+  if (value === 'ENV-FIXED' || value === 'ENV-BLOCKED' || value === 'CODE' || value === 'FLAKE') {
+    return value
+  }
+  return null
 }
 
 export function parseShip(text: string): ShipResult {
