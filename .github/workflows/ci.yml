@@ -64,7 +64,7 @@ jobs:
 
       - name: Build binaries
         if: steps.release.outputs.should_publish == 'true'
-        run: bash .github/scripts/build-binaries.sh
+        run: bun run build:release
 
       - name: Generate checksums
         if: steps.release.outputs.should_publish == 'true'

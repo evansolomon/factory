@@ -48,6 +48,18 @@ bun install
 bun run src/cli.ts
 ```
 
+Or build a local executable for this machine:
+
+```bash
+bun run build:local
+./dist/factory
+./dist/factory --version # 0.1.1-dev.20260621010203
+
+# or choose the executable path
+bun run build:local -- /path/to/factory
+/path/to/factory
+```
+
 For development, run `bun run test` (`biome check` + `tsc --noEmit` + `bun test`);
 run `bun run fix` to autofix.
 
