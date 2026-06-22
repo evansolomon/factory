@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { WorkContext } from './config.ts'
 
 // A task is a directory under <dir>/tasks/<id>/ containing:
-//   task.md   — human-owned intent (free-form markdown; what grilling enriches)
+//   task.md   — human-owned intent (free-form markdown; what sharpening enriches)
 //   meta.json — machine-owned status/verify/timestamps (never touches task.md)
 //   plan.*.md, review.md, proof.md, diff.patch — conductor artifacts
 // Splitting human prose from machine state means factory flips status without
@@ -12,8 +12,10 @@ import type { WorkContext } from './config.ts'
 export const StatusSchema = z.enum([
   'ready',
   'needs-input',
-  // Created up-front by `factory add` while you interactively grill the intent, so
+  // Created up-front by `factory add` while you interactively sharpen the intent, so
   // it's visible in `factory status`; flipped to 'ready' (or deleted) when you finish.
+  'sharpening',
+  // Legacy name for tasks created before the step was renamed.
   'grilling',
   'planning',
   'implementing',
@@ -30,13 +32,14 @@ export type Status = z.infer<typeof StatusSchema>
 
 // Statuses where a task is at rest — no run-loop is actively working it: queued
 // (ready), waiting on a human (needs-input/blocked), on a backoff (retrying), being
-// grilled interactively (grilling), or finished (done). Every OTHER status is a live
-// stage the conductor sets while working a task. Deriving the complement (rather than
-// listing the stages) means a newly-added stage is covered automatically — the same
-// heuristic factory_prompt uses for "in-progress".
+// sharpened interactively (sharpening/grilling), or finished (done). Every OTHER
+// status is a live stage the conductor sets while working a task. Deriving the
+// complement (rather than listing the stages) means a newly-added stage is covered
+// automatically — the same heuristic factory_prompt uses for "in-progress".
 const SETTLED: readonly Status[] = [
   'ready',
   'needs-input',
+  'sharpening',
   'grilling',
   'retrying',
   'done',
@@ -156,9 +159,9 @@ export async function addTask(
   return { id, dir, meta }
 }
 
-// Finish a grilled task: replace its intent with the refined spec, set the verify
-// command, and flip it from 'grilling' to 'ready' so the loop will pick it up.
-export async function readyGrilledTask(
+// Finish a sharpened task: replace its intent with the refined spec, set the verify
+// command, and flip it from 'sharpening' to 'ready' so the loop will pick it up.
+export async function readySharpenedTask(
   task: Task,
   intent: string,
   verify: string | null
@@ -170,7 +173,9 @@ export async function readyGrilledTask(
   await writeMeta(task.dir, task.meta)
 }
 
-// Remove a task entirely (its whole dir). Used when a grill is cancelled.
+export const readyGrilledTask = readySharpenedTask
+
+// Remove a task entirely (its whole dir). Used when sharpening is cancelled.
 export async function deleteTask(task: Task): Promise<void> {
   await rm(task.dir, { recursive: true, force: true })
 }

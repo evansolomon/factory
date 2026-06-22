@@ -13,10 +13,10 @@ import {
 import { composeInEditor, openEditor } from './editor.ts'
 import { captureCorrection, captureEvalCase } from './evals.ts'
 import { NotARepoError } from './git.ts'
-import { grill } from './grill.ts'
 import { emit, type Hooks } from './hooks.ts'
 import { readCandidates, readLessons } from './lessons.ts'
 import { log } from './log.ts'
+import { sharpen } from './sharpen.ts'
 import {
   addTask,
   appendAnswer,
@@ -26,7 +26,7 @@ import {
   loadTasks,
   nextRunnable,
   RESUMABLE_STATUSES,
-  readyGrilledTask,
+  readySharpenedTask,
   setStatus,
 } from './task.ts'
 import { upgradeFactory } from './upgrade.ts'
@@ -50,10 +50,10 @@ COMMANDS
       worktree opens and you want to write the first task before walking away. The
       intent can also be piped on stdin (multi-line specs). --verify is the command
       that proves the task works; it's run for real before commit.
-      By default it then GRILLS the intent: an agent interrogates it into a
+      By default it then SHARPENS the intent: an agent interrogates it into a
       self-contained spec (one question at a time, with recommended answers,
       reading the repo itself) — you answer or ask back; Enter queues it, /cancel
-      aborts. --raw skips the grill and queues the intent as-is. Auto-skipped when
+      aborts. --raw skips sharpening and queues the intent as-is. Auto-skipped when
       the intent is piped (non-interactive).
 
   factory run [--once | --drain]
@@ -202,10 +202,10 @@ async function resolveIntent(rest: string[]): Promise<{ intent: string; verify: 
   return { intent, verify: parsed.verify }
 }
 
-// By default, refine the raw intent into a spec via the interactive grill before
+// By default, refine the raw intent into a spec via the interactive sharpen step before
 // queuing. Skipped with --raw, or when stdin isn't a TTY (piped/non-interactive
-// — no human to grill). Returns null only if the human cancels (queue nothing).
-async function maybeGrill(
+// — no human to sharpen with). Returns null only if the human cancels (queue nothing).
+async function maybeSharpen(
   root: string,
   agent: Agent,
   hooks: Hooks,
@@ -215,7 +215,7 @@ async function maybeGrill(
   if (raw || !process.stdin.isTTY) {
     return base
   }
-  return grill({ root, agent, hooks, intent: base.intent, verify: base.verify })
+  return sharpen({ root, agent, hooks, intent: base.intent, verify: base.verify })
 }
 
 type AlertState = 'blocked' | 'needs-input' | 'done'
@@ -254,16 +254,16 @@ async function main(): Promise<number> {
       return 1
     }
     const ctx = await loadContext(process.cwd())
-    // No grill (raw or piped): queue the intent directly.
+    // No sharpen step (raw or piped): queue the intent directly.
     if (raw || !process.stdin.isTTY) {
       const task = await addTask(ctx, base.intent, base.verify)
       log.ok(`queued ${task.id}${base.verify ? ` (verify: ${base.verify})` : ''}`)
       return 0
     }
-    // Grill: create the task up-front (status 'grilling') so it shows in
+    // Sharpen: create the task up-front (status 'sharpening') so it shows in
     // `factory status` while you refine it, then flip it to ready — or delete on cancel.
-    const task = await addTask(ctx, base.intent, base.verify, 'grilling')
-    const refined = await grill({
+    const task = await addTask(ctx, base.intent, base.verify, 'sharpening')
+    const refined = await sharpen({
       root: ctx.root,
       agent: ctx.agents.implementer,
       hooks: ctx.config.hooks,
@@ -272,10 +272,10 @@ async function main(): Promise<number> {
     })
     if (!refined) {
       await deleteTask(task)
-      log.info('grill cancelled — nothing queued')
+      log.info('sharpen cancelled — nothing queued')
       return 0
     }
-    await readyGrilledTask(task, refined.intent, refined.verify)
+    await readySharpenedTask(task, refined.intent, refined.verify)
     log.ok(`queued ${task.id}${refined.verify ? ` (verify: ${refined.verify})` : ''}`)
     return 0
   }
@@ -290,7 +290,7 @@ async function main(): Promise<number> {
         log.fail('backlog add needs an intent (argument, editor, or stdin)')
         return 1
       }
-      const refined = await maybeGrill(
+      const refined = await maybeSharpen(
         ctx.mainRoot,
         ctx.agents.implementer,
         ctx.config.hooks,
@@ -298,7 +298,7 @@ async function main(): Promise<number> {
         raw
       )
       if (!refined) {
-        log.info('grill cancelled — nothing queued')
+        log.info('sharpen cancelled — nothing queued')
         return 0
       }
       const entry = await addBacklog(ctx, refined.intent, refined.verify)

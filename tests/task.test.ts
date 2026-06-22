@@ -105,6 +105,20 @@ describe('task state transitions', () => {
     expect(next?.meta.resumeNote).toContain('interrupted reviewing stage')
   })
 
+  test('interactive sharpening tasks are not reclaimed as stranded work', async () => {
+    const ctx = await workContext()
+    await addTask(ctx, 'Still sharpening', null, 'sharpening')
+
+    expect(await nextRunnable(ctx, 2_000)).toBeNull()
+  })
+
+  test('legacy interactive grilling tasks are not reclaimed as stranded work', async () => {
+    const ctx = await workContext()
+    await addTask(ctx, 'Still grilling', null, 'grilling')
+
+    expect(await nextRunnable(ctx, 2_000)).toBeNull()
+  })
+
   test('due retries resume as auto-retry', async () => {
     const ctx = await workContext()
     const task = await addTask(ctx, 'Retry now', null)

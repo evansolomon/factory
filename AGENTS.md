@@ -87,8 +87,8 @@ its own agents must follow when the repo is the target.
 - `agents.ts` — the codex/claude headless adapters.
 - `config.ts` · `task.ts` · `git.ts` · `exec.ts` · `log.ts` — config cascade, task
   state, git, subprocess, output.
-- `lessons.ts` · `metrics.ts` · `evals.ts` · `hooks.ts` · `grill.ts` · `view.ts` ·
+- `lessons.ts` · `metrics.ts` · `evals.ts` · `hooks.ts` · `sharpen.ts` · `view.ts` ·
   `backlog.ts` · `editor.ts` — meta loop, telemetry, eval capture, lifecycle hooks,
-  intake grill, rendering, backlog, editor compose.
+  intent sharpening, rendering, backlog, editor compose.
 
 Full file-by-file map and design rationale: `README.md`.
