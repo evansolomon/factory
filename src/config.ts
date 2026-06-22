@@ -110,6 +110,13 @@ const ConfigSchema = z.object({
   // postmortem.md for triage) and distills a generalizable lesson candidate.
   // Best-effort; false falls back to a raw block-reason candidate.
   postmortem: z.boolean().default(true),
+  // On a verify failure, run a full-access "doctor" that classifies the failure
+  // (code defect vs environment/setup vs flake) and, for environment problems
+  // (missing deps, an uninstalled tool, an un-run build/codegen step, a service
+  // that isn't up), repairs the environment in place and re-runs — so the loop
+  // self-unblocks instead of burning the fix budget re-implementing code that was
+  // never the problem. false = a verify failure always routes to the code-fix loop.
+  remediate: z.boolean().default(true),
   // What to do when a task completes (opt-in; a full-permission agent runs it).
   //   { "skill": "name" }  → run that skill
   //   { "policy": "text" } → follow a free-text delivery policy

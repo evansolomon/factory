@@ -105,10 +105,15 @@ task.md (intent) + meta.json (verify) [+ answers.md on resume]
   │  8. CONSOLIDATE   one judge dedupes, drops nits,        (read-only)
   │                   resolves conflicts by priority, marks
   │                   blocking vs advisory → one verdict + fix list
-  │  9. VERIFY        run the task's verify command for real
-  └──── consolidated FAIL / verify fail → auto-fix; a convergence judge keeps
+  │  9. VERIFY        run the task's verify command for real;       (full-access
+  │                   on failure a doctor classifies it and          remediation)
+  │                   REPAIRS the environment in place (install
+  │                   deps/tools, build, start a service) then
+  │                   re-runs — code defects fall through to auto-fix
+  └──── consolidated FAIL / real code defect → auto-fix; a convergence judge keeps
         iterating while each failure is NEW, stops when it's going in circles
-        (config.retries is the hard-cap backstop), then block / set-aside
+        (config.retries is the hard-cap backstop), then block / set-aside.
+        A flake or an environment problem it can't fix → set-aside (backoff)
         │ (pass)
   commit → 10. SHIP (if configured) full-perms agent: MR/PR, CI, review
         │
@@ -206,8 +211,20 @@ going: *CONTINUE* while failures are genuinely new ground (fixing one thing
 surfacing the next real problem is progress), *STUCK* when the same root cause
 recurs or it's oscillating among problems already seen. `config.retries` (default
 10) is only the hard-cap backstop. The history also feeds the next fixer ("these
-approaches already failed — don't repeat them"). When the loop does give up, what
-happens next depends on the gate:
+approaches already failed — don't repeat them").
+
+A **verify** failure is triaged before any of that. A full-access doctor
+(`remediate` config, default on) reads the failure and classifies it: a genuine
+**code** defect feeds the auto-fix loop above; a **flake** or an **environment**
+problem it can't fix is set aside to back off; an **environment/setup** problem it
+*can* fix (missing deps, an uninstalled tool — verify exits 127 — an un-run build,
+a service that's down) it repairs in place — installing, building, starting
+services — then re-runs verify, without touching your code or spending a fix
+attempt. This is why a fresh worktree that's missing `node_modules` self-heals
+instead of burning the whole fix budget re-implementing code that was never the
+problem. It is allowed env-only changes; it never edits source or weakens a check
+to make verify pass. When the loop does give up, what happens next depends on the
+gate:
 
 - **verify / ship** (transient — env, CI, network) → the task is set **aside**
   (status `retrying`, no attention event) and the loop **auto-resumes** it on a
@@ -314,6 +331,14 @@ Fields:
 - **`security`** — run a dedicated red-team security gate on the implemented diff
   (every task, both paths), feeding the same auto-fix retry loop as the review
   gate (default `true`; `false` skips it).
+- **`remediate`** — on a verify failure, run a **full-access doctor** that
+  classifies the failure and, for **environment/setup** problems (missing deps, an
+  uninstalled tool, an un-run build/codegen step, a service that's down), repairs
+  the environment in place and re-runs — so the loop self-unblocks instead of
+  burning the fix budget re-implementing code that was never the problem. Code
+  defects still route to the auto-fix loop; flakes and unfixable env problems are
+  set aside (default `true`; `false` sends every verify failure to the auto-fix
+  loop). It makes env-only changes; it never edits source or weakens a check.
 - **`ux`** — the **UI/UX lenses** for user-facing work (default `true`; `false`
   disables). Auto-gated per task — triage flags a task user-facing, and the review
   gate also fires whenever the diff touches UI files (`.tsx/.jsx/.vue/.svelte/.css/
@@ -460,6 +485,7 @@ or jump-target behavior you want.
   converge.md            # latest convergence-judge output
   failures.jsonl         # persisted gate-failure history
   verify.log             # latest verify output
+  remediate[.N].md       # verify-failure doctor: diagnosis + env repair, when it runs
   proof.md               # pass proof written before commit
   postmortem.md          # blocked-task diagnosis, when enabled
   ship.md                # delivery output, when onComplete is configured
@@ -540,8 +566,10 @@ The quantitative meta loop — "manage by numbers." Every task pass writes one r
 to a repo-level SQLite db (`metrics.db`, keyed by the main worktree like the
 backlog), plus a child row per pipeline stage. `factory report` rolls it up:
 **first-pass yield** (done with no retries, of implement attempts),
-**escalation rate**, **blocked rate**, **retry success**, cost (median/total
-tokens), median cycle time, and where the tokens and wall-clock time go by stage.
+**escalation rate**, **blocked rate**, **retry success**, a token-cost proxy
+(total input tokens, total output tokens, combined total tokens, and median total
+tokens per task), median cycle time, and one per-stage table combining token usage
+with wall-clock time.
 These are the numbers that tell you whether the loop is trustworthy enough to
 step back from (auto-ship, or a future dispatcher) and which stage to tune when it
 isn't.

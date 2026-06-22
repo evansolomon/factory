@@ -13,6 +13,7 @@ const config: Config = {
   plansDir: null,
   captureEvals: false,
   postmortem: false,
+  remediate: true,
   onComplete: null,
   hooks: {},
   agents: {

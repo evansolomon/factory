@@ -380,6 +380,74 @@ function durMs(ms: number | null): string {
   return h < 24 ? `${h}h${m % 60}m` : `${Math.floor(h / 24)}d`
 }
 
+export function formatReport(report: Report): string[] {
+  const lines: string[] = []
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
+  const field = (name: string, val: string, note = '') =>
+    lines.push(`  ${name.padEnd(16)} ${val}${note ? `   ${note}` : ''}`)
+  const totalTokens = report.inputTokensTotal + report.outputTokensTotal
+
+  lines.push(`factory report — ${plural(report.tasks, 'task')} · ${plural(report.runs, 'run')}`)
+  lines.push('')
+  field(
+    'first-pass yield',
+    pctOf(report.firstPassYield),
+    'done w/ no retries, of implement attempts'
+  )
+  field('escalation rate', pctOf(report.escalationRate), plural(report.escalations, 'pause'))
+  field('blocked rate', pctOf(report.blockedRate))
+  field(
+    'retry success',
+    pctOf(report.retrySuccess),
+    `of ${plural(report.retryRuns, 'retried run')}`
+  )
+  lines.push('')
+  field(
+    'cost',
+    `input ${tokens(report.inputTokensTotal)} tok · output ${tokens(
+      report.outputTokensTotal
+    )} tok · total ${tokens(totalTokens)} tok · median ${tokens(
+      report.tokensMedianPerTask
+    )} tok/task`
+  )
+  field('cycle time', `median ${durMs(report.cycleMedianMs)}`)
+  lines.push('')
+  lines.push(`  outcomes:  ${report.outcomes.map((o) => `${o.outcome} ${o.count}`).join(' · ')}`)
+
+  if (report.stages.length > 0) {
+    const stageTokens = report.stages.reduce((sum, s) => sum + s.totalTokens, 0)
+    const stageMs = report.stages.reduce((sum, s) => sum + s.ms, 0)
+    const stageWidth = 14
+    const tokenWidth = 7
+    const shareWidth = 7
+
+    lines.push('')
+    lines.push('  stage cost and time:')
+    lines.push(
+      `    ${'stage'.padEnd(stageWidth)} ${'input'.padStart(tokenWidth)} ${'output'.padStart(
+        tokenWidth
+      )} ${'total'.padStart(tokenWidth)} ${'token %'.padStart(shareWidth)} ${'time'.padStart(
+        tokenWidth
+      )} ${'time %'.padStart(shareWidth)}`
+    )
+    for (const s of report.stages) {
+      lines.push(
+        `    ${s.stage.padEnd(stageWidth)} ${tokens(s.inputTokens).padStart(
+          tokenWidth
+        )} ${tokens(s.outputTokens).padStart(tokenWidth)} ${tokens(s.totalTokens).padStart(
+          tokenWidth
+        )} ${pctOf(stageTokens > 0 ? s.totalTokens / stageTokens : null).padStart(
+          shareWidth
+        )} ${durMs(s.ms).padStart(tokenWidth)} ${pctOf(
+          stageMs > 0 ? s.ms / stageMs : null
+        ).padStart(shareWidth)}`
+      )
+    }
+  }
+
+  return lines
+}
+
 // The telemetry roll-up across all the repo's tasks (the "manage by numbers"
 // view). Reads the repo-level metrics db; degrades gracefully if it's missing or
 // unreadable — never the thing that fails.
@@ -400,37 +468,7 @@ export function printReport(ctx: RepoContext): void {
     log.info('no telemetry yet — run some tasks first')
     return
   }
-  const r = report
-  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
-  const field = (name: string, val: string, note = '') =>
-    log.log(`  ${name.padEnd(16)} ${val}${note ? `   ${note}` : ''}`)
-
-  log.log(`factory report — ${plural(r.tasks, 'task')} · ${plural(r.runs, 'run')}`)
-  log.log('')
-  field('first-pass yield', pctOf(r.firstPassYield), 'done w/ no retries, of implement attempts')
-  field('escalation rate', pctOf(r.escalationRate), plural(r.escalations, 'pause'))
-  field('blocked rate', pctOf(r.blockedRate))
-  field('retry success', pctOf(r.retrySuccess), `of ${plural(r.retryRuns, 'retried run')}`)
-  log.log('')
-  field('cost', `median ${tokens(r.tokensMedianPerTask)}/task · total ${tokens(r.tokensTotal)} tok`)
-  field('cycle time', `median ${durMs(r.cycleMedianMs)}`)
-  log.log('')
-  log.log(`  outcomes:  ${r.outcomes.map((o) => `${o.outcome} ${o.count}`).join(' · ')}`)
-  if (r.stageTokens.length > 0) {
-    log.log('')
-    log.log('  tokens by stage:')
-    for (const s of r.stageTokens) {
-      const share = r.tokensTotal > 0 ? Math.round((s.tokens / r.tokensTotal) * 100) : 0
-      log.log(`    ${s.stage.padEnd(12)} ${tokens(s.tokens).padStart(7)}  ${share}%`)
-    }
-  }
-  if (r.stageMs.length > 0) {
-    const totalMs = r.stageMs.reduce((sum, s) => sum + s.ms, 0)
-    log.log('')
-    log.log('  time by stage:')
-    for (const s of r.stageMs) {
-      const share = totalMs > 0 ? Math.round((s.ms / totalMs) * 100) : 0
-      log.log(`    ${s.stage.padEnd(12)} ${durMs(s.ms).padStart(7)}  ${share}%`)
-    }
+  for (const line of formatReport(report)) {
+    log.log(line)
   }
 }

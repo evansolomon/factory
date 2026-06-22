@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   parseConvergenceVerdict,
   parseReconcileDecision,
+  parseRemedy,
   parseReviewVerdict,
   parseShip,
   parseTriage,
@@ -46,6 +47,15 @@ describe('marker parsing', () => {
       ok: false,
       reason: 'remote rejected',
     })
+  })
+
+  test('parses the remedy verdict only from the final line', () => {
+    expect(parseRemedy('ran bun install\nSUMMARY: deps were missing\nVERDICT: ENV-FIXED')).toBe(
+      'ENV-FIXED'
+    )
+    expect(parseRemedy('SUMMARY: assertion failed\nVERDICT: CODE')).toBe('CODE')
+    expect(parseRemedy('VERDICT: ENV-FIXED\ntrailing note')).toBeNull()
+    expect(parseRemedy('VERDICT: MAYBE')).toBeNull()
   })
 
   test('parses reconcile only from the first nonempty line', () => {

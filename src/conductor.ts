@@ -9,6 +9,7 @@ import { log } from './log.ts'
 import {
   parseConvergenceVerdict,
   parseReconcileDecision,
+  parseRemedy,
   parseReviewVerdict,
   parseShip,
   parseTriage,
@@ -27,6 +28,7 @@ import {
   planRiskPrompt,
   postmortemPrompt,
   reconcilePrompt,
+  remediatePrompt,
   researchPrompt,
   reviewPrompt,
   revisePrompt,
@@ -380,6 +382,101 @@ async function assessFailure(
   failures.push(entry)
   await appendFailure(task, entry)
   return stuck ? 'stop' : 'continue'
+}
+
+// How many rounds of automated ENVIRONMENT remediation a single verify gate will
+// attempt before giving up. Env fixes (install deps, build, start a service) take
+// one or two rounds; this caps a doctor that keeps claiming a fix while verify
+// still fails the same way.
+const REMEDIATE_CAP = 3
+
+// The verdict from running the verify gate (with self-remediation):
+//   pass  — verify succeeded (possibly after an environment repair).
+//   code  — a real code/test defect → the code-fix loop (the historical path).
+//   aside — a flake or an environment problem remediation couldn't fix → back off
+//           and auto-retry; don't churn code over it.
+type VerifyVerdict =
+  | { kind: 'pass' }
+  | { kind: 'code'; detail: string }
+  | { kind: 'aside'; reason: string; detail: string }
+
+// Run the task's verify command, with autonomous self-remediation. On failure a
+// full-access "doctor" classifies the failure; when it's an ENVIRONMENT/setup
+// problem (missing deps, an uninstalled tool — verify exits 127 — an un-run build,
+// a service that's down) it repairs the environment in place and we re-run, WITHOUT
+// touching the code or spending a code-fix attempt. A genuine code defect routes to
+// the code-fix loop; a flake or an unfixable environment problem routes to the
+// backoff retry. This is why a missing `node_modules` self-heals instead of burning
+// the whole fix budget re-implementing code that was never the problem.
+async function verifyGate(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  intent: string,
+  verify: string
+): Promise<VerifyVerdict> {
+  const remedies: string[] = []
+  while (true) {
+    await setStatus(task, 'verifying')
+    await progress(ctx, task, 'verify', `verify — ${verify}`)
+    const vstart = Date.now()
+    const result = await withHeartbeat(
+      'verify',
+      vstart,
+      run(['bash', '-lc', verify], { cwd: ctx.root })
+    )
+    const vms = Date.now() - vstart
+    meter.stages.push({ stage: 'verify', agent: '-', inTok: 0, outTok: 0, ms: vms })
+    log.done(`verify ${fmtSecs(vms)}`)
+    await writeArtifact(task, 'verify.log', `$ ${verify}\n\n${result.stdout}\n${result.stderr}`)
+    if (result.code === 0) {
+      return { kind: 'pass' }
+    }
+    const detail = `Verify \`${verify}\` failed (exit ${result.code}):\n${`${result.stdout}\n${result.stderr}`.slice(-4000)}`
+    if (!ctx.config.remediate || remedies.length >= REMEDIATE_CAP) {
+      // Remediation disabled or exhausted: fall back to the historical behavior —
+      // treat the failure as a code problem and let the code-fix loop have it.
+      return { kind: 'code', detail }
+    }
+    // Diagnose, and (for environment problems) repair — full access so it can
+    // install deps/tools, build, or start services.
+    const n = remedies.length + 1
+    await progress(
+      ctx,
+      task,
+      'remediate',
+      `remediate — diagnosing verify failure (${n}/${REMEDIATE_CAP})`
+    )
+    const out = await agentStep(
+      meter,
+      'remediate',
+      agentLabel(ctx.agents.implementer),
+      runAgent(ctx.agents.implementer, {
+        root: ctx.root,
+        prompt: remediatePrompt(intent, verify, detail, remedies),
+        access: 'full',
+        outFile: `${task.dir}/remediate${n > 1 ? `.${n}` : ''}.md`,
+      })
+    )
+    const summary = /SUMMARY:\s*(.+)/i.exec(out)?.[1]?.trim() || firstLine(out).slice(0, 200)
+    switch (parseRemedy(out)) {
+      case 'ENV-FIXED':
+        remedies.push(summary)
+        continue // re-run verify against the repaired environment
+      case 'FLAKE':
+        return { kind: 'aside', reason: 'verify hit a transient/external flake', detail }
+      case 'ENV-BLOCKED':
+        return {
+          kind: 'aside',
+          reason: `verify blocked on an environment problem: ${summary}`,
+          detail,
+        }
+      default:
+        // CODE or an unparseable verdict → the code-fix loop (preserves the prior
+        // default that a verify failure means the code needs fixing).
+        return { kind: 'code', detail }
+    }
+  }
 }
 
 type PlanResult = { plan: string } | { pause: TaskOutcome }
@@ -877,22 +974,13 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       )
     }
 
-    // VERIFY — actually run the task's verification command.
+    // VERIFY — run the task's verification command, with self-remediation: an
+    // environment/setup failure is repaired in place and re-run (no code churn);
+    // only a real code defect feeds the code-fix loop, and a flake / unfixable env
+    // problem goes straight to the backoff retry instead of burning fix attempts.
     if (verify) {
-      await setStatus(task, 'verifying')
-      await progress(ctx, task, 'verify', `verify — ${verify}`)
-      const vstart = Date.now()
-      const result = await withHeartbeat(
-        'verify',
-        vstart,
-        run(['bash', '-lc', verify], { cwd: ctx.root })
-      )
-      const vms = Date.now() - vstart
-      meter.stages.push({ stage: 'verify', agent: '-', inTok: 0, outTok: 0, ms: vms })
-      log.done(`verify ${fmtSecs(vms)}`)
-      await writeArtifact(task, 'verify.log', `$ ${verify}\n\n${result.stdout}\n${result.stderr}`)
-      if (result.code !== 0) {
-        const detail = `Verify \`${verify}\` failed (exit ${result.code}):\n${`${result.stdout}\n${result.stderr}`.slice(-4000)}`
+      const v = await verifyGate(ctx, task, meter, intent, verify)
+      if (v.kind === 'code') {
         const action = await assessFailure(
           ctx,
           task,
@@ -902,7 +990,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           attempt,
           hardCap,
           'verify',
-          detail
+          v.detail
         )
         if (action === 'continue') {
           attempt++
@@ -913,11 +1001,27 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           task,
           meter,
           stats,
-          `verify exited ${result.code} after ${attempt + 1} attempts`,
-          `${result.stdout}\n${result.stderr}`.trim()
+          `verify failed after ${attempt + 1} attempts`,
+          v.detail
         )
       }
-      // Passed verify — first try iff no prior fix attempts.
+      if (v.kind === 'aside') {
+        // Flake or an environment problem remediation couldn't fix: don't re-implement
+        // code over it. Record the failure to history (so it's visible and feeds the
+        // next pass) and hand to the backoff auto-retry — env issues like a service
+        // that isn't up yet often clear on their own; truly stuck ones block at the cap.
+        const entry: Failure = {
+          attempt,
+          gate: 'verify',
+          summary: firstLine(v.detail).slice(0, 200),
+          detail: v.detail,
+        }
+        failures.push(entry)
+        await appendFailure(task, entry)
+        return setAside(ctx, task, meter, stats, v.reason, v.detail)
+      }
+      // Passed verify — first try iff no prior code-fix attempts (an environment
+      // remediation isn't a code fix, so it doesn't disqualify first-try).
       stats.verifyFirstTry = attempt === 0
     } else {
       log.warn(`${task.id}: no verify command — skipping verification gate`)

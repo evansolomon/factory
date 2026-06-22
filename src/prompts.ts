@@ -356,6 +356,49 @@ ${diff}
 \`\`\`${riskBlock(riskAssessment)}${uxBuildNote(userFacing)}`
 }
 
+// The verify-gate doctor: runs with FULL access when the verify command fails.
+// It decides what KIND of failure this is and, for environment/setup problems,
+// repairs the environment in place so verify can actually run — it does NOT edit
+// the project's code or tests to make verify pass (that's the fixer's job). This is
+// what lets the loop self-unblock from "tool not installed / deps not installed /
+// build not run" instead of blindly re-implementing code or backing off forever.
+export function remediatePrompt(
+  intent: string,
+  verify: string,
+  failure: string,
+  priorRemedies: string[]
+): string {
+  const tried = priorRemedies.length
+    ? `\n\n## Environment fixes already applied this gate (verify STILL failed after each — don't just repeat them)\n${priorRemedies.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+    : ''
+  return `You are the verify-gate doctor for an autonomous coding loop. The task below was implemented and the working tree's verify command was run to prove it — but verify FAILED. Diagnose WHY, and when the cause is the ENVIRONMENT rather than the code, fix the environment so the check can run. You have full access: install dependencies and tools, run build/codegen/setup steps, start services, set up local config — whatever a developer would do to make this repo's checks runnable.
+
+Classify the failure as exactly one of:
+
+- ENV-FIXED — an ENVIRONMENT/SETUP problem (missing dependencies, an uninstalled tool/binary — e.g. "command not found" / exit 127, a build or codegen step that hasn't run, a service/fixture that isn't up, missing local config) that you have NOW fixed. Apply the fix, then RE-RUN the verify command yourself to confirm it gets past the environment problem.
+- ENV-BLOCKED — an environment/setup problem you could NOT fix autonomously (needs credentials, network you lack, a human decision, or infrastructure you can't provision).
+- CODE — a genuine defect in the code or tests under verification (an assertion failure, a type error, a lint violation, a real bug). The environment is fine; the code must change. Do NOT change any code yourself — report CODE and the fixer will handle it.
+- FLAKE — a transient or external failure unrelated to this change (a network blip, a race, a timeout, a port already in use). Retrying later will likely pass.
+
+Rules:
+- NEVER edit the project's source code or tests, and never weaken, skip, or hard-code around a check to make verify pass. Environment-only changes are in scope; changing what is being tested is not.
+- When torn between CODE and ENV, prefer CODE — re-implementing is safer than masking a real defect with environment churn.
+- Be economical: if it's plainly a code/test failure, don't touch the environment — just report CODE.
+
+## Task
+${intent}
+
+## Verify command
+\`${verify}\`
+
+## Verify failure
+${failure}${tried}
+
+Output, as the FINAL two lines:
+SUMMARY: <one sentence: the root cause and, if you fixed it, what you changed>
+VERDICT: ENV-FIXED | ENV-BLOCKED | CODE | FLAKE`
+}
+
 // The convergence judge: after each failed fix attempt, decides whether the loop
 // is making progress (each failure is genuinely new ground) or going in circles
 // (the same root cause recurring / oscillating). Replaces a blind retry count —

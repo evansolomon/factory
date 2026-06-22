@@ -150,6 +150,14 @@ export function recordRun(path: string, record: RunRecord): void {
   }
 }
 
+export type ReportStage = {
+  stage: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  ms: number
+}
+
 export type Report = {
   tasks: number
   runs: number
@@ -161,10 +169,10 @@ export type Report = {
   blockedRate: number | null
   retryRuns: number
   retrySuccess: number | null
-  tokensTotal: number
+  inputTokensTotal: number
+  outputTokensTotal: number
   tokensMedianPerTask: number | null
-  stageTokens: { stage: string; tokens: number }[]
-  stageMs: { stage: string; ms: number }[]
+  stages: ReportStage[]
   cycleMedianMs: number | null
 }
 
@@ -212,20 +220,24 @@ export function readReport(path: string): Report | null {
     const blockedRuns = count("SELECT COUNT(*) c FROM runs WHERE outcome='blocked'")
     const retryRuns = count('SELECT COUNT(*) c FROM runs WHERE retries>0')
     const retryDone = count("SELECT COUNT(*) c FROM runs WHERE retries>0 AND outcome='done'")
-    const tokensTotal = count('SELECT COALESCE(SUM(in_tokens+out_tokens),0) c FROM runs')
+    const inputTokensTotal = count('SELECT COALESCE(SUM(in_tokens),0) c FROM runs')
+    const outputTokensTotal = count('SELECT COALESCE(SUM(out_tokens),0) c FROM runs')
 
     const perTask = db
       .query<{ t: number }, []>('SELECT SUM(in_tokens+out_tokens) t FROM runs GROUP BY task')
       .all()
       .map((r) => r.t)
-    const stageTokens = db
-      .query<{ stage: string; tokens: number }, []>(
-        'SELECT stage, SUM(in_tokens+out_tokens) tokens FROM stages GROUP BY stage ORDER BY tokens DESC'
-      )
-      .all()
-    const stageMs = db
-      .query<{ stage: string; ms: number }, []>(
-        'SELECT stage, SUM(ms) ms FROM stages GROUP BY stage ORDER BY ms DESC'
+    const stages = db
+      .query<ReportStage, []>(
+        `SELECT
+           stage,
+           COALESCE(SUM(in_tokens), 0) inputTokens,
+           COALESCE(SUM(out_tokens), 0) outputTokens,
+           COALESCE(SUM(in_tokens + out_tokens), 0) totalTokens,
+           COALESCE(SUM(ms), 0) ms
+         FROM stages
+         GROUP BY stage
+         ORDER BY totalTokens DESC, stage ASC`
       )
       .all()
     const cycles = db
@@ -247,10 +259,10 @@ export function readReport(path: string): Report | null {
       blockedRate: ratio(blockedRuns, implementRuns),
       retryRuns,
       retrySuccess: ratio(retryDone, retryRuns),
-      tokensTotal,
+      inputTokensTotal,
+      outputTokensTotal,
       tokensMedianPerTask: median(perTask),
-      stageTokens,
-      stageMs,
+      stages,
       cycleMedianMs: median(cycles),
     }
   } finally {
