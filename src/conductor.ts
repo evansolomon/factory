@@ -18,16 +18,19 @@ import {
   consolidatePrompt,
   convergePrompt,
   critiquePrompt,
+  deploySafetyPrompt,
   fixPrompt,
   implementPrompt,
   type Labeled,
   namePrompt,
   planPrompt,
+  planRiskPrompt,
   postmortemPrompt,
   reconcilePrompt,
   researchPrompt,
   reviewPrompt,
   revisePrompt,
+  riskReviewPrompt,
   securityPrompt,
   selectPrompt,
   shipPrompt,
@@ -168,6 +171,11 @@ function slugify(text: string): string {
     .slice(0, 60)
     .replace(/-+$/g, '')
   return slug.length > 0 ? slug : 'plan'
+}
+
+async function readArtifact(task: Task, name: string): Promise<string | null> {
+  const file = Bun.file(`${task.dir}/${name}`)
+  return (await file.exists()) ? (await file.text()).trim() : null
 }
 
 // A model id (e.g. "grok-4", "anthropic/claude-x") made filesystem/label-safe.
@@ -557,8 +565,10 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   const resumeKind = task.meta.resumeKind
   let resumeNote: string | null = null
   let finalPlan: string
+  let riskAssessment: string | null = null
   if (resuming) {
     finalPlan = (await readPlan(task)) ?? intent
+    riskAssessment = await readArtifact(task, 'risk.plan.md')
     resumeNote = task.meta.resumeNote
     task.meta.resume = false
     task.meta.resumeNote = null
@@ -613,6 +623,21 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       finalPlan = planned.plan
     }
 
+    if (!trivial) {
+      await progress(ctx, task, 'risk', 'risk — scoring plan risk')
+      riskAssessment = await agentStep(
+        meter,
+        'risk',
+        agentLabel(ctx.agents.reviewer),
+        runAgent(ctx.agents.reviewer, {
+          root: ctx.root,
+          prompt: planRiskPrompt(intent, finalPlan),
+          access: 'read',
+          outFile: `${task.dir}/risk.plan.md`,
+        })
+      )
+    }
+
     // Write the clean final plan to the committed plans dir under a descriptive,
     // AI-summarized, number-free, collision-safe name. Skipped on the fast path.
     if (ctx.plansDir && !trivial) {
@@ -665,7 +690,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   // A note-less resume is a transient retry: re-run the gates on the existing diff
   // but DON'T re-implement (a verify env-flake mustn't churn code) — so jump to the
   // hard cap, letting any failure escalate at once (verify→backoff retry,
-  // review/security→block). A note means the human wants a change, so keep iterating.
+  // review-panel→block). A note means the human wants a change, so keep iterating.
   if (skipImplement && resumeKind === 'auto-retry' && !resumeNote) {
     attempt = hardCap
   }
@@ -705,9 +730,10 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             failureCtx,
             priorSummaries,
             await worktreeDiff(ctx.root),
-            userFacing
+            userFacing,
+            riskAssessment
           )
-        : implementPrompt(intent, finalPlan, verify, userFacing)
+        : implementPrompt(intent, finalPlan, verify, userFacing, riskAssessment)
       await agentStep(
         meter,
         'implement',
@@ -754,6 +780,23 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         prompt: securityPrompt(intent, finalPlan, diff, baselineHasChanges ? baselineDiff : null),
       })
     }
+    panel.push(
+      {
+        key: 'risk',
+        label: 'risk',
+        prompt: riskReviewPrompt(intent, finalPlan, diff, baselineHasChanges ? baselineDiff : null),
+      },
+      {
+        key: 'deploy',
+        label: 'deploy safety',
+        prompt: deploySafetyPrompt(
+          intent,
+          finalPlan,
+          diff,
+          baselineHasChanges ? baselineDiff : null
+        ),
+      }
+    )
     if (ctx.config.ux && (userFacing || uiInDiff(diff))) {
       panel.push({
         key: 'ux',
