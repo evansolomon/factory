@@ -10,9 +10,25 @@ const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`
 // A single in-place status line (the stage heartbeat) can sit at the bottom while
 // permanent lines print above it. We track its plain text so every permanent
 // print clears the line first and redraws it after — otherwise the carriage
-// return leaves the two interleaved. Kept plain (no ANSI) so its length is its
-// on-screen width, which we use to blank it.
+// return leaves the two interleaved. Kept plain (no ANSI) so its length is close
+// to its on-screen width, which we use to blank it.
 let statusText = ''
+
+function fitStatusLine(text: string): string {
+  const columns = process.stdout.columns
+  if (!columns || columns < 2) {
+    return text
+  }
+
+  // Leave one spare column: writing exactly the terminal width can force an
+  // automatic wrap before the next carriage return gets a chance to repaint.
+  const max = columns - 1
+  if (text.length <= max) {
+    return text
+  }
+
+  return `${text.slice(0, Math.max(0, max - 1))}…`
+}
 
 function emit(line: string): void {
   if (statusText) {
@@ -53,9 +69,10 @@ export const log = {
     if (!process.stdout.isTTY) {
       return
     }
-    const pad = Math.max(0, statusText.length - text.length)
-    process.stdout.write(`\r${text}${' '.repeat(pad)}`)
-    statusText = text
+    const fitted = fitStatusLine(text)
+    const pad = Math.max(0, statusText.length - fitted.length)
+    process.stdout.write(`\r${fitted}${' '.repeat(pad)}`)
+    statusText = fitted
   },
   clearStatus(): void {
     if (!statusText) {
