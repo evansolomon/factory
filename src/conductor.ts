@@ -62,6 +62,7 @@ import {
   setStatus,
   type Task,
   writeArtifact,
+  writeLiveMeter,
 } from './task.ts'
 
 export type TaskOutcome =
@@ -88,9 +89,43 @@ function fmtTok(n: number): string {
 
 // Per-task running tally of tokens + wall time, plus a per-stage breakdown that
 // feeds the telemetry record (one StageStat per agent call + the verify run).
-type Meter = { inTok: number; outTok: number; startedAt: number; stages: StageStat[] }
-function newMeter(): Meter {
-  return { inTok: 0, outTok: 0, startedAt: Date.now(), stages: [] }
+type Meter = {
+  task: Task
+  inTok: number
+  outTok: number
+  startedAt: number
+  stages: StageStat[]
+  writeSeq: Promise<void>
+}
+function newMeter(task: Task): Meter {
+  return {
+    task,
+    inTok: 0,
+    outTok: 0,
+    startedAt: Date.now(),
+    stages: [],
+    writeSeq: Promise.resolve(),
+  }
+}
+
+async function persistLiveMeter(meter: Meter): Promise<void> {
+  const snapshot = {
+    startedAt: new Date(meter.startedAt).toISOString(),
+    updatedAt: new Date().toISOString(),
+    inputTokens: meter.inTok,
+    outputTokens: meter.outTok,
+    stages: meter.stages.map((s) => ({ ...s })),
+  }
+  const write = meter.writeSeq.then(async () => {
+    try {
+      await writeLiveMeter(meter.task, snapshot)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : err
+      log.warn(`live meter failed for ${meter.task.id}: ${msg}`)
+    }
+  })
+  meter.writeSeq = write
+  await write
 }
 
 // A long stage is a single await with no output until it finishes, so it can
@@ -160,6 +195,7 @@ async function agentStep(
     outTok: usage.outputTokens,
     ms,
   })
+  await persistLiveMeter(meter)
   log.done(
     `${display} ${fmtSecs(ms)} · ${fmtTok(usage.inputTokens)}→${fmtTok(usage.outputTokens)} tok`
   )
@@ -438,6 +474,7 @@ async function verifyGate(
     )
     const vms = Date.now() - vstart
     meter.stages.push({ stage: 'verify', agent: '-', inTok: 0, outTok: 0, ms: vms })
+    await persistLiveMeter(meter)
     log.done(`verify ${fmtSecs(vms)}`)
     await writeArtifact(task, 'verify.log', `$ ${verify}\n\n${result.stdout}\n${result.stderr}`)
     if (result.code === 0) {
@@ -774,7 +811,8 @@ async function runSharpenStage(
 export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome> {
   let intent = await readIntent(task)
   let verify = task.meta.verify
-  const meter = newMeter()
+  const meter = newMeter(task)
+  await persistLiveMeter(meter)
   const lead = ctx.agents.implementer
   const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null }
 

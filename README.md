@@ -491,6 +491,7 @@ or jump-target behavior you want.
 <state-dir>/tasks/<slug>[-N]/
   task.md                # human-owned intent/spec
   meta.json              # machine-owned status, verify, sharpen, timestamps, resume/retry state
+  meter.json             # live token/stage counts for the current pass
   sharpen.md             # run-loop intent sharpening output
   sharpen.review.md      # reviewer gate for the sharpened spec
   sharpen.final.md       # final sharpen synthesis, when needed

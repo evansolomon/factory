@@ -7,7 +7,14 @@ import { configSources, globalConfigFile, type RepoContext, type WorkContext } f
 import { currentBranch } from './git.ts'
 import { log } from './log.ts'
 import { type Report, readReport } from './metrics.ts'
-import { findTask, latestTask, loadTasks, type Task } from './task.ts'
+import {
+  findTask,
+  type LiveMeter,
+  latestTask,
+  loadTasks,
+  readLiveMeter,
+  type Task,
+} from './task.ts'
 
 // Show the effective (merged) config for this worktree and which files set it,
 // so the cascade is legible — and you know exactly where to edit.
@@ -131,6 +138,16 @@ async function firstQuestion(task: Task): Promise<string> {
   return (line ?? '').replace(/^[-*]\s*/, '')
 }
 
+function liveMeterSummary(meter: LiveMeter | null): string {
+  if (!meter) {
+    return ''
+  }
+  const input = tokens(meter.inputTokens)
+  const output = tokens(meter.outputTokens)
+  const total = tokens(meter.inputTokens + meter.outputTokens)
+  return ` · tokens ${input} in → ${output} out (${total} total)`
+}
+
 // The catch-up dashboard: everything happening in this worktree, derived purely
 // from durable state (meta + questions files), so it's accurate no matter how
 // much scrollback you missed.
@@ -154,8 +171,11 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
   const readyWork = ready.filter((t) => t.meta.sharpen !== 'pending')
 
   for (const t of inProgress) {
+    const meter = await readLiveMeter(t)
+    const meterSummary = liveMeterSummary(meter)
+    const stageAge = age(t.meta.updatedAt)
     log.log('')
-    log.log(`▶ now:   ${t.id} — ${t.meta.status} (${age(t.meta.updatedAt)} in stage)`)
+    log.log(`▶ now:   ${t.id} — ${t.meta.status} (${stageAge} in stage)${meterSummary}`)
   }
 
   if (needsInput.length > 0) {
