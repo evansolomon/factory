@@ -743,15 +743,15 @@ VERDICT: PASS
 VERDICT: FAIL`
 }
 
-// The interactive intake grill (CLI `factory add` / `factory backlog add`). Turns a
+// The interactive sharpen step (CLI `factory add` / `factory backlog add`). Turns a
 // rough human intent into a self-contained, high-confidence GOAL spec (outcome /
 // verify / constraints / boundaries) the autonomous pipeline can implement with
-// no further access to the human. Borrows grilling's recommended-answer
+// no further access to the human. Borrows a recommended-answer interview
 // discipline, but batches questions (each turn is a slow research pass), plus a
 // premise check and a temporal "decide now vs. discover mid-build" lens.
 // `transcript` is the running human/agent
 // conversation; when `finalize`, emit the spec immediately.
-export function grillPrompt(transcript: string, finalize: boolean): string {
+export function sharpenPrompt(transcript: string, finalize: boolean): string {
   // The spec is goal-shaped — the success contract (what's true when done + how
   // it's verified + what must hold + where), NOT an implementation approach;
   // choosing the approach is the planner's job. Shown in both modes so finalize
@@ -791,7 +791,7 @@ QUESTIONS
 
 One question per line; \`|||\` separates the question from your recommended answer. Put any brief grounding context BEFORE the QUESTIONS line. (If instead you are answering a question the human asked you, just reply in prose — no QUESTIONS block.) Never write "SPEC READY" until the spec is genuinely ready.`
 
-  return `You are grilling a rough task intent into a precise spec for an autonomous coding agent that will implement it with NO further access to the human. Your job is to surface and resolve now every decision that would otherwise be guessed or discovered mid-build.
+  return `You are sharpening a rough task intent into a precise spec for an autonomous coding agent that will implement it with NO further access to the human. Your job is to surface and resolve now every decision that would otherwise be guessed or discovered mid-build.
 
 Rules:
 - You have READ access to the repo. Explore it to answer questions yourself instead of asking the human.
@@ -809,3 +809,5 @@ ${ending}
 ## Conversation so far
 ${transcript}`
 }
+
+export const grillPrompt = sharpenPrompt

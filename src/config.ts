@@ -351,7 +351,7 @@ export type RepoContext = {
   config: Config
   backlogDir: string
   metricsPath: string
-  // Normalized role → agent(s); the grill on `backlog add` uses the implementer.
+  // Normalized role → agent(s); sharpening on `backlog add` uses the implementer.
   agents: RoleAgents
 }
 

@@ -20,7 +20,7 @@ export async function openEditor(path: string): Promise<void> {
 
 // Compose text in $EDITOR via a temp file, pre-filled with `seed`. Returns the
 // trimmed contents ('' if left empty). Used for composing a task intent and for
-// multi-line grill replies.
+// multi-line sharpen replies.
 export async function composeInEditor(seed = ''): Promise<string> {
   const tmp = `${tmpdir()}/factory-edit-${Date.now()}.md`
   await Bun.write(tmp, seed ? `${seed}\n` : '')

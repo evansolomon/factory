@@ -415,8 +415,8 @@ Events and their payloads:
 | `loop.idle` | queue drained | `state` |
 
 `attention.state = needs-input` means factory is waiting at an intentional human
-prompt. That includes a queued task paused for answers and the interactive intake
-grill waiting at `you>`.
+prompt. That includes a queued task paused for answers and the interactive
+sharpen step waiting at `you>`.
 
 Each command gets the payload as **JSON on stdin** *and* as flat `FACTORY_*` env
 vars (`FACTORY_EVENT`, `FACTORY_TASK`, `FACTORY_STAGE`, `FACTORY_STATE`, …), runs
@@ -467,7 +467,7 @@ or jump-target behavior you want.
 ```
 
 `task.md` (yours) and `meta.json` (the machine's) are split so `factory` flips
-status without rewriting your prose, except when an interactive grill finishes:
+status without rewriting your prose, except when interactive sharpening finishes:
 then `task.md` is replaced with the refined spec you accepted. Repo-level state
 lives under the main worktree's state dir, shared across linked worktrees:
 `LESSONS.md`, `LESSONS.candidates.md`, `metrics.db`, `eval-candidates/`, and
@@ -490,22 +490,22 @@ and manual correction — that you periodically distill into `LESSONS.md` (e.g. 
 the `/learn` skill) and prune. Keeping them separate keeps the curated file
 high-signal. `factory lessons` prints both.
 
-## Intake grilling (`factory add`)
+## Intent sharpening (`factory add`)
 
 The proactive complement to the reactive reconcile valve: resolve ambiguity at
 the *front door*, before a task ever enters the loop. By default `factory add` and
-`factory backlog add` **grill** the raw intent — an agent (the configured
-`implementer`) interrogates it into a self-contained, high-confidence goal spec,
+`factory backlog add` **sharpen** the raw intent — an agent (the configured
+`implementer`) asks about it until it becomes a self-contained, high-confidence goal spec,
 reading the repo itself to answer what it can. Each agent turn is a slow research
 pass, so it **batches its questions** — then the CLI **walks you through them one
 at a time** (Enter accepts its recommended answer, `/skip` skips one) with no
 per-question latency, and sends all your answers back at once. It's two-way — you
 can `/edit` a long reply or ask it questions back. Once a spec is proposed, **Enter
-queues it** (`/done` works too); the grill also proposes the verify command.
+queues it** (`/done` works too); sharpening also proposes the verify command.
 `/cancel` aborts. `--raw` skips it and queues the intent as-is, and the
-grill auto-skips when the intent is piped (non-interactive — no human to grill).
+sharpen step auto-skips when the intent is piped (non-interactive — no human to ask).
 
-The prompt borrows grilling's one-question-at-a-time discipline plus a few lenses
+The prompt borrows a recommended-answer interview discipline plus a few lenses
 worth stealing from heavier plan-review skills: a **premise challenge** ("is this
 the right problem?"), a **temporal check** ("what must be decided now vs.
 discovered mid-build?"), a **scope lens** (narrow fix vs. an enabling refactor /
@@ -514,19 +514,19 @@ shared capability — "make the change easy, then make the easy change"), and a
 surface) — every decision settled here is one fewer mid-loop escalation later.
 It's grounded by a research-first rule: the agent reads the code and recent git
 history before asking, so questions aren't ones it could have answered itself.
-It's its own `grillPrompt` (not the Claude Code `work-plan` skill): the CLI
+It's its own `sharpenPrompt` (not the Claude Code `work-plan` skill): the CLI
 mediates the turn-taking around headless agent calls, which a one-shot `claude
 -p` can't do.
 
 The richer **`work-plan` skill** (`~/.claude/skills/work-plan`) remains for deep
-grilling inside a Claude Code session; the loop's reconcile valve still handles
+sharpening inside a Claude Code session; the loop's reconcile valve still handles
 any ambiguity that slips through, reactively.
 
 ### Statuses
 
 Tasks usually move through `ready` → `planning` → `implementing` → `reviewing` →
-`verifying` → `shipping` → `done`. Other resting states are `grilling` (interactive
-intake in progress), `needs-input` (paused for you), `retrying` (transient verify
+`verifying` → `shipping` → `done`. Other resting states are `sharpening` (interactive
+intent sharpening in progress), `needs-input` (paused for you), `retrying` (transient verify
 or ship failure waiting on backoff), and `blocked` (human attention required:
 no changes, review-panel failure, convergence stuck, or retry cap exhausted).
 `needs-input`, `retrying`, and `blocked` are set aside; `factory` moves on.
@@ -623,7 +623,7 @@ dollar figure, so there's no consistent number across both models.)
   `needs-input` escalation. Proven end-to-end on real tasks.
 - ✅ **Configurable agents:** planners / implementer / reviewer / delivery roles,
   each `codex`/`claude` (+ optional model).
-- ✅ **Intake grill:** `factory add` / `backlog add` refine the intent into a
+- ✅ **Intent sharpening:** `factory add` / `backlog add` refine the intent into a
   self-contained spec before queuing.
 - ✅ **tmux integration (via hooks):** live-stage window name, semantic attention
   states for `needs-input`/`blocked`/`done`, in-place elapsed heartbeat, and
@@ -638,7 +638,7 @@ dollar figure, so there's no consistent number across both models.)
 - `conductor.ts` — the per-task pipeline + live stage updates
 - `agents.ts` — headless codex/claude wrappers
 - `prompts.ts` — stage prompts (incl. the high-bar reconcile/critique prompts)
-- `grill.ts` — interactive intake grill loop for `factory add` / `backlog add`
+- `sharpen.ts` — interactive intent sharpening loop for `factory add` / `backlog add`
 - `task.ts` — task dir format, status, answers
 - `view.ts` — `status` dashboard + `show` drill-down + `report` rendering
 - `lessons.ts` — LESSONS.md read + candidate capture (the meta loop)

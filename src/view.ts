@@ -78,7 +78,7 @@ export async function printConfig(ctx: WorkContext): Promise<void> {
 }
 
 // Settled/waiting statuses; anything else (planning…verifying, shipping,
-// grilling) is a task actively being worked, so new stages show without a list.
+// sharpening) is a task actively being worked, so new stages show without a list.
 const SETTLED = new Set(['ready', 'needs-input', 'blocked', 'retrying', 'done'])
 
 // Compact "time until" a future ISO instant, for the auto-retry countdown.
