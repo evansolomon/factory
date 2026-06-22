@@ -527,9 +527,10 @@ to a repo-level SQLite db (`metrics.db`, keyed by the main worktree like the
 backlog), plus a child row per pipeline stage. `factory report` rolls it up:
 **first-pass yield** (done with no retries, of implement attempts),
 **escalation rate**, **blocked rate**, **retry success**, cost (median/total
-tokens), median cycle time, and where the tokens go by stage. These are the
-numbers that tell you whether the loop is trustworthy enough to step back from
-(auto-ship, or a future dispatcher) and which stage to tune when it isn't.
+tokens), median cycle time, and where the tokens and wall-clock time go by stage.
+These are the numbers that tell you whether the loop is trustworthy enough to
+step back from (auto-ship, or a future dispatcher) and which stage to tune when it
+isn't.
 
 SQLite, not files, because telemetry is relational (task → passes → stages) and
 read analytically (group-by, per-stage share, medians) — SQL is the simpler tool.

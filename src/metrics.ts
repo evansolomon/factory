@@ -164,6 +164,7 @@ export type Report = {
   tokensTotal: number
   tokensMedianPerTask: number | null
   stageTokens: { stage: string; tokens: number }[]
+  stageMs: { stage: string; ms: number }[]
   cycleMedianMs: number | null
 }
 
@@ -222,6 +223,11 @@ export function readReport(path: string): Report | null {
         'SELECT stage, SUM(in_tokens+out_tokens) tokens FROM stages GROUP BY stage ORDER BY tokens DESC'
       )
       .all()
+    const stageMs = db
+      .query<{ stage: string; ms: number }, []>(
+        'SELECT stage, SUM(ms) ms FROM stages GROUP BY stage ORDER BY ms DESC'
+      )
+      .all()
     const cycles = db
       .query<{ created_at: string; ts: string }, []>(
         "SELECT created_at, ts FROM runs WHERE outcome='done' AND created_at IS NOT NULL"
@@ -244,6 +250,7 @@ export function readReport(path: string): Report | null {
       tokensTotal,
       tokensMedianPerTask: median(perTask),
       stageTokens,
+      stageMs,
       cycleMedianMs: median(cycles),
     }
   } finally {

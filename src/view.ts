@@ -421,4 +421,13 @@ export function printReport(ctx: RepoContext): void {
       log.log(`    ${s.stage.padEnd(12)} ${tokens(s.tokens).padStart(7)}  ${share}%`)
     }
   }
+  if (r.stageMs.length > 0) {
+    const totalMs = r.stageMs.reduce((sum, s) => sum + s.ms, 0)
+    log.log('')
+    log.log('  time by stage:')
+    for (const s of r.stageMs) {
+      const share = totalMs > 0 ? Math.round((s.ms / totalMs) * 100) : 0
+      log.log(`    ${s.stage.padEnd(12)} ${durMs(s.ms).padStart(7)}  ${share}%`)
+    }
+  }
 }
