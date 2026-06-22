@@ -87,37 +87,40 @@ plan + proof as provenance.
 ```
 task.md (intent) + meta.json (verify) [+ answers.md on resume]
         │
-  0. TRIAGE      trivial? → fast path: skip to IMPLEMENT   (read-only)
+  1. TRIAGE      trivial? → fast path: skip to IMPLEMENT   (read-only)
                  also flags user-facing? → gates the UX lenses
         │ (complex)
-  1. RESEARCH    one subagent maps the relevant code,       (read + network)
+  2. SHARPEN     [pending non-trivial only] refine intent    (read-only)
+        ├─ ASK  → write questions.md, status: needs-input, set task aside
+        │
+  3. RESEARCH    one subagent maps the relevant code,       (read + network)
                  patterns, git history & prior plans; may
                  look up external data; for user-facing
                  work also the UI vocabulary (components,
                  tokens, where features are exposed)
-  2. PLAN        codex + claude each draft a plan           (read-only, parallel)
-  3. CRITIQUE    each critiques the other's plan and        (read-only, parallel)
+  4. PLAN        codex + claude each draft a plan           (read-only, parallel)
+  5. CRITIQUE    each critiques the other's plan and        (read-only, parallel)
                  surfaces "open questions for the human"
-  3.6 UX/IA      [user-facing only] claude critiques the    (read-only)
+  5.4 UX/IA      [user-facing only] claude critiques the    (read-only)
                  plan's information architecture & UX
-  3.5 RECONCILE  proceed autonomously, or PAUSE and ask?    (read-only)
+  5.5 RECONCILE  proceed autonomously, or PAUSE and ask?    (read-only)
         │
         ├─ ASK  → write questions.md, status: needs-input, set task aside
         │
-  4. REVISE      each revises its own plan w/ the critique  (read-only, parallel)
-  5. SELECT      codex picks or merges the stronger plan    (read-only)
+  6. REVISE      each revises its own plan w/ the critique  (read-only, parallel)
+  7. SELECT      codex picks or merges the stronger plan    (read-only)
                  → clean plan written to plansDir (committed docs)
-  5.5 RISK       [complex path] score plan risk and          (read-only)
+  7.5 RISK       [complex path] score plan risk and          (read-only)
                  verification focus, advisory to implement
-  ┌─ 6. IMPLEMENT     codex edits the worktree             (workspace-write)
-  │  7. REVIEW PANEL  parallel expert finders on the diff  (read-only, parallel)
+  ┌─ 8. IMPLEMENT     codex edits the worktree             (workspace-write)
+  │  9. REVIEW PANEL  parallel expert finders on the diff  (read-only, parallel)
   │                   correctness + security + risk +
   │                   deploy safety + ux (if UI);
   │                   each reports findings, none blocks alone
-  │  8. CONSOLIDATE   one judge dedupes, drops nits,        (read-only)
+  │  10. CONSOLIDATE  one judge dedupes, drops nits,        (read-only)
   │                   resolves conflicts by priority, marks
   │                   blocking vs advisory → one verdict + fix list
-  │  9. VERIFY        run the task's verify command for real;       (full-access
+  │  11. VERIFY       run the task's verify command for real;       (full-access
   │                   on failure a doctor classifies it and          remediation)
   │                   REPAIRS the environment in place (install
   │                   deps/tools, build, start a service) then
@@ -127,7 +130,7 @@ task.md (intent) + meta.json (verify) [+ answers.md on resume]
         (config.retries is the hard-cap backstop), then block / set-aside.
         A flake or an environment problem it can't fix → set-aside (backoff)
         │ (pass)
-  commit → 10. SHIP (if configured) full-perms agent: MR/PR, CI, review
+  commit → 12. SHIP (if configured) full-perms agent: MR/PR, CI, review
         │
         ├─ pass → write proof.md, status: done (shipped if ship set)
         └─ fail → status: retrying (auto-resume), then blocked if the cap is spent
@@ -187,6 +190,7 @@ factory resume [task-id] [note...]                 # pick a blocked task back up
 factory correct [task-id] [note...]                # record your manual fix of a blocked task as a lesson
 factory backlog [add|rm] ...                       # experimental repo-level backlog
 factory status                                     # catch-up dashboard
+factory ask [task-id] "<question...>"              # AI answer from saved task state
 factory show [task-id] [step]                       # drill into one task / a step's activity
 factory report                                     # telemetry roll-up (manage by numbers)
 factory lessons                                    # curated lessons + raw candidates
@@ -204,8 +208,9 @@ factory upgrade                                     # install the latest GitHub 
   - `--once` — process one ready task, then exit (for proving things out).
   - `--drain` — process until no ready tasks, then exit (batch).
 - **`factory answer`** (for **needs-input**) appends to `answers.md` and flips the
-  task back to `ready`; the resumed run **re-plans** with your answer threaded in
-  (stateless — no held session). Omit the id for the latest needs-input task.
+  task back to `ready`; the resumed run continues from durable state, either
+  sharpening again with your answer or re-planning with it threaded in (stateless
+  — no held session). Omit the id for the latest needs-input task.
 - **`factory resume`** (for **blocked**) **reuses** the saved plan + the diff
   already in the worktree and re-enters at the stage that failed — no re-planning.
   Omit the id for the latest blocked/retrying task (or one stranded mid-stage by a
@@ -213,6 +218,12 @@ factory upgrade                                     # install the latest GitHub 
   review-panel blocks (after you've looked) or to force a transient retry now.
   A running `factory run` already auto-reclaims stranded tasks, so this is mainly
   the manual equivalent when no loop is up. (`answer` re-plans; `resume` continues.)
+- **`factory ask`** is a conversational, read-only query over saved task state.
+  It builds a compact context packet from `meta.json`, the task index, and relevant
+  artifacts such as `questions.md`, `failures.jsonl`, `postmortem.md`, `proof.md`,
+  `ship.md`, and `verify.log`, then asks the configured `ask.agent` to answer only
+  from that packet. Omit the id to let the packet include the currently relevant
+  tasks; pass an id to focus the answer.
 
 ### Recovery & auto-resume
 
@@ -371,6 +382,12 @@ Fields:
   aside for auto-retry and only blocks after the auto-retry cap is spent. Examples —
   `{"skill": "ship"}`, or
   `{"policy": "open a GitLab MR, no reviewers, iterate CI to green, never merge"}`.
+- **`ask`** — which AI answers `factory ask` questions. This is separate from
+  `agents.reviewer` because asking is about assembling the right saved context, not
+  participating in the task pipeline. Shape:
+  `{ "agent": "claude" }` or
+  `{ "agent": { "cli": "codex", "model": "gpt-5" } }`. Default:
+  `{ "agent": "claude" }`.
 - **`agents`** — which agent fills each role:
   - `planners` (list) — draft + cross-critique + revise. **≥2 different agents
     enables the cross-model ensemble**; 1 → single planner, no critique.
@@ -452,8 +469,8 @@ Events and their payloads:
 | `loop.idle` | queue drained | `state` |
 
 `attention.state = needs-input` means factory is waiting at an intentional human
-prompt. That includes a queued task paused for answers and the interactive
-sharpen step waiting at `you>`.
+prompt. That includes a queued task paused for answers from the sharpen or
+planning stages.
 
 Each command gets the payload as **JSON on stdin** *and* as flat `FACTORY_*` env
 vars (`FACTORY_EVENT`, `FACTORY_TASK`, `FACTORY_STAGE`, `FACTORY_STATE`, …), runs
@@ -473,8 +490,11 @@ or jump-target behavior you want.
 ```
 <state-dir>/tasks/<slug>[-N]/
   task.md                # human-owned intent/spec
-  meta.json              # machine-owned status, verify, timestamps, resume/retry state
+  meta.json              # machine-owned status, verify, sharpen, timestamps, resume/retry state
   meter.json             # live token/stage counts for the current pass
+  sharpen.md             # run-loop intent sharpening output
+  sharpen.review.md      # reviewer gate for the sharpened spec
+  sharpen.final.md       # final sharpen synthesis, when needed
   triage.md              # trivial/complex + user-facing classification
   research.md            # shared research dossier
   plan.<planner>.md      # first-pass planner output
@@ -506,8 +526,8 @@ or jump-target behavior you want.
 ```
 
 `task.md` (yours) and `meta.json` (the machine's) are split so `factory` flips
-status without rewriting your prose, except when interactive sharpening finishes:
-then `task.md` is replaced with the refined spec you accepted. Repo-level state
+status without rewriting your prose, except when the run-loop sharpen stage
+finishes: then `task.md` is replaced with the refined spec. Repo-level state
 lives under the main worktree's state dir, shared across linked worktrees:
 `LESSONS.md`, `LESSONS.candidates.md`, `metrics.db`, `eval-candidates/`, and
 `backlog/`.
@@ -529,26 +549,24 @@ and manual correction — that you periodically distill into `LESSONS.md` (e.g. 
 the `/learn` skill) and prune. Keeping them separate keeps the curated file
 high-signal. `factory lessons` prints both.
 
-## Intent sharpening (`factory add`)
+## Intent sharpening (`factory run`)
 
-The proactive complement to the reactive reconcile valve: resolve ambiguity at
-the *front door*, before a task ever enters the loop. By default `factory add` and
-`factory backlog add` **sharpen** the raw intent — an agent (the configured
-`implementer`) asks about it until it becomes a self-contained spec, reading the
-repo itself to answer what it can. The spec is the durable handoff: problem, goal,
-context, verified current state, priorities, scope, constraints, decisions and
-tradeoffs, rejected alternatives, non-binding ideas, acceptance criteria, and
-assumptions.
+The proactive complement to the reactive reconcile valve: resolve ambiguity after
+triage and before planning. By default `factory add` queues the raw intent
+immediately with `sharpen: pending`; the long-lived `factory run` process then
+sharpens non-trivial pending tasks. Trivial tasks skip sharpening and take the
+fast path. An agent (the configured `implementer`) turns the raw intent into a
+self-contained spec, reading the repo itself to answer what it can. The
+spec is the durable handoff: problem, goal, context, verified current state,
+priorities, scope, constraints, decisions and tradeoffs, rejected alternatives,
+non-binding ideas, acceptance criteria, and assumptions.
 
-Each agent turn is a slow research pass, so it **batches the unresolved questions
-that must be settled now**, highest-impact first — then the CLI **walks you
-through them one at a time** (Enter accepts its recommended answer, `/skip` skips
-one) with no per-question latency, and sends all your answers back at once. It's
-two-way — you can `/edit` a long reply or ask it questions back. Once a spec is
-proposed, **Enter queues it** (`/done` works too); sharpening also proposes the
-verify command.
-`/cancel` aborts. `--raw` skips it and queues the intent as-is, and the
-sharpen step auto-skips when the intent is piped (non-interactive — no human to ask).
+The run-loop sharpener cannot hold an interactive terminal hostage. If it needs a
+human decision, it writes `questions.md`, marks the task `needs-input`, and moves
+on to other runnable work. `factory answer` appends your answer to `answers.md`;
+the next run pass sharpens again with that answer in context. `--raw` skips
+sharpening and queues the intent as-is, and sharpening still auto-skips when the
+intent is piped.
 
 Before a proposed spec is shown, the configured `reviewer` agent checks it as an
 autonomous-handoff artifact. Weak specs do not go straight into the queue: gaps
@@ -568,8 +586,7 @@ patterns before asking, so questions aren't ones it could have answered itself.
 It preserves the human's judgment instead of flattening it: priorities,
 constraints, rejected paths, and implementation ideas stay visible, with ideas
 clearly labeled as non-binding. It's its own `sharpenPrompt` (not the Claude Code
-`work-plan` skill): the CLI mediates the turn-taking around headless agent calls,
-which a one-shot `claude -p` can't do.
+`work-plan` skill), run as a normal headless factory stage.
 
 The richer **`work-plan` skill** (`~/.claude/skills/work-plan`) remains for deep
 sharpening inside a Claude Code session; the loop's reconcile valve still handles
@@ -577,11 +594,13 @@ any ambiguity that slips through, reactively.
 
 ### Statuses
 
-Tasks usually move through `ready` → `planning` → `implementing` → `reviewing` →
-`verifying` → `shipping` → `done`. Other resting states are `sharpening` (interactive
-intent sharpening in progress), `needs-input` (paused for you), `retrying` (transient verify
-or ship failure waiting on backoff), and `blocked` (human attention required:
-no changes, review-panel failure, convergence stuck, or retry cap exhausted).
+Tasks usually move from `ready` into either `implementing` (trivial fast path),
+`planning` (raw/skipped/already-sharpened complex tasks), or `sharpening` (pending
+non-trivial tasks), then continue through `reviewing` → `verifying` → `shipping`
+→ `done`. Other resting states are `needs-input` (paused for you), `retrying`
+(transient verify or ship failure waiting on backoff), and `blocked` (human
+attention required: no changes, review-panel failure, convergence stuck, or retry
+cap exhausted).
 `needs-input`, `retrying`, and `blocked` are set aside; `factory` moves on.
 `factory answer` returns a `needs-input` task to `ready`; `factory resume` returns
 a blocked/retrying/stranded task to `ready`; due auto-retries are promoted by the
@@ -678,8 +697,8 @@ dollar figure, so there's no consistent number across both models.)
   `needs-input` escalation. Proven end-to-end on real tasks.
 - ✅ **Configurable agents:** planners / implementer / reviewer / delivery roles,
   each `codex`/`claude` (+ optional model).
-- ✅ **Intent sharpening:** `factory add` / `backlog add` refine the intent into a
-  self-contained spec before queuing.
+- ✅ **Intent sharpening:** `factory run` refines default queued intents into a
+  self-contained spec before planning.
 - ✅ **tmux integration (via hooks):** live-stage window name, semantic attention
   states for `needs-input`/`blocked`/`done`, in-place elapsed heartbeat, and
   `(done)` when the queue finishes.
@@ -693,8 +712,9 @@ dollar figure, so there's no consistent number across both models.)
 - `conductor.ts` — the per-task pipeline + live stage updates
 - `agents.ts` — headless codex/claude wrappers
 - `prompts.ts` — stage prompts (incl. the high-bar reconcile/critique prompts)
-- `sharpen.ts` — interactive intent sharpening loop for `factory add` / `backlog add`
+- `sharpen.ts` — intent sharpening parser and prompts for add/backlog/run flows
 - `task.ts` — task dir format, status, answers
+- `ask.ts` — context packet + AI answer for `factory ask`
 - `view.ts` — `status` dashboard + `show` drill-down + `report` rendering
 - `lessons.ts` — LESSONS.md read + candidate capture (the meta loop)
 - `metrics.ts` — SQLite telemetry store + `report` aggregation (defensive/disposable)

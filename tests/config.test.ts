@@ -84,6 +84,24 @@ describe('config cascade', () => {
     })
   })
 
+  test('configures the ask agent separately from pipeline agents', async () => {
+    await withFactoryHome(async () => {
+      const root = await tempDir('ask-agent')
+
+      expect((await loadConfig(root)).ask.agent).toBe('claude')
+
+      await writeJson(`${root}/.factory.json`, {
+        agents: { reviewer: 'codex' },
+        ask: { agent: { cli: 'codex', model: 'gpt-5' } },
+      })
+
+      const config = await loadConfig(root)
+
+      expect(config.agents.reviewer).toBe('codex')
+      expect(config.ask.agent).toEqual({ cli: 'codex', model: 'gpt-5' })
+    })
+  })
+
   test('resolves the default state directory under FACTORY_HOME sessions', async () => {
     await withFactoryHome(async (home) => {
       const base = await tempDir('repo')

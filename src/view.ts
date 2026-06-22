@@ -41,6 +41,7 @@ export async function printConfig(ctx: WorkContext): Promise<void> {
   field('captureEvals', String(c.captureEvals))
   field('postmortem', String(c.postmortem))
   field('onComplete', ocLabel)
+  field('ask', agentLabel(ctx.askAgent))
   log.log('')
   field('planners', a.planners.map(agentLabel).join(', '))
   field('implementer', agentLabel(a.implementer))
@@ -166,6 +167,8 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
   const blocked = tasks.filter((t) => t.meta.status === 'blocked')
   const done = tasks.filter((t) => t.meta.status === 'done')
   const ready = tasks.filter((t) => t.meta.status === 'ready')
+  const sharpenPending = ready.filter((t) => t.meta.sharpen === 'pending')
+  const readyWork = ready.filter((t) => t.meta.sharpen !== 'pending')
 
   for (const t of inProgress) {
     const meter = await readLiveMeter(t)
@@ -206,8 +209,12 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
     log.log('')
     log.log(`✓ done (${done.length}):  ${done.map((t) => t.id).join('  ')}`)
   }
-  if (ready.length > 0) {
-    log.log(`· ready (${ready.length}): ${ready.map((t) => t.id).join('  ')}`)
+  if (sharpenPending.length > 0) {
+    const ids = sharpenPending.map((t) => t.id).join('  ')
+    log.log(`· sharpen pending (${sharpenPending.length}): ${ids}`)
+  }
+  if (readyWork.length > 0) {
+    log.log(`· ready (${readyWork.length}): ${readyWork.map((t) => t.id).join('  ')}`)
   }
 }
 
@@ -328,7 +335,9 @@ export async function printShow(ctx: WorkContext, query?: string, step?: string)
 
   log.log(`${m.id}  [${m.status}]${m.note ? ` — ${m.note}` : ''}`)
   log.log(
-    `verify: ${m.verify ?? '(none)'}  ·  created ${age(m.createdAt)} ago  ·  updated ${age(m.updatedAt)} ago`
+    `verify: ${m.verify ?? '(none)'}  ·  sharpen: ${m.sharpen}  ·  created ${age(
+      m.createdAt
+    )} ago  ·  updated ${age(m.updatedAt)} ago`
   )
 
   const intent = await fileText(task, 'task.md')

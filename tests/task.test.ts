@@ -22,6 +22,7 @@ const config: Config = {
     reviewer: 'claude',
     delivery: 'claude',
   },
+  ask: { agent: 'claude' },
 }
 
 const agents: RoleAgents = {
@@ -45,6 +46,7 @@ async function workContext(): Promise<WorkContext> {
     tasksDir: `${stateDir}/tasks`,
     plansDir: null,
     agents,
+    askAgent: { cli: 'claude' },
     repoStateDir: stateDir,
     metricsPath: `${stateDir}/metrics.db`,
   }
@@ -106,11 +108,17 @@ describe('task state transitions', () => {
     expect(next?.meta.resumeNote).toContain('interrupted reviewing stage')
   })
 
-  test('interactive sharpening tasks are not reclaimed as stranded work', async () => {
+  test('interrupted sharpening tasks restart the sharpen stage', async () => {
     const ctx = await workContext()
-    await addTask(ctx, 'Still sharpening', null, 'sharpening')
+    const task = await addTask(ctx, 'Still sharpening', null, 'sharpening', 'pending')
 
-    expect(await nextRunnable(ctx, 2_000)).toBeNull()
+    const next = await nextRunnable(ctx, 2_000)
+
+    expect(next?.id).toBe(task.id)
+    expect(next?.meta.status).toBe('ready')
+    expect(next?.meta.sharpen).toBe('pending')
+    expect(next?.meta.resume).toBe(false)
+    expect(next?.meta.note).toContain('recovered after interrupted sharpening stage')
   })
 
   test('legacy interactive grilling tasks are not reclaimed as stranded work', async () => {
@@ -152,9 +160,23 @@ describe('task state transitions', () => {
 
     expect(task?.meta.status).toBe('ready')
     expect(task?.meta.verify).toBeNull()
+    expect(task?.meta.sharpen).toBe('done')
     expect(task?.meta.resume).toBe(false)
     expect(task?.meta.resumeKind).toBeNull()
     expect(task?.meta.autoRetries).toBe(0)
+  })
+
+  test('parallel adds with the same slug claim distinct task ids', async () => {
+    const ctx = await workContext()
+
+    const tasks = await Promise.all([
+      addTask(ctx, 'Same task', null, 'ready', 'pending'),
+      addTask(ctx, 'Same task', null, 'ready', 'pending'),
+      addTask(ctx, 'Same task', null, 'ready', 'pending'),
+    ])
+
+    expect(tasks.map((t) => t.id).sort()).toEqual(['same-task', 'same-task-2', 'same-task-3'])
+    expect(tasks.every((t) => t.meta.sharpen === 'pending')).toBe(true)
   })
 })
 
