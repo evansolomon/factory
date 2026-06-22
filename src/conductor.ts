@@ -128,10 +128,15 @@ async function agentStep(
   meter: Meter,
   stage: string,
   label: string,
-  work: Promise<AgentResult>
+  work: Promise<AgentResult>,
+  // Live-display name only (heartbeat + done line). Defaults to the agent label;
+  // override to disambiguate concurrent same-agent steps (e.g. the review panel,
+  // where every expert is the same reviewer agent). The stored `agent` metric
+  // stays the bare agent label so per-agent stats aren't fragmented by role.
+  display: string = label
 ): Promise<string> {
   const start = Date.now()
-  const { text, usage } = await withHeartbeat(label, start, work)
+  const { text, usage } = await withHeartbeat(display, start, work)
   const ms = Date.now() - start
   meter.inTok += usage.inputTokens
   meter.outTok += usage.outputTokens
@@ -143,7 +148,7 @@ async function agentStep(
     ms,
   })
   log.done(
-    `${label} ${fmtSecs(ms)} · ${fmtTok(usage.inputTokens)}→${fmtTok(usage.outputTokens)} tok`
+    `${display} ${fmtSecs(ms)} · ${fmtTok(usage.inputTokens)}→${fmtTok(usage.outputTokens)} tok`
   )
   return text
 }
@@ -816,7 +821,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             prompt: e.prompt,
             access: 'read',
             outFile: `${task.dir}/${e.key}.md`,
-          })
+          }),
+          `${agentLabel(reviewer)} · ${e.label}`
         ).then((text): Labeled => ({ label: e.label, text }))
       )
     )
