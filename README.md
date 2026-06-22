@@ -474,6 +474,7 @@ or jump-target behavior you want.
 <state-dir>/tasks/<slug>[-N]/
   task.md                # human-owned intent/spec
   meta.json              # machine-owned status, verify, timestamps, resume/retry state
+  meter.json             # live token/stage counts for the current pass
   triage.md              # trivial/complex + user-facing classification
   research.md            # shared research dossier
   plan.<planner>.md      # first-pass planner output

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { z } from 'zod'
 import type { WorkContext } from './config.ts'
@@ -5,6 +6,7 @@ import type { WorkContext } from './config.ts'
 // A task is a directory under <dir>/tasks/<id>/ containing:
 //   task.md   — human-owned intent (free-form markdown; what sharpening enriches)
 //   meta.json — machine-owned status/verify/timestamps (never touches task.md)
+//   meter.json — machine-owned live token/stage counts for the current pass
 //   plan.*.md, review.md, proof.md, diff.patch — conductor artifacts
 // Splitting human prose from machine state means factory flips status without
 // ever rewriting what you wrote.
@@ -93,6 +95,23 @@ export type Task = {
   dir: string
   meta: Meta
 }
+
+const LiveMeterSchema = z.object({
+  startedAt: z.string(),
+  updatedAt: z.string(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  stages: z.array(
+    z.object({
+      stage: z.string(),
+      agent: z.string(),
+      inTok: z.number().int().nonnegative(),
+      outTok: z.number().int().nonnegative(),
+      ms: z.number().int().nonnegative(),
+    })
+  ),
+})
+export type LiveMeter = z.infer<typeof LiveMeterSchema>
 
 function slugify(text: string): string {
   const slug = text
@@ -340,6 +359,26 @@ export async function appendAnswer(task: Task, text: string): Promise<void> {
   const existing = (await readAnswers(task)) ?? ''
   const entry = `## Answer (${new Date().toISOString()})\n${text.trim()}\n`
   await Bun.write(`${task.dir}/answers.md`, existing ? `${existing}\n\n${entry}` : entry)
+}
+
+export async function readLiveMeter(task: Task): Promise<LiveMeter | null> {
+  const file = Bun.file(`${task.dir}/meter.json`)
+  if (!(await file.exists())) {
+    return null
+  }
+  try {
+    const parsed = LiveMeterSchema.safeParse(await file.json())
+    return parsed.success ? parsed.data : null
+  } catch {
+    return null
+  }
+}
+
+export async function writeLiveMeter(task: Task, meter: LiveMeter): Promise<void> {
+  const finalPath = `${task.dir}/meter.json`
+  const tmpPath = `${task.dir}/.meter.${process.pid}.${randomUUID()}.tmp`
+  await Bun.write(tmpPath, `${JSON.stringify(meter, null, 2)}\n`)
+  await rename(tmpPath, finalPath)
 }
 
 export async function writeArtifact(task: Task, name: string, content: string): Promise<void> {
