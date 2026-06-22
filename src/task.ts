@@ -21,7 +21,7 @@ export const StatusSchema = z.enum([
   'verifying',
   'shipping',
   // Set aside after a transient gate failure (verify/ship), waiting on a backoff
-  // before the loop auto-resumes it. Soft — no human-attention alert, unlike blocked.
+  // before the loop auto-resumes it. Soft — no attention alert, unlike blocked.
   'retrying',
   'done',
   'blocked',

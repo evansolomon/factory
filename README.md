@@ -6,7 +6,8 @@ adversarially reviewing, verifying, and committing — and pauses to ask you a
 question only when it genuinely can't proceed.
 
 Built to run one instance per git worktree (a "fleet"), each in its own tmux
-window, triaged via the existing window orange/bell alerts.
+window. Factory emits lifecycle and attention hooks; your environment decides
+whether those become colors, bells, notifications, or something else.
 
 ## Install
 
@@ -181,12 +182,13 @@ approaches already failed — don't repeat them"). When the loop does give up, w
 happens next depends on the gate:
 
 - **verify / ship** (transient — env, CI, network) → the task is set **aside**
-  (status `retrying`, *no* bell) and the loop **auto-resumes** it on a growing
-  backoff (2m → 5m → 15m → 30m → 60m), up to a cap (5). An env flake recovers with
-  no action from you. Only after the cap does it escalate to `blocked`.
+  (status `retrying`, no attention event) and the loop **auto-resumes** it on a
+  growing backoff (2m → 5m → 15m → 30m → 60m), up to a cap (5). An env flake
+  recovers with no action from you. Only after the cap does it escalate to `blocked`.
 - **review / security** (the code was judged bad — re-running churns code without
-  new input) → straight to `blocked` (orange + bell). You look (`factory show
-  <id> review`), then `factory resume ["note"]` when you're ready.
+  new input) → straight to `blocked` and emits attention once no runnable work is
+  left. You look (`factory show <id> review`), then `factory resume ["note"]` when
+  you're ready.
 
 Either way, resuming reuses prior work: committed already → just re-runs ship;
 uncommitted diff → re-runs the gates on that diff, skipping the initial implement
@@ -233,8 +235,9 @@ makes each window legible at a glance:
 
 - **window name = live stage** (e.g. `billing (implement)`), plus a `▶` "an agent is
   working here" marker while a stage is computing.
-- **attention color + bell** whenever a task in that window is `needs-input` or
-  `blocked` — so triage is a glance across windows.
+- **attention state** when the tab is waiting on you (`needs-input`, `blocked`,
+  or `done`, plus `none` to clear). The tmux hook can map those states to colors,
+  bells, or jump targets, but factory only emits the semantic state.
 
 This is the *only* environment integration factory has — core emits events and never
 touches tmux; it all lives in your hook script.
@@ -375,12 +378,16 @@ Events and their payloads:
 |---|---|---|
 | `task.start` | loop picks up a task | `task` |
 | `stage.change` | active stage changes (drives the window name) | `task, stage, active` |
-| `attention` | queue attention changes (drives window color + bell) | `state` (`blocked`/`needs-input`/`done`/`none`) |
+| `attention` | attention state changes | `state` (`blocked`/`needs-input`/`done`/`none`) |
 | `task.needs_input` | paused for the human | `task` |
 | `task.blocked` | escalated to blocked | `task, reason` |
 | `task.retrying` | set aside for auto-retry | `task, reason, retryAt` |
 | `task.done` | committed/shipped | `task, commit` |
 | `loop.idle` | queue drained | `state` |
+
+`attention.state = needs-input` means factory is waiting at an intentional human
+prompt. That includes a queued task paused for answers and the interactive intake
+grill waiting at `you>`.
 
 Each command gets the payload as **JSON on stdin** *and* as flat `FACTORY_*` env
 vars (`FACTORY_EVENT`, `FACTORY_TASK`, `FACTORY_STAGE`, `FACTORY_STATE`, …), runs
@@ -392,7 +399,8 @@ global tmux hook applies everywhere while a repo can add its own.
 
 An example tmux hook (e.g. `~/.factory/hooks/tmux-state.sh`, wired in
 `~/.factory/config.json`) dispatches on `$FACTORY_EVENT`: it renames the window for
-`stage.change`/`loop.idle` and sets the color + bell for `attention`.
+`stage.change`/`loop.idle` and maps `attention` states to whichever color, bell,
+or jump-target behavior you want.
 
 ## Task layout
 
@@ -584,9 +592,9 @@ dollar figure, so there's no consistent number across both models.)
   each `codex`/`claude` (+ optional model).
 - ✅ **Intake grill:** `factory add` / `backlog add` refine the intent into a
   self-contained spec before queuing.
-- ✅ **tmux integration (via hooks):** live-stage window name + color/bell on
-  `needs-input`/`blocked`, in-place elapsed heartbeat, and `(done)` when the queue
-  finishes.
+- ✅ **tmux integration (via hooks):** live-stage window name, semantic attention
+  states for `needs-input`/`blocked`/`done`, in-place elapsed heartbeat, and
+  `(done)` when the queue finishes.
 - ✅ **Meta loop:** `LESSONS.md` read into planning + `factory lessons`; SQLite
   telemetry via `factory report`.
 - ✅ **Ship:** opt-in `onComplete` delivery, validated against a real remote.

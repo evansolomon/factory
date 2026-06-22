@@ -16,7 +16,7 @@ export type Hooks = Record<string, string[]>
 export type HookEvent =
   | 'task.start' // a task begins processing
   | 'stage.change' // the active stage changed (drives the tmux window name)
-  | 'attention' // queue attention state changed (drives the tmux color + bell)
+  | 'attention' // attention state changed
   | 'task.needs_input' // paused for the human
   | 'task.blocked' // escalated to blocked
   | 'task.retrying' // set aside for an auto-retry
