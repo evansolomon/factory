@@ -20,13 +20,11 @@ import { sharpen } from './sharpen.ts'
 import {
   addTask,
   appendAnswer,
-  deleteTask,
   findTask,
   latestTask,
   loadTasks,
   nextRunnable,
   RESUMABLE_STATUSES,
-  readySharpenedTask,
   setStatus,
 } from './task.ts'
 import { upgradeFactory } from './upgrade.ts'
@@ -50,11 +48,11 @@ COMMANDS
       worktree opens and you want to write the first task before walking away. The
       intent can also be piped on stdin (multi-line specs). --verify is the command
       that proves the task works; it's run for real before commit.
-      By default it then SHARPENS the intent: an agent interrogates it into a
-      self-contained spec (one question at a time, with recommended answers,
-      reading the repo itself) — you answer or ask back; Enter queues it, /cancel
-      aborts. --raw skips sharpening and queues the intent as-is. Auto-skipped when
-      the intent is piped (non-interactive).
+      By default the running loop triages the task, then SHARPENS non-trivial
+      pending intents before planning: an agent refines them into self-contained
+      specs, reading the repo itself and pausing with questions.md only when it
+      needs a human decision. --raw skips sharpening and queues the intent as-is.
+      Auto-skipped when the intent is piped.
 
   factory run [--once | --drain]
       Work the queue. Default: stay running and pick up tasks as they're added
@@ -71,8 +69,8 @@ COMMANDS
       When a task is too ambiguous to build safely, the loop PAUSES it (status
       'needs-input') and writes the questions it needs you to settle — you'll see
       them in 'factory status' and 'factory show <id>'. This command replies to those
-      questions and puts the task back in the queue; your answer is folded into a
-      fresh planning pass. Omit the id to answer the latest needs-input task.
+      questions and puts the task back in the queue; your answer is folded into the
+      next sharpen or planning pass. Omit the id to answer the latest needs-input task.
 
   factory resume [task-id] [note...]
       Pick a BLOCKED, waiting-to-retry, or interrupted (killed mid-stage) task back
@@ -202,9 +200,8 @@ async function resolveIntent(rest: string[]): Promise<{ intent: string; verify: 
   return { intent, verify: parsed.verify }
 }
 
-// By default, refine the raw intent into a spec via the interactive sharpen step before
-// queuing. Skipped with --raw, or when stdin isn't a TTY (piped/non-interactive
-// — no human to sharpen with). Returns null only if the human cancels (queue nothing).
+// Backlog entries are not processed by a run loop yet, so backlog add keeps the
+// interactive sharpen step. Worktree `factory add` only enqueues.
 async function maybeSharpen(
   root: string,
   agent: Agent,
@@ -255,30 +252,19 @@ async function main(): Promise<number> {
       return 1
     }
     const ctx = await loadContext(process.cwd())
-    // No sharpen step (raw or piped): queue the intent directly.
-    if (raw || !process.stdin.isTTY) {
-      const task = await addTask(ctx, base.intent, base.verify)
-      log.ok(`queued ${task.id}${base.verify ? ` (verify: ${base.verify})` : ''}`)
-      return 0
-    }
-    // Sharpen: create the task up-front (status 'sharpening') so it shows in
-    // `factory status` while you refine it, then flip it to ready — or delete on cancel.
-    const task = await addTask(ctx, base.intent, base.verify, 'sharpening')
-    const refined = await sharpen({
-      root: ctx.root,
-      agent: ctx.agents.implementer,
-      reviewer: ctx.agents.reviewer,
-      hooks: ctx.config.hooks,
-      intent: base.intent,
-      verify: base.verify,
-    })
-    if (!refined) {
-      await deleteTask(task)
-      log.info('sharpen cancelled — nothing queued')
-      return 0
-    }
-    await readySharpenedTask(task, refined.intent, refined.verify)
-    log.ok(`queued ${task.id}${refined.verify ? ` (verify: ${refined.verify})` : ''}`)
+    const skipSharpen = raw || !process.stdin.isTTY
+    const task = await addTask(
+      ctx,
+      base.intent,
+      base.verify,
+      'ready',
+      skipSharpen ? 'skipped' : 'pending'
+    )
+    log.ok(
+      `queued ${task.id}${base.verify ? ` (verify: ${base.verify})` : ''}${
+        skipSharpen ? '' : ' (sharpen pending)'
+      }`
+    )
     return 0
   }
 

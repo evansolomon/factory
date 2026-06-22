@@ -35,11 +35,21 @@ import {
   riskReviewPrompt,
   securityPrompt,
   selectPrompt,
+  sharpenPrompt,
+  sharpenReviewPrompt,
   shipPrompt,
   triagePrompt,
   uxPlanCritiquePrompt,
   uxReviewPrompt,
 } from './prompts.ts'
+import {
+  formatQuestions,
+  parseQuestions,
+  parseReview,
+  parseSharpen,
+  type SharpenResult,
+  type Turn,
+} from './sharpen.ts'
 import {
   appendFailure,
   type Failure,
@@ -47,6 +57,7 @@ import {
   readFailures,
   readIntent,
   readPlan,
+  readySharpenedTask,
   saveMeta,
   setStatus,
   type Task,
@@ -639,15 +650,134 @@ async function planEnsemble(
   return { plan: finalPlan }
 }
 
+type SharpenStageResult = { result: SharpenResult } | { pause: TaskOutcome }
+
+function transcript(turns: Turn[]): string {
+  return turns.map((t) => `${t.role}: ${t.text}`).join('\n\n')
+}
+
+function questionsOutcome(text: string): TaskOutcome {
+  return { ok: false, kind: 'needs-input', questions: text }
+}
+
+async function finalizeSharpen(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  turns: Turn[],
+  fallback: SharpenResult
+): Promise<SharpenResult> {
+  await progress(ctx, task, 'sharpen', 'sharpen — finalizing spec')
+  const out = await agentStep(
+    meter,
+    'sharpen',
+    agentLabel(ctx.agents.implementer),
+    runAgent(ctx.agents.implementer, {
+      root: ctx.root,
+      prompt: sharpenPrompt(transcript(turns), true),
+      access: 'read',
+      outFile: `${task.dir}/sharpen.final.md`,
+    })
+  )
+  const parsed = parseSharpen(out)
+  if (!parsed.ready || !parsed.spec) {
+    log.warn('sharpen: could not synthesize a spec — keeping the original intent')
+    return fallback
+  }
+  return { intent: parsed.spec, verify: parsed.verify ?? fallback.verify }
+}
+
+async function reviewSharpenSpec(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  turns: Turn[],
+  spec: SharpenResult
+): Promise<SharpenStageResult> {
+  await progress(ctx, task, 'sharpen', 'sharpen — checking spec')
+  const out = await agentStep(
+    meter,
+    'sharpen-review',
+    agentLabel(ctx.agents.reviewer),
+    runAgent(ctx.agents.reviewer, {
+      root: ctx.root,
+      prompt: sharpenReviewPrompt(transcript(turns), spec.intent, spec.verify),
+      access: 'read',
+      outFile: `${task.dir}/sharpen.review.md`,
+    })
+  )
+  const review = parseReview(out)
+  if (review.kind === 'pass') {
+    return { result: spec }
+  }
+  if (review.kind === 'questions') {
+    const questions = formatQuestions(review.preamble, review.questions)
+    await writeArtifact(task, 'questions.md', questions)
+    await appendCandidate(ctx, `needs-input · ${task.id} · ${firstLine(questions)}`)
+    return { pause: questionsOutcome(questions) }
+  }
+  turns.push({
+    role: 'reviewer',
+    text: `Internal spec review asked for a revision before planning:\n\n${review.message}`,
+  })
+  return { result: await finalizeSharpen(ctx, task, meter, turns, spec) }
+}
+
+async function runSharpenStage(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  intent: string,
+  verify: string | null,
+  answers: string | null
+): Promise<SharpenStageResult> {
+  await setStatus(task, 'sharpening')
+  await progress(ctx, task, 'sharpen', 'sharpen — refining intent')
+  const turns: Turn[] = [{ role: 'human', text: intent }]
+  if (answers) {
+    turns.push({ role: 'human', text: `Answers already provided:\n\n${answers}` })
+  }
+  const out = await agentStep(
+    meter,
+    'sharpen',
+    agentLabel(ctx.agents.implementer),
+    runAgent(ctx.agents.implementer, {
+      root: ctx.root,
+      prompt: sharpenPrompt(transcript(turns), false),
+      access: 'read',
+      outFile: `${task.dir}/sharpen.md`,
+    })
+  )
+  turns.push({ role: 'agent', text: out })
+
+  const parsed = parseSharpen(out)
+  let candidate: SharpenResult
+  if (parsed.ready && parsed.spec) {
+    candidate = { intent: parsed.spec, verify: parsed.verify ?? verify }
+  } else {
+    const { preamble, questions } = parseQuestions(out)
+    if (questions.length > 0) {
+      const questionText = formatQuestions(preamble, questions)
+      await writeArtifact(task, 'questions.md', questionText)
+      await appendCandidate(ctx, `needs-input · ${task.id} · ${firstLine(questionText)}`)
+      return { pause: questionsOutcome(questionText) }
+    }
+    candidate = await finalizeSharpen(ctx, task, meter, turns, { intent, verify })
+  }
+
+  return reviewSharpenSpec(ctx, task, meter, turns, candidate)
+}
+
 // Run a single task. A trivial task (per triage) takes the fast path — straight
 // to implement — while a complex one goes through the full planning ensemble.
 // Both are then reviewed, verified, committed, and (if configured) shipped.
 export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome> {
-  const intent = await readIntent(task)
-  const verify = task.meta.verify
+  let intent = await readIntent(task)
+  let verify = task.meta.verify
   const meter = newMeter()
   const lead = ctx.agents.implementer
   const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null }
+
   const baselineDiff = await worktreeDiff(ctx.root)
   const baselineHasChanges = await hasChanges(ctx.root)
   await writeArtifact(task, 'baseline.patch', baselineDiff)
@@ -704,10 +834,27 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       userFacing = ctx.config.ux && triage.userFacing
     }
 
+    if (trivial && task.meta.sharpen === 'pending') {
+      task.meta.sharpen = 'skipped'
+      await saveMeta(task)
+    }
+
     if (trivial) {
       log.info(`${task.id}: trivial — fast path (skipping the plan ensemble)`)
       finalPlan = intent
     } else {
+      if (task.meta.sharpen === 'pending') {
+        const sharpened = await runSharpenStage(ctx, task, meter, intent, verify, answers)
+        if ('pause' in sharpened) {
+          logTotal(meter)
+          recordTask(ctx, task, meter, 'needs-input', stats)
+          return sharpened.pause
+        }
+        await readySharpenedTask(task, sharpened.result.intent, sharpened.result.verify)
+        intent = sharpened.result.intent
+        verify = sharpened.result.verify
+      }
+
       const planned = await planEnsemble(
         ctx,
         task,

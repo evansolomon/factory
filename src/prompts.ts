@@ -787,14 +787,13 @@ VERDICT: PASS
 VERDICT: FAIL`
 }
 
-// The interactive sharpen step (CLI `factory add` / `factory backlog add`). Turns a
-// rough human intent into a self-contained, high-confidence spec the autonomous
-// pipeline can implement with no further access to the human. The spec is the
-// durable handoff: it preserves problem framing, current-state evidence,
-// priorities, constraints, decisions, rejected alternatives, and verification.
-// The interview batches the highest-leverage unresolved questions, each with a
-// recommended answer, so the human makes product/scope calls instead of answering
-// questions the repo could answer.
+// The sharpen step turns a rough human intent into a self-contained,
+// high-confidence spec the autonomous pipeline can implement with no further
+// access to the human. The spec is the durable handoff: it preserves problem
+// framing, current-state evidence, priorities, constraints, decisions, rejected
+// alternatives, and verification. When unresolved questions remain, the prompt
+// batches them with recommended answers so the human makes product/scope calls
+// instead of answering questions the repo could answer.
 // `transcript` is the running human/agent
 // conversation; when `finalize`, emit the spec immediately.
 export function sharpenPrompt(transcript: string, finalize: boolean): string {
