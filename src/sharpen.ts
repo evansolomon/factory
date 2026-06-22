@@ -23,7 +23,7 @@ type SharpenOpts = {
   verify: string | null
 }
 
-type Turn = { role: 'human' | 'agent' | 'reviewer'; text: string }
+export type Turn = { role: 'human' | 'agent' | 'reviewer'; text: string }
 
 // Bound the conversation so a misbehaving agent can't loop forever.
 const MAX_TURNS = 24
@@ -32,11 +32,11 @@ function transcript(turns: Turn[]): string {
   return turns.map((t) => `${t.role}: ${t.text}`).join('\n\n')
 }
 
-type Parsed = { ready: boolean; verify: string | null; spec: string; message: string }
+export type Parsed = { ready: boolean; verify: string | null; spec: string; message: string }
 
 // The agent signals completion with a `SPEC READY` line; until then everything
 // is conversational. Parse out the spec + verify when present.
-function parseSharpen(text: string): Parsed {
+export function parseSharpen(text: string): Parsed {
   const marker = /^SPEC READY\s*$/m.exec(text)
   if (!marker) {
     return { ready: false, verify: null, spec: '', message: text.trim() }
@@ -50,13 +50,13 @@ function parseSharpen(text: string): Parsed {
   return { ready: true, verify, spec, message }
 }
 
-type Question = { q: string; rec: string }
+export type Question = { q: string; rec: string }
 type QuestionReply = { kind: 'cancel' } | { kind: 'finish' } | { kind: 'answers'; text: string }
 
 // When not ready, the agent batches its questions in a `QUESTIONS` block of
 // `- <question> ||| <recommended answer>` lines (any grounding context goes
 // before the block). Empty questions means it replied in plain prose instead.
-function parseQuestions(text: string): { preamble: string; questions: Question[] } {
+export function parseQuestions(text: string): { preamble: string; questions: Question[] } {
   const marker = /^QUESTIONS\s*$/m.exec(text)
   if (!marker) {
     return { preamble: '', questions: [] }
@@ -76,7 +76,7 @@ function parseQuestions(text: string): { preamble: string; questions: Question[]
   return { preamble, questions }
 }
 
-type Review =
+export type Review =
   | { kind: 'pass' }
   | { kind: 'revise'; message: string }
   | { kind: 'questions'; preamble: string; questions: Question[] }
@@ -90,7 +90,7 @@ function firstLine(text: string): string {
   )
 }
 
-function parseReview(text: string): Review {
+export function parseReview(text: string): Review {
   const marker = firstLine(text)
   if (marker === 'SHARPEN: PASS') {
     return { kind: 'pass' }
@@ -111,6 +111,11 @@ function parseReview(text: string): Review {
     kind: 'revise',
     message: text.trim() || 'Tighten the spec before showing it to the human.',
   }
+}
+
+export function formatQuestions(preamble: string, questions: Question[]): string {
+  const lines = questions.map((q) => `- ${q.q}${q.rec ? `\n  Recommended: ${q.rec}` : ''}`)
+  return [preamble.trim(), ...lines].filter(Boolean).join('\n\n')
 }
 
 function ask(rl: Interface, question: string): Promise<string> {

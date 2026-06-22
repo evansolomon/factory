@@ -4,7 +4,7 @@ import type { WorkContext } from './config.ts'
 
 // A task is a directory under <dir>/tasks/<id>/ containing:
 //   task.md   — human-owned intent (free-form markdown; what sharpening enriches)
-//   meta.json — machine-owned status/verify/timestamps (never touches task.md)
+//   meta.json — machine-owned status/verify/sharpen/timestamps
 //   plan.*.md, review.md, proof.md, diff.patch — conductor artifacts
 // Splitting human prose from machine state means factory flips status without
 // ever rewriting what you wrote.
@@ -12,8 +12,7 @@ import type { WorkContext } from './config.ts'
 export const StatusSchema = z.enum([
   'ready',
   'needs-input',
-  // Created up-front by `factory add` while you interactively sharpen the intent, so
-  // it's visible in `factory status`; flipped to 'ready' (or deleted) when you finish.
+  // Live run-loop stage: refining a queued rough intent into a durable spec.
   'sharpening',
   // Legacy name for tasks created before the step was renamed.
   'grilling',
@@ -30,16 +29,18 @@ export const StatusSchema = z.enum([
 ])
 export type Status = z.infer<typeof StatusSchema>
 
+const SharpenStateSchema = z.enum(['pending', 'done', 'skipped'])
+export type SharpenState = z.infer<typeof SharpenStateSchema>
+
 // Statuses where a task is at rest — no run-loop is actively working it: queued
-// (ready), waiting on a human (needs-input/blocked), on a backoff (retrying), being
-// sharpened interactively (sharpening/grilling), or finished (done). Every OTHER
+// (ready), waiting on a human (needs-input/blocked), on a backoff (retrying), legacy
+// interactive grilling, or finished (done). Every OTHER
 // status is a live stage the conductor sets while working a task. Deriving the
 // complement (rather than listing the stages) means a newly-added stage is covered
 // automatically — the same heuristic factory_prompt uses for "in-progress".
 const SETTLED: readonly Status[] = [
   'ready',
   'needs-input',
-  'sharpening',
   'grilling',
   'retrying',
   'done',
@@ -74,6 +75,9 @@ const MetaSchema = z.object({
   // Short human-facing note on the current status: a block reason, or a pointer
   // to questions.md when awaiting input.
   note: z.string().nullable().default(null),
+  // Whether the raw intent still needs the run loop's sharpen pre-stage. Legacy
+  // tasks default to done so upgrading does not unexpectedly rewrite old intents.
+  sharpen: SharpenStateSchema.default('done'),
   // Resume bookkeeping. `resume` tells the next run to pick up where the task left
   // off — reuse the saved plan + existing diff, skip the planning ensemble — set by
   // `factory resume` and by the loop's auto-resume; consumed (cleared) on the run.
@@ -108,6 +112,11 @@ function firstLine(text: string): string {
   return text.trim().split('\n', 1)[0] ?? ''
 }
 
+function alreadyExists(err: unknown): boolean {
+  const parsed = z.object({ code: z.string() }).safeParse(err)
+  return parsed.success && parsed.data.code === 'EEXIST'
+}
+
 async function listTaskDirs(tasksDir: string): Promise<string[]> {
   try {
     const entries = await readdir(tasksDir, { withFileTypes: true })
@@ -124,18 +133,28 @@ export async function addTask(
   ctx: WorkContext,
   intent: string,
   verify: string | null,
-  status: Status = 'ready'
+  status: Status = 'ready',
+  sharpen: SharpenState = 'done'
 ): Promise<Task> {
   await mkdir(ctx.tasksDir, { recursive: true })
   // Descriptive, number-free id; disambiguate same-named tasks with a -N suffix.
+  // Claim the directory atomically so parallel `factory add`s cannot choose the
+  // same id after racing through a list-then-create window.
   const slug = slugify(firstLine(intent))
-  const existing = await listTaskDirs(ctx.tasksDir)
   let id = slug
-  for (let n = 2; existing.includes(id); n++) {
-    id = `${slug}-${n}`
+  let dir = `${ctx.tasksDir}/${id}`
+  for (let n = 2; ; n++) {
+    try {
+      await mkdir(dir)
+      break
+    } catch (err) {
+      if (!alreadyExists(err)) {
+        throw err
+      }
+      id = `${slug}-${n}`
+      dir = `${ctx.tasksDir}/${id}`
+    }
   }
-  const dir = `${ctx.tasksDir}/${id}`
-  await mkdir(dir, { recursive: true })
 
   const now = new Date().toISOString()
   const meta: Meta = {
@@ -147,6 +166,7 @@ export async function addTask(
     updatedAt: now,
     commit: null,
     note: null,
+    sharpen,
     resume: false,
     resumeNote: null,
     resumeKind: null,
@@ -160,7 +180,7 @@ export async function addTask(
 }
 
 // Finish a sharpened task: replace its intent with the refined spec, set the verify
-// command, and flip it from 'sharpening' to 'ready' so the loop will pick it up.
+// command, and mark it ready for the normal plan/implement pipeline.
 export async function readySharpenedTask(
   task: Task,
   intent: string,
@@ -168,6 +188,7 @@ export async function readySharpenedTask(
 ): Promise<void> {
   await Bun.write(`${task.dir}/task.md`, `${intent.trim()}\n`)
   task.meta.verify = verify
+  task.meta.sharpen = 'done'
   task.meta.status = 'ready'
   task.meta.updatedAt = new Date().toISOString()
   await writeMeta(task.dir, task.meta)
@@ -175,7 +196,8 @@ export async function readySharpenedTask(
 
 export const readyGrilledTask = readySharpenedTask
 
-// Remove a task entirely (its whole dir). Used when sharpening is cancelled.
+// Remove a task entirely (its whole dir). Kept for legacy callers that cancel a
+// task before it enters the run loop.
 export async function deleteTask(task: Task): Promise<void> {
   await rm(task.dir, { recursive: true, force: true })
 }
@@ -240,14 +262,16 @@ async function resumeRun(task: Task, kind: 'manual' | 'auto-retry' | 'stranded')
 // Planning has no durable selected plan yet, so restart it from the original intent.
 // Later stages can reuse the saved plan and whatever worktree diff survived.
 async function recoverStranded(task: Task): Promise<Task> {
-  if (task.meta.status === 'planning') {
+  if (task.meta.status === 'sharpening' || task.meta.status === 'planning') {
     task.meta.resume = false
     task.meta.resumeKind = null
     task.meta.retryAt = null
     await setStatus(task, 'ready', `recovered after interrupted ${task.meta.status} stage`)
     return task
   }
-  task.meta.resumeNote = `Recovered after interrupted ${task.meta.status} stage. Inspect existing work and continue from the saved artifacts.`
+  task.meta.resumeNote =
+    `Recovered after interrupted ${task.meta.status} stage. ` +
+    'Inspect existing work and continue from the saved artifacts.'
   return resumeRun(task, 'stranded')
 }
 
