@@ -53,6 +53,12 @@ const AgentsSchema = z.object({
   delivery: AgentSpecSchema.default('claude'),
 })
 
+const AskSchema = z
+  .object({
+    agent: AgentSpecSchema.default('claude'),
+  })
+  .default((): { agent: AgentSpec } => ({ agent: 'claude' }))
+
 type AgentsConfig = {
   planners: AgentSpec[]
   implementer: AgentSpec
@@ -139,6 +145,10 @@ const ConfigSchema = z.object({
       delivery: 'claude',
     })
   ),
+  // Conversational, read-only questions about factory's saved task state. Kept
+  // separate from the pipeline roles because `ask` is a context-building command,
+  // not a planning/review/delivery stage.
+  ask: AskSchema,
 })
 
 export type Config = z.infer<typeof ConfigSchema>
@@ -275,6 +285,8 @@ export type WorkContext = {
   plansDir: string | null
   // Normalized role → agent(s) for this worktree.
   agents: RoleAgents
+  // Agent used only for `factory ask`.
+  askAgent: Agent
   // Repo-level state dir (keyed by the main worktree, like the backlog), shared
   // across the repo's worktrees — holds the telemetry db and LESSONS (the meta
   // loop), so both accumulate across worktrees instead of resetting per branch.
@@ -346,6 +358,7 @@ export async function loadContext(cwd: string): Promise<WorkContext> {
     tasksDir: `${stateDir}/tasks`,
     plansDir: resolvePlansDir(root, config),
     agents: resolveAgents(config),
+    askAgent: normAgent(config.ask.agent),
     repoStateDir,
     metricsPath: `${repoStateDir}/metrics.db`,
   }

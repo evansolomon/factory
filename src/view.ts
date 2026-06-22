@@ -34,6 +34,7 @@ export async function printConfig(ctx: WorkContext): Promise<void> {
   field('captureEvals', String(c.captureEvals))
   field('postmortem', String(c.postmortem))
   field('onComplete', ocLabel)
+  field('ask', agentLabel(ctx.askAgent))
   log.log('')
   field('planners', a.planners.map(agentLabel).join(', '))
   field('implementer', agentLabel(a.implementer))
