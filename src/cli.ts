@@ -208,6 +208,7 @@ async function resolveIntent(rest: string[]): Promise<{ intent: string; verify: 
 async function maybeSharpen(
   root: string,
   agent: Agent,
+  reviewer: Agent,
   hooks: Hooks,
   base: { intent: string; verify: string | null },
   raw: boolean
@@ -215,7 +216,7 @@ async function maybeSharpen(
   if (raw || !process.stdin.isTTY) {
     return base
   }
-  return sharpen({ root, agent, hooks, intent: base.intent, verify: base.verify })
+  return sharpen({ root, agent, reviewer, hooks, intent: base.intent, verify: base.verify })
 }
 
 type AlertState = 'blocked' | 'needs-input' | 'done'
@@ -266,6 +267,7 @@ async function main(): Promise<number> {
     const refined = await sharpen({
       root: ctx.root,
       agent: ctx.agents.implementer,
+      reviewer: ctx.agents.reviewer,
       hooks: ctx.config.hooks,
       intent: base.intent,
       verify: base.verify,
@@ -293,6 +295,7 @@ async function main(): Promise<number> {
       const refined = await maybeSharpen(
         ctx.mainRoot,
         ctx.agents.implementer,
+        ctx.agents.reviewer,
         ctx.config.hooks,
         base,
         raw

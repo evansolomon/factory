@@ -1,6 +1,7 @@
 // Stage prompts for the per-task ensemble. Read-only stages must output only
 // markdown (it's saved verbatim as the artifact). Stages parsed by the conductor
-// must keep their exact marker lines (DECISION/COMPLEXITY/VERDICT/SHIP).
+// or sharpen loop must keep their exact marker lines
+// (DECISION/COMPLEXITY/VERDICT/SHIP/SPEC READY/SHARPEN).
 
 // Prior human answers, threaded into every pre-implementation stage so a resumed
 // run doesn't re-ask what's already been settled.
@@ -744,34 +745,60 @@ VERDICT: FAIL`
 }
 
 // The interactive sharpen step (CLI `factory add` / `factory backlog add`). Turns a
-// rough human intent into a self-contained, high-confidence GOAL spec (outcome /
-// verify / constraints / boundaries) the autonomous pipeline can implement with
-// no further access to the human. Borrows a recommended-answer interview
-// discipline, but batches questions (each turn is a slow research pass), plus a
-// premise check and a temporal "decide now vs. discover mid-build" lens.
+// rough human intent into a self-contained, high-confidence spec the autonomous
+// pipeline can implement with no further access to the human. The spec is the
+// durable handoff: it preserves problem framing, current-state evidence,
+// priorities, constraints, decisions, rejected alternatives, and verification.
+// The interview batches the highest-leverage unresolved questions, each with a
+// recommended answer, so the human makes product/scope calls instead of answering
+// questions the repo could answer.
 // `transcript` is the running human/agent
 // conversation; when `finalize`, emit the spec immediately.
 export function sharpenPrompt(transcript: string, finalize: boolean): string {
-  // The spec is goal-shaped — the success contract (what's true when done + how
-  // it's verified + what must hold + where), NOT an implementation approach;
-  // choosing the approach is the planner's job. Shown in both modes so finalize
-  // has the format too.
+  // The spec is goal-shaped: what/why/success/constraints, not an implementation
+  // plan. The downstream planner chooses the approach. Shown in both modes so
+  // finalize has the format too.
   const specFormat = `SPEC READY
 VERIFY: <the shell command that proves the outcome, or "none">
 
-## Outcome
-<the observable end state — what is true when this is done>
+## Problem
+<what is broken, missing, confusing, or worth improving>
+
+## Goal
+<the observable end state: what is true when this is done>
+
+## Context
+<why this matters, including the user's motivation or "not specified">
+
+## Verified Current State
+<repo facts you verified before asking, with file:line when useful; or "Not verified / greenfield: <why>">
+
+## Priorities
+<what to optimize for when tradeoffs arise>
 
 ## Scope
-In: <what this changes>  ·  Out: <what it explicitly does not touch>
+In: <what this changes>
+Out: <what it explicitly does not touch or must not touch>
 
 ## Constraints
 <invariants that must not regress or break>
 
-## Boundaries
-<which files / areas / surfaces this work may touch>
+## Decisions and Tradeoffs
+<settled choices, rejected tradeoffs, and why>
 
-State the goal (what + how it's verified + what must hold + where), not how to build it.`
+## Rejected Alternatives
+<options considered and why they are not the requested path, or "none">
+
+## Non-Binding Ideas
+<implementation ideas worth preserving as ideas, not requirements, or "none">
+
+## Acceptance Criteria
+<behavior-level checks that define done>
+
+## Assumptions
+<recommended answers chosen for unresolved questions, or "none">
+
+State what, why, success, constraints, and settled decisions. Do not write an implementation plan.`
 
   const ending = finalize
     ? `The human has ended the interview. Output the spec NOW, in exactly this format:
@@ -783,31 +810,111 @@ For anything still unresolved, choose your recommended answer and record it unde
 
 ${specFormat}
 
-Otherwise, ask everything you can settle now as ONE batch, in EXACTLY this format:
+Otherwise, ask the unresolved questions that must be settled now as ONE batch,
+in EXACTLY this format:
 
 QUESTIONS
 - <question> ||| <your recommended answer>
 - <question> ||| <your recommended answer>
 
-One question per line; \`|||\` separates the question from your recommended answer. Put any brief grounding context BEFORE the QUESTIONS line. (If instead you are answering a question the human asked you, just reply in prose — no QUESTIONS block.) Never write "SPEC READY" until the spec is genuinely ready.`
+One question per line; \`|||\` separates the question from your recommended answer.
+Put the tradeoff and any brief grounding context BEFORE the QUESTIONS line. (If
+instead you are answering a question the human asked you, just reply in prose —
+no QUESTIONS block.) Never write "SPEC READY" until the spec is genuinely ready.`
 
-  return `You are sharpening a rough task intent into a precise spec for an autonomous coding agent that will implement it with NO further access to the human. Your job is to surface and resolve now every decision that would otherwise be guessed or discovered mid-build.
+  return `You are sharpening a rough task intent into a precise spec for an autonomous
+coding agent that will implement it with NO further access to the human. Your job
+is to surface and resolve now every decision that would otherwise be guessed or
+discovered mid-build.
 
 Rules:
-- You have READ access to the repo. Explore it to answer questions yourself instead of asking the human.
-- Research before asking: read the files this task would touch, the recent git history of those areas, and how the codebase already solves similar problems. Ground every question and recommendation in what the code actually does — a question you could have answered by reading is a wasted turn.
-- Batch your questions. Each turn is a slow research pass, so ask EVERYTHING you can settle now in ONE numbered list (grouped by theme if it helps), each item with your recommended answer and a one-line why. Do NOT drip questions one at a time — that drags the interview out. Only hold a question for a later turn if it genuinely depends on the human's answer to one in this batch.
-- Challenge the premise: is this the right problem? what happens if nothing changes? Say so if the intent targets the wrong thing.
-- Temporal lens: focus on decisions that must be settled NOW (interfaces, data shape, scope boundaries, the verify command) — not cosmetic detail discoverable later.
-- Scope lens: if the intent hints at a general capability, or the obvious implementation would be a one-off hack, raise the narrow-vs-invest decision — build the shared capability now ("make the change easy, then make the easy change"), or just this case? It's a priority/investment call the human should make; recommend the smallest option that isn't a hack.
-- Security sniff: if this touches a sensitive surface (auth, secrets, untrusted input, data deletion, external calls, permissions), surface the security decision that must be settled now; otherwise don't manufacture one.
-- The human may ask YOU questions — answer them concretely from the code, then continue toward the spec.
-- Everything deferred or out of scope must be written down explicitly; vague intentions are lies.
+- You have READ access to the repo. Explore it to answer questions yourself
+  instead of asking the human.
+- Research before asking: read the files this task would touch, any allowed recent
+  history of those areas, and how the codebase already solves similar problems.
+  Ground every question and recommendation in what the code actually does — a
+  question you could have answered by reading is a wasted turn.
+- Classify the task internally before asking (bug, feature, refactor,
+  investigation, docs/tooling, product idea, or mixed). Use that to decide which
+  ambiguities matter most; do not force irrelevant sections to be long.
+- Batch your questions. Each turn is a slow research pass, so ask the unresolved
+  questions that must be settled now in ONE batch, highest-impact first, each item
+  with your recommended answer. Do NOT drip questions one at a time — that drags
+  the interview out. Do NOT ask low-value questions, cosmetic preferences, or
+  questions the repo can answer. Only hold a question for a later turn if it
+  genuinely depends on the human's answer to one in this batch.
+- Challenge the premise: is this the right problem? what happens if nothing
+  changes? Say so if the intent targets the wrong thing.
+- Temporal lens: focus on decisions that must be settled NOW (interfaces, data
+  shape, scope boundaries, the verify command) — not cosmetic detail discoverable
+  later.
+- Scope lens: if the intent hints at a general capability, or the obvious
+  implementation would be a one-off hack, raise the narrow-vs-invest decision —
+  build the shared capability now ("make the change easy, then make the easy
+  change"), or just this case? It's a priority/investment call the human should
+  make; recommend the smallest option that isn't a hack.
+- Security sniff: if this touches a sensitive surface (auth, secrets, untrusted
+  input, data deletion, external calls, permissions), surface the security
+  decision that must be settled now; otherwise don't manufacture one.
+- Preserve judgment: capture priorities, constraints, decisions, rejected
+  alternatives, and non-binding implementation ideas. Do not flatten the human's
+  intent into generic task language.
+- The human may ask YOU questions — answer them concretely from the code, then
+  continue toward the spec.
+- Everything deferred or out of scope must be written down explicitly; vague
+  intentions are lies.
 
 ${ending}
 
 ## Conversation so far
 ${transcript}`
+}
+
+export function sharpenReviewPrompt(
+  transcript: string,
+  spec: string,
+  verify: string | null
+): string {
+  return `Review this proposed sharpen spec before it is shown to the human or queued
+for the autonomous task loop.
+
+This is a gate for task quality, not a code review. The goal is to prevent a
+vague, generic, ungrounded, or over-prescriptive spec from entering the loop.
+
+Use the conversation and repo as needed. Output exactly ONE of these formats:
+
+SHARPEN: PASS
+
+SHARPEN: REVISE
+<revision instructions that do not require asking the human>
+
+QUESTIONS
+- <human decision that must be settled now> ||| <your recommended answer>
+- <human decision that must be settled now> ||| <your recommended answer>
+
+Choose PASS only when the spec is a strong autonomous handoff: it preserves the
+user's problem framing and priorities, cites or honestly states the verified
+current state, has clear scope and non-scope, records important decisions,
+rejected alternatives, and non-binding ideas, has behavior-level acceptance
+criteria, and does not smuggle in an implementation plan.
+
+Choose REVISE when the problem is answerable by reading, clearer writing, or
+better synthesis: generic sections, missing but repo-answerable current state,
+missing acceptance criteria, missing rejected alternatives, over-specific
+implementation steps, or unclear separation between requirements and ideas.
+
+Choose QUESTIONS only for decisions the human actually must make now. Do not ask
+questions the repo can answer, questions with a safe obvious default, or cosmetic
+preferences.
+
+## Conversation
+${transcript}
+
+## Proposed spec
+${spec}
+
+## Proposed verify command
+${verify ?? 'none'}`
 }
 
 export const grillPrompt = sharpenPrompt
