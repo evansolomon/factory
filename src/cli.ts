@@ -114,7 +114,9 @@ HOW A TASK FLOWS
   A failed gate auto-fixes and retries (config.retries) in-run before escalating.
   A transient verify/ship failure is then auto-resumed on a backoff; a review or
   security block (or an exhausted retry budget) escalates: it shows in 'factory
-  status' and, inside tmux, lights the window orange + rings the bell. Reply to a
+  status' and emits the attention hook once the loop has nothing else runnable.
+  The hook consumer decides whether that means a tmux color, bell, notification, or
+  something else. Reply to a
   question with 'factory answer'; pick a block back up with 'factory resume'.
 
 TYPICAL USE
@@ -217,20 +219,13 @@ async function maybeGrill(
 
 type AlertState = 'blocked' | 'needs-input' | 'done'
 
-// The queue's most-important state, for both the window color and the idle
-// label: blocked (red) > needs-input (orange) > all-done (green) > nothing.
+// The queue's most-important state for attention and the idle label:
+// blocked > needs-input > all-done > nothing.
 async function queueState(ctx: WorkContext): Promise<AlertState | null> {
   const tasks = await loadTasks(ctx)
   const has = (s: string) => tasks.some((t) => t.meta.status === s)
   const allDone = tasks.length > 0 && tasks.every((t) => t.meta.status === 'done')
   return has('blocked') ? 'blocked' : has('needs-input') ? 'needs-input' : allDone ? 'done' : null
-}
-
-// Emit the queue's attention state (drives the tmux window color + bell via the
-// `attention` hook). 'none' clears it. Aggregate over the queue, so the window
-// stays lit while anything is blocked/awaiting even as the loop works other tasks.
-async function reflectAlert(ctx: WorkContext): Promise<void> {
-  await emit(ctx.root, ctx.config.hooks, 'attention', { state: (await queueState(ctx)) ?? 'none' })
 }
 
 async function main(): Promise<number> {
@@ -347,7 +342,19 @@ async function main(): Promise<number> {
     log.info(
       once ? 'running one task' : drain ? 'draining queue' : 'watching queue (Ctrl-C to stop)'
     )
-    await reflectAlert(ctx)
+
+    // The attention hook means "factory is stopped, waiting on you" — so it is
+    // raised only when the loop has no runnable work left, never while it's
+    // actively churning other tasks. Dedup by last-emitted state so a long idle
+    // wait doesn't repeatedly notify hook consumers on every poll.
+    let alerted: AlertState | 'none' | null = null
+    const setAlert = async (state: AlertState | 'none') => {
+      if (state === alerted) {
+        return
+      }
+      alerted = state
+      await emit(ctx.root, ctx.config.hooks, 'attention', { state })
+    }
 
     // Long-lived by default: when no task is ready, wait and poll so tasks added
     // later (factory add), unblocked later (factory resume/answer), or due for an
@@ -356,21 +363,25 @@ async function main(): Promise<number> {
     while (true) {
       const task = await nextRunnable(ctx)
       if (!task) {
+        // Nothing runnable: the loop is now genuinely waiting on you. Drive
+        // attention from what's left — blocked/needs-input/done are meaningful to
+        // hook consumers, an empty/all-other queue clears it. This is the only
+        // place the run loop raises attention, so consumers never see "waiting on
+        // you" while factory is actively working other tasks. Label the window the
+        // same way via loop.idle.
+        const remaining = await queueState(ctx)
+        await setAlert(remaining ?? 'none')
         if (once || drain) {
           break
         }
-        // Nothing running: label the window by what's left — (done) when the
-        // queue is all finished, else (blocked)/(needs-input)/(idle).
-        await emit(ctx.root, ctx.config.hooks, 'loop.idle', {
-          state: (await queueState(ctx)) ?? 'idle',
-        })
+        await emit(ctx.root, ctx.config.hooks, 'loop.idle', { state: remaining ?? 'idle' })
         await Bun.sleep(POLL_MS)
         continue
       }
 
       log.step(`running ${task.id}`)
-      // Actively working — clear any attention state, announce the start.
-      await emit(ctx.root, ctx.config.hooks, 'attention', { state: 'none' })
+      // Actively working — clear any waiting alert, announce the start.
+      await setAlert('none')
       await emit(ctx.root, ctx.config.hooks, 'task.start', { task: task.id })
       // Isolate the task: any unhandled error blocks just this task (logged
       // clearly) and the loop keeps going, rather than killing the whole run.
@@ -427,7 +438,6 @@ async function main(): Promise<number> {
         }
         log.info(`    detail: factory show ${task.id}  ·  retry: factory resume`)
       }
-      await reflectAlert(ctx)
 
       if (once) {
         break

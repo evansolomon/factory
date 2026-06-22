@@ -104,16 +104,24 @@ async function readReply(rl: Interface): Promise<Reply> {
   }
 }
 
-// Drive the tmux tab: "(grill)" + a ▶ working-marker while the agent computes,
-// just "(grill)" while it's your turn — so other panes in the tab can tell
-// thinking from waiting on you. (The ▶ is the shared @agent_running indicator the
-// hook sets; see ~/.factory/hooks/tmux-state.sh.)
-async function thinking<T>(opts: GrillOpts, work: Promise<T>): Promise<T> {
+// Drive lifecycle hooks for the interactive grill: active stage while the agent
+// computes, and attention while factory is actually waiting at a human prompt.
+async function thinking<T>(opts: GrillOpts, work: () => Promise<T>): Promise<T> {
+  await emit(opts.root, opts.hooks, 'attention', { state: 'none' })
   await emit(opts.root, opts.hooks, 'stage.change', { stage: 'grill', active: true })
   try {
-    return await work
+    return await work()
   } finally {
     await emit(opts.root, opts.hooks, 'stage.change', { stage: 'grill', active: false })
+  }
+}
+
+async function waitingForInput<T>(opts: GrillOpts, wait: () => Promise<T>): Promise<T> {
+  await emit(opts.root, opts.hooks, 'attention', { state: 'needs-input' })
+  try {
+    return await wait()
+  } finally {
+    await emit(opts.root, opts.hooks, 'attention', { state: 'none' })
   }
 }
 
@@ -169,8 +177,7 @@ export async function grill(opts: GrillOpts): Promise<GrillResult | null> {
   try {
     for (let i = 0; i < MAX_TURNS; i++) {
       log.info('  …thinking')
-      const { text, usage } = await thinking(
-        opts,
+      const { text, usage } = await thinking(opts, () =>
         runAgent(opts.agent, {
           root: opts.root,
           prompt: grillPrompt(transcript(turns), false),
@@ -198,7 +205,7 @@ export async function grill(opts: GrillOpts): Promise<GrillResult | null> {
             if (rec) {
               log.info(`  recommend: ${rec}`)
             }
-            const input = (await ask(rl, 'you> ')).trim()
+            const input = (await waitingForInput(opts, () => ask(rl, 'you> '))).trim()
             if (input === '/cancel') {
               return null
             }
@@ -233,7 +240,7 @@ export async function grill(opts: GrillOpts): Promise<GrillResult | null> {
       } else {
         log.info('(no response — type a reply to retry, or Enter to finish)')
       }
-      const r = await readReply(rl)
+      const r = await waitingForInput(opts, () => readReply(rl))
       if (r.kind === 'cancel') {
         return null
       }
@@ -246,6 +253,7 @@ export async function grill(opts: GrillOpts): Promise<GrillResult | null> {
     return proposed ?? (await finalize(opts, turns, tally))
   } finally {
     rl.close()
+    await emit(opts.root, opts.hooks, 'attention', { state: 'none' })
     await emit(opts.root, opts.hooks, 'stage.change', { stage: '', active: false })
     if (tally.inTok || tally.outTok) {
       log.info(`  tokens: ${fmtTok(tally.inTok)} in → ${fmtTok(tally.outTok)} out`)
@@ -261,8 +269,7 @@ async function finalize(
   tally: { inTok: number; outTok: number }
 ): Promise<GrillResult> {
   log.info('  …finalizing the spec')
-  const { text, usage } = await thinking(
-    opts,
+  const { text, usage } = await thinking(opts, () =>
     runAgent(opts.agent, {
       root: opts.root,
       prompt: grillPrompt(transcript(turns), true),
