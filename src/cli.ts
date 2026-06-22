@@ -29,6 +29,8 @@ import {
   readyGrilledTask,
   setStatus,
 } from './task.ts'
+import { upgradeFactory } from './upgrade.ts'
+import { FACTORY_VERSION } from './version.ts'
 import { printConfig, printReport, printShow, printStatus } from './view.ts'
 
 const HELP = `factory — a self-improving coding loop.
@@ -102,6 +104,8 @@ COMMANDS
   factory config [edit [--global|--worktree|--repo-parent|--dir <dir>]]
                            Show effective config + where it's set; edit opens the
                            global config by default; flags target another layer.
+  factory version | --version    Print the current CLI version.
+  factory upgrade                Update factory to the latest GitHub release.
 
 HOW A TASK FLOWS
   ready → plan (codex + claude) → cross-critique → reconcile
@@ -235,6 +239,15 @@ async function main(): Promise<number> {
   if (!cmd || cmd === 'help' || cmd === '-h' || cmd === '--help') {
     log.log(HELP)
     return 0
+  }
+
+  if (cmd === 'version' || cmd === '--version') {
+    log.log(FACTORY_VERSION)
+    return 0
+  }
+
+  if (cmd === 'upgrade') {
+    return await upgradeFactory()
   }
 
   if (cmd === 'add') {

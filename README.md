@@ -24,6 +24,22 @@ curl -fsSL https://raw.githubusercontent.com/evansolomon/factory/master/install.
   FACTORY_INSTALL_DIR="/usr/local/bin" bash
 ```
 
+Check the installed CLI version with:
+
+```bash
+factory --version
+```
+
+Upgrade to the latest GitHub Release with:
+
+```bash
+factory upgrade
+```
+
+When `factory upgrade` is run from an installed `factory` binary, it preserves
+that binary's directory. When run from source or through another executable, it
+uses the installer default; custom installs can set `FACTORY_INSTALL_DIR`.
+
 You can also run from a clone:
 
 ```bash
@@ -147,6 +163,8 @@ factory show [task-id] [step]                       # drill into one task / a st
 factory report                                     # telemetry roll-up (manage by numbers)
 factory lessons                                    # curated lessons + raw candidates
 factory config [edit ...]                           # show/edit effective config
+factory version | --version                         # print the current CLI version
+factory upgrade                                     # install the latest GitHub Release
 ```
 
 - **`factory run`** is **long-lived by default**: when the queue drains it polls
