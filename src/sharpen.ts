@@ -5,6 +5,7 @@ import { composeInEditor } from './editor.ts'
 import { emit, type Hooks } from './hooks.ts'
 import { log } from './log.ts'
 import { sharpenPrompt, sharpenReviewPrompt } from './prompts.ts'
+import { BOLD, CYAN, DIM, GREEN, RESET, styleSharpenMarkdownLine } from './sharpen-render.ts'
 
 // Interactive sharpen step. Seeded with the raw intent, an agent interrogates it
 // into a self-contained goal spec, exploring the repo itself. Each agent turn is
@@ -151,7 +152,7 @@ async function readQuestionAnswers(
   const answered: string[] = []
   for (let qi = 0; qi < questions.length; qi++) {
     const { q, rec } = questions[qi] ?? { q: '', rec: '' }
-    log.log(`\n${BOLD}(${qi + 1}/${questions.length})${RESET} ${styleLine(q)}`)
+    log.log(`\n${BOLD}(${qi + 1}/${questions.length})${RESET} ${styleSharpenMarkdownLine(q)}`)
     if (rec) {
       log.info(`  recommend: ${rec}`)
     }
@@ -196,28 +197,12 @@ function fmtTok(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`
 }
 
-const DIM = '\x1b[2m'
-const BOLD = '\x1b[1m'
-const CYAN = '\x1b[36m'
-const GREEN = '\x1b[32m'
-const RESET = '\x1b[0m'
-
-// Inline styling for one line of the agent's markdown: bold a leading "Label:"
-// (Recommendation:/Why:/headings), colorize `code` spans (dropping the noisy
-// backticks), and render **bold**.
-function styleLine(line: string): string {
-  return line
-    .replace(/^(\s*)([A-Z][A-Za-z ]{1,38}):/, (_m, sp, label) => `${sp}${BOLD}${label}:${RESET}`)
-    .replace(/`([^`]+)`/g, `${CYAN}$1${RESET}`)
-    .replace(/\*\*([^*]+)\*\*/g, `${BOLD}$1${RESET}`)
-}
-
 // Frame an agent turn with a dim left gutter so a multi-paragraph message reads
 // as one block, visually distinct from your left-aligned `you>` input.
 function renderAgent(text: string): string {
   return text
     .split('\n')
-    .map((line) => `${DIM}│${RESET} ${styleLine(line)}`)
+    .map((line) => `${DIM}│${RESET} ${styleSharpenMarkdownLine(line)}`)
     .join('\n')
 }
 
