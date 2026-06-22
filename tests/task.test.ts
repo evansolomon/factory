@@ -84,7 +84,7 @@ describe('task state transitions', () => {
 
   test('stranded planning tasks restart planning instead of resuming work', async () => {
     const ctx = await workContext()
-    const task = await addTask(ctx, 'Plan from scratch', null, 'planning')
+    const task = await addTask(ctx, 'Plan from scratch', null, { status: 'planning' })
 
     const next = await nextRunnable(ctx, 2_000)
 
@@ -97,7 +97,7 @@ describe('task state transitions', () => {
 
   test('stranded later-stage tasks resume from saved artifacts', async () => {
     const ctx = await workContext()
-    const task = await addTask(ctx, 'Resume review', null, 'reviewing')
+    const task = await addTask(ctx, 'Resume review', null, { status: 'reviewing' })
 
     const next = await nextRunnable(ctx, 2_000)
 
@@ -110,7 +110,10 @@ describe('task state transitions', () => {
 
   test('interrupted sharpening tasks restart the sharpen stage', async () => {
     const ctx = await workContext()
-    const task = await addTask(ctx, 'Still sharpening', null, 'sharpening', 'pending')
+    const task = await addTask(ctx, 'Still sharpening', null, {
+      status: 'sharpening',
+      sharpen: 'pending',
+    })
 
     const next = await nextRunnable(ctx, 2_000)
 
@@ -123,7 +126,7 @@ describe('task state transitions', () => {
 
   test('legacy interactive grilling tasks are not reclaimed as stranded work', async () => {
     const ctx = await workContext()
-    await addTask(ctx, 'Still grilling', null, 'grilling')
+    await addTask(ctx, 'Still grilling', null, { status: 'grilling' })
 
     expect(await nextRunnable(ctx, 2_000)).toBeNull()
   })
@@ -164,15 +167,34 @@ describe('task state transitions', () => {
     expect(task?.meta.resume).toBe(false)
     expect(task?.meta.resumeKind).toBeNull()
     expect(task?.meta.autoRetries).toBe(0)
+    expect(task?.meta.complexity).toBeNull()
+  })
+
+  test('persists declared trivial task complexity', async () => {
+    const ctx = await workContext()
+    const added = await addTask(ctx, 'Fix typo', null, { complexity: 'trivial' })
+
+    const task = (await loadTasks(ctx)).find((t) => t.id === added.id)
+
+    expect(task?.meta.complexity).toBe('trivial')
+  })
+
+  test('persists declared complex task complexity', async () => {
+    const ctx = await workContext()
+    const added = await addTask(ctx, 'Refactor parser', null, { complexity: 'complex' })
+
+    const task = (await loadTasks(ctx)).find((t) => t.id === added.id)
+
+    expect(task?.meta.complexity).toBe('complex')
   })
 
   test('parallel adds with the same slug claim distinct task ids', async () => {
     const ctx = await workContext()
 
     const tasks = await Promise.all([
-      addTask(ctx, 'Same task', null, 'ready', 'pending'),
-      addTask(ctx, 'Same task', null, 'ready', 'pending'),
-      addTask(ctx, 'Same task', null, 'ready', 'pending'),
+      addTask(ctx, 'Same task', null, { sharpen: 'pending' }),
+      addTask(ctx, 'Same task', null, { sharpen: 'pending' }),
+      addTask(ctx, 'Same task', null, { sharpen: 'pending' }),
     ])
 
     expect(tasks.map((t) => t.id).sort()).toEqual(['same-task', 'same-task-2', 'same-task-3'])

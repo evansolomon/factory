@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { dirname } from 'node:path'
+import { type ParsedAddOptions, parseAddOptions } from './add-options.ts'
 import { askFactory } from './ask.ts'
 import { addBacklog, loadBacklog, removeBacklog } from './backlog.ts'
 import { AUTO_CAP, runTask, type TaskOutcome } from './conductor.ts'
@@ -42,7 +43,7 @@ COMMANDS
   factory backlog [add|rm] …    Experimental repo-level backlog of vetted intents.
                              add/rm take the same intent forms as 'factory add';
                              automatic dispatch is not built yet.
-  factory add [intent...] [--verify <cmd...>] [--edit] [--raw]
+  factory add [--raw] [--trivial | --complexity trivial|complex] [intent...] [--verify <cmd...>] [--edit]
       Add a task to this worktree's queue. This ONLY queues — it does not start
       working. A running 'factory run' (below) is what actually picks tasks up.
       With no intent (or --edit), opens $EDITOR to compose it — handy when a fresh
@@ -52,8 +53,10 @@ COMMANDS
       By default the running loop triages the task, then SHARPENS non-trivial
       pending intents before planning: an agent refines them into self-contained
       specs, reading the repo itself and pausing with questions.md only when it
-      needs a human decision. --raw skips sharpening and queues the intent as-is.
-      Auto-skipped when the intent is piped.
+      needs a human decision. --raw skips sharpening and queues the intent as-is;
+      runtime triage still decides complexity. Auto-skipped when the intent is
+      piped. --trivial / --complexity skip sharpening too and use the declared
+      runtime complexity instead of triage.
 
   factory run [--once | --drain]
       Work the queue. Default: stay running and pick up tasks as they're added
@@ -207,6 +210,24 @@ async function resolveIntent(rest: string[]): Promise<{ intent: string; verify: 
   return { intent, verify: parsed.verify }
 }
 
+function queuedSuffix(opts: {
+  verify: string | null
+  complexity: ParsedAddOptions['complexity']
+  sharpenPending: boolean
+}): string {
+  const parts = []
+  if (opts.complexity) {
+    parts.push(opts.complexity)
+  }
+  if (opts.verify) {
+    parts.push(`verify: ${opts.verify}`)
+  }
+  if (opts.sharpenPending) {
+    parts.push('sharpen pending')
+  }
+  return parts.length > 0 ? ` (${parts.join(', ')})` : ''
+}
+
 // Backlog entries are not processed by a run loop yet, so backlog add keeps the
 // interactive sharpen step. Worktree `factory add` only enqueues.
 async function maybeSharpen(
@@ -252,26 +273,32 @@ async function main(): Promise<number> {
   }
 
   if (cmd === 'add') {
-    const raw = rest.includes('--raw')
-    const base = await resolveIntent(rest.filter((a) => a !== '--raw'))
+    const parsed = parseAddOptions(rest)
+    if (!parsed.ok) {
+      log.fail(parsed.message)
+      return 1
+    }
+    const base = await resolveIntent(parsed.options.args)
     if (!base.intent) {
       log.fail('add needs an intent (argument, editor, or stdin)')
       return 1
     }
     const ctx = await loadContext(process.cwd())
-    const skipSharpen = raw || !process.stdin.isTTY
-    const task = await addTask(
-      ctx,
-      base.intent,
-      base.verify,
-      'ready',
-      skipSharpen ? 'skipped' : 'pending'
-    )
-    log.ok(
-      `queued ${task.id}${base.verify ? ` (verify: ${base.verify})` : ''}${
-        skipSharpen ? '' : ' (sharpen pending)'
-      }`
-    )
+    // factory add only enqueues; the run loop sharpens non-trivial pending intents.
+    // --raw, a declared complexity, or piped input all skip that sharpen pre-stage —
+    // and a declared complexity also skips runtime triage.
+    const skipSharpen =
+      parsed.options.raw || parsed.options.complexity !== null || !process.stdin.isTTY
+    const task = await addTask(ctx, base.intent, base.verify, {
+      sharpen: skipSharpen ? 'skipped' : 'pending',
+      complexity: parsed.options.complexity,
+    })
+    const suffix = queuedSuffix({
+      verify: base.verify,
+      complexity: task.meta.complexity,
+      sharpenPending: task.meta.sharpen === 'pending',
+    })
+    log.ok(`queued ${task.id}${suffix}`)
     return 0
   }
 

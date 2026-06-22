@@ -34,6 +34,9 @@ export type Status = z.infer<typeof StatusSchema>
 const SharpenStateSchema = z.enum(['pending', 'done', 'skipped'])
 export type SharpenState = z.infer<typeof SharpenStateSchema>
 
+export const TaskComplexitySchema = z.enum(['trivial', 'complex'])
+export type TaskComplexity = z.infer<typeof TaskComplexitySchema>
+
 // Statuses where a task is at rest — no run-loop is actively working it: queued
 // (ready), waiting on a human (needs-input/blocked), on a backoff (retrying), legacy
 // interactive grilling, or finished (done). Every OTHER
@@ -91,6 +94,8 @@ const MetaSchema = z.object({
   // many loop-level retries have been spent against the cap.
   retryAt: z.string().nullable().default(null),
   autoRetries: z.number().int().default(0),
+  // Explicit complexity declared by `factory add`; null means runtime triage decides.
+  complexity: TaskComplexitySchema.nullable().default(null),
 })
 export type Meta = z.infer<typeof MetaSchema>
 
@@ -136,6 +141,12 @@ function alreadyExists(err: unknown): boolean {
   return parsed.success && parsed.data.code === 'EEXIST'
 }
 
+export type AddTaskOptions = {
+  status?: Status
+  sharpen?: SharpenState
+  complexity?: TaskComplexity | null
+}
+
 async function listTaskDirs(tasksDir: string): Promise<string[]> {
   try {
     const entries = await readdir(tasksDir, { withFileTypes: true })
@@ -152,8 +163,7 @@ export async function addTask(
   ctx: WorkContext,
   intent: string,
   verify: string | null,
-  status: Status = 'ready',
-  sharpen: SharpenState = 'done'
+  options: AddTaskOptions = {}
 ): Promise<Task> {
   await mkdir(ctx.tasksDir, { recursive: true })
   // Descriptive, number-free id; disambiguate same-named tasks with a -N suffix.
@@ -179,18 +189,19 @@ export async function addTask(
   const meta: Meta = {
     id,
     slug,
-    status,
+    status: options.status ?? 'ready',
     verify,
     createdAt: now,
     updatedAt: now,
     commit: null,
     note: null,
-    sharpen,
+    sharpen: options.sharpen ?? 'done',
     resume: false,
     resumeNote: null,
     resumeKind: null,
     retryAt: null,
     autoRetries: 0,
+    complexity: options.complexity ?? null,
   }
 
   await Bun.write(`${dir}/task.md`, `${intent.trim()}\n`)

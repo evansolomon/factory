@@ -61,6 +61,7 @@ import {
   saveMeta,
   setStatus,
   type Task,
+  type TaskComplexity,
   writeArtifact,
   writeLiveMeter,
 } from './task.ts'
@@ -270,6 +271,24 @@ type RunStats = {
   triage: 'trivial' | 'complex' | null
   retries: number
   verifyFirstTry: boolean | null
+}
+
+export type ComplexityDecision =
+  | { source: 'declared'; trivial: boolean; complexity: TaskComplexity }
+  | { source: 'triage' }
+  | { source: 'none' }
+
+export function decideComplexity(
+  declared: TaskComplexity | null,
+  triageEnabled: boolean
+): ComplexityDecision {
+  if (declared === 'trivial') {
+    return { source: 'declared', trivial: true, complexity: declared }
+  }
+  if (declared === 'complex') {
+    return { source: 'declared', trivial: false, complexity: declared }
+  }
+  return triageEnabled ? { source: 'triage' } : { source: 'none' }
 }
 
 // Persist one telemetry record for this pass. Best-effort: recordRun never throws,
@@ -807,6 +826,8 @@ async function runSharpenStage(
 
 // Run a single task. A trivial task (per triage) takes the fast path — straight
 // to implement — while a complex one goes through the full planning ensemble.
+// Run a single task. A trivial task (per triage or declared metadata) takes the fast
+// path — straight to implement — while a complex one goes through the full planning ensemble.
 // Both are then reviewed, verified, committed, and (if configured) shipped.
 export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome> {
   let intent = await readIntent(task)
@@ -853,7 +874,12 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
 
     // 0. TRIAGE — classify the task; trivial ones skip the whole plan ensemble.
     let trivial = false
-    if (ctx.config.triage) {
+    const complexityDecision = decideComplexity(task.meta.complexity, ctx.config.triage)
+    if (complexityDecision.source === 'declared') {
+      trivial = complexityDecision.trivial
+      const label = complexityDecision.complexity
+      log.info(`${task.id}: ${label} — using declared complexity (skipping triage)`)
+    } else if (complexityDecision.source === 'triage') {
       await progress(ctx, task, 'triage', 'triage — trivial or complex?')
       const verdict = await agentStep(
         meter,

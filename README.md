@@ -85,10 +85,11 @@ dir, so a crash leaves an inspectable trail and the committed queue carries the
 plan + proof as provenance.
 
 ```
-task.md (intent) + meta.json (verify) [+ answers.md on resume]
+task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.md on resume]
         │
   1. TRIAGE      trivial? → fast path: skip to IMPLEMENT   (read-only)
                  also flags user-facing? → gates the UX lenses
+                 skipped when meta.json declares trivial/complex
         │ (complex)
   2. SHARPEN     [pending non-trivial only] refine intent    (read-only)
         ├─ ASK  → write questions.md, status: needs-input, set task aside
@@ -183,7 +184,7 @@ ready tasks (never idle). You answer async; the running instance picks it back u
 `factory` is the CLI binary.
 
 ```bash
-factory add "<intent...>" [--verify "<cmd...>"]   # queue a task (also reads intent from stdin)
+factory add [--raw] [--trivial | --complexity trivial|complex] "<intent...>" [--verify "<cmd...>"]   # queue a task
 factory run [--once|--drain]                       # process tasks
 factory answer [task-id] "<answer...>"             # answer a needs-input task, requeue it
 factory resume [task-id] [note...]                 # pick a blocked task back up where it left off
@@ -207,6 +208,12 @@ factory upgrade                                     # install the latest GitHub 
   tmux window's lifetime.
   - `--once` — process one ready task, then exit (for proving things out).
   - `--drain` — process until no ready tasks, then exit (batch).
+- **`factory add --trivial`** is shorthand for `--complexity trivial`: it skips
+  sharpening, persists the declared complexity in `meta.json`, and the later run
+  uses the existing trivial fast path without model triage. `--complexity complex`
+  also skips model triage, but still runs the full planning ensemble. Complexity
+  flags must appear before `--verify`; `--edit` still opens the editor first.
+  `--raw` skips sharpening only — it does not declare runtime complexity.
 - **`factory answer`** (for **needs-input**) appends to `answers.md` and flips the
   task back to `ready`; the resumed run continues from durable state, either
   sharpening again with your answer or re-planning with it threaded in (stateless
@@ -350,7 +357,8 @@ Fields:
 - **`triage`** — classify each task first; trivial ones skip the whole plan
   ensemble (research/plan/critique/reconcile/revise/select) and go straight to
   implement, still reviewed + verified (default `true`; `false` always runs the
-  full flow).
+  full flow). A per-task declared complexity from `factory add --trivial` or
+  `--complexity trivial|complex` wins over this setting and skips model triage.
 - **`security`** — run a dedicated red-team security gate on the implemented diff
   (every task, both paths), feeding the same auto-fix retry loop as the review
   gate (default `true`; `false` skips it).
@@ -490,12 +498,12 @@ or jump-target behavior you want.
 ```
 <state-dir>/tasks/<slug>[-N]/
   task.md                # human-owned intent/spec
-  meta.json              # machine-owned status, verify, sharpen, timestamps, resume/retry state
+  meta.json              # machine-owned status, verify, sharpen, optional complexity, timestamps, resume/retry state
   meter.json             # live token/stage counts for the current pass
   sharpen.md             # run-loop intent sharpening output
   sharpen.review.md      # reviewer gate for the sharpened spec
   sharpen.final.md       # final sharpen synthesis, when needed
-  triage.md              # trivial/complex + user-facing classification
+  triage.md              # model triage output, when model triage runs
   research.md            # shared research dossier
   plan.<planner>.md      # first-pass planner output
   critique.<planner>.md  # cross-critique output
@@ -527,7 +535,9 @@ or jump-target behavior you want.
 
 `task.md` (yours) and `meta.json` (the machine's) are split so `factory` flips
 status without rewriting your prose, except when the run-loop sharpen stage
-finishes: then `task.md` is replaced with the refined spec. Repo-level state
+finishes: then `task.md` is replaced with the refined spec. A complexity override
+from `factory add --trivial` or `--complexity trivial|complex` lives in
+`meta.json`; `triage.md` exists only for model triage output. Repo-level state
 lives under the main worktree's state dir, shared across linked worktrees:
 `LESSONS.md`, `LESSONS.candidates.md`, `metrics.db`, `eval-candidates/`, and
 `backlog/`.
@@ -567,6 +577,17 @@ on to other runnable work. `factory answer` appends your answer to `answers.md`;
 the next run pass sharpens again with that answer in context. `--raw` skips
 sharpening and queues the intent as-is, and sharpening still auto-skips when the
 intent is piped.
+
+`--trivial` and `--complexity trivial|complex` also skip sharpening and queue the
+intent as written, but they additionally declare runtime complexity. `--trivial`
+is shorthand for `--complexity trivial`; `--complexity complex` means "do not ask
+the model to classify this, but still do full planning." With `--edit`, the editor
+still opens for intent composition before the task is queued directly.
+
+Declared complexity is deliberately not a branch-maintenance mode. Tasks such as
+fetch/rebase/fix conflicts/force-push need a separate operation model because the
+normal pipeline expects implementation to create a worktree diff that factory
+reviews, verifies, commits, and optionally delivers.
 
 Before a proposed spec is shown, the configured `reviewer` agent checks it as an
 autonomous-handoff artifact. Weak specs do not go straight into the queue: gaps
