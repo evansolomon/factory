@@ -521,15 +521,27 @@ high-signal. `factory lessons` prints both.
 The proactive complement to the reactive reconcile valve: resolve ambiguity at
 the *front door*, before a task ever enters the loop. By default `factory add` and
 `factory backlog add` **sharpen** the raw intent — an agent (the configured
-`implementer`) asks about it until it becomes a self-contained, high-confidence goal spec,
-reading the repo itself to answer what it can. Each agent turn is a slow research
-pass, so it **batches its questions** — then the CLI **walks you through them one
-at a time** (Enter accepts its recommended answer, `/skip` skips one) with no
-per-question latency, and sends all your answers back at once. It's two-way — you
-can `/edit` a long reply or ask it questions back. Once a spec is proposed, **Enter
-queues it** (`/done` works too); sharpening also proposes the verify command.
+`implementer`) asks about it until it becomes a self-contained spec, reading the
+repo itself to answer what it can. The spec is the durable handoff: problem, goal,
+context, verified current state, priorities, scope, constraints, decisions and
+tradeoffs, rejected alternatives, non-binding ideas, acceptance criteria, and
+assumptions.
+
+Each agent turn is a slow research pass, so it **batches the unresolved questions
+that must be settled now**, highest-impact first — then the CLI **walks you
+through them one at a time** (Enter accepts its recommended answer, `/skip` skips
+one) with no per-question latency, and sends all your answers back at once. It's
+two-way — you can `/edit` a long reply or ask it questions back. Once a spec is
+proposed, **Enter queues it** (`/done` works too); sharpening also proposes the
+verify command.
 `/cancel` aborts. `--raw` skips it and queues the intent as-is, and the
 sharpen step auto-skips when the intent is piped (non-interactive — no human to ask).
+
+Before a proposed spec is shown, the configured `reviewer` agent checks it as an
+autonomous-handoff artifact. Weak specs do not go straight into the queue: gaps
+answerable from the repo are sent back to the sharpener as a revision request,
+and only true human decisions become another question batch. This keeps
+sharpening from becoming a nicer restatement of the original prompt.
 
 The prompt borrows a recommended-answer interview discipline plus a few lenses
 worth stealing from heavier plan-review skills: a **premise challenge** ("is this
@@ -538,11 +550,13 @@ discovered mid-build?"), a **scope lens** (narrow fix vs. an enabling refactor /
 shared capability — "make the change easy, then make the easy change"), and a
 **security sniff** (flag the security decision when the task touches a sensitive
 surface) — every decision settled here is one fewer mid-loop escalation later.
-It's grounded by a research-first rule: the agent reads the code and recent git
-history before asking, so questions aren't ones it could have answered itself.
-It's its own `sharpenPrompt` (not the Claude Code `work-plan` skill): the CLI
-mediates the turn-taking around headless agent calls, which a one-shot `claude
--p` can't do.
+It's grounded by a research-first rule: the agent reads relevant code and local
+patterns before asking, so questions aren't ones it could have answered itself.
+It preserves the human's judgment instead of flattening it: priorities,
+constraints, rejected paths, and implementation ideas stay visible, with ideas
+clearly labeled as non-binding. It's its own `sharpenPrompt` (not the Claude Code
+`work-plan` skill): the CLI mediates the turn-taking around headless agent calls,
+which a one-shot `claude -p` can't do.
 
 The richer **`work-plan` skill** (`~/.claude/skills/work-plan`) remains for deep
 sharpening inside a Claude Code session; the loop's reconcile valve still handles

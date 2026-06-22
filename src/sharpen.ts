@@ -4,7 +4,7 @@ import type { Agent } from './config.ts'
 import { composeInEditor } from './editor.ts'
 import { emit, type Hooks } from './hooks.ts'
 import { log } from './log.ts'
-import { sharpenPrompt } from './prompts.ts'
+import { sharpenPrompt, sharpenReviewPrompt } from './prompts.ts'
 
 // Interactive sharpen step. Seeded with the raw intent, an agent interrogates it
 // into a self-contained goal spec, exploring the repo itself. Each agent turn is
@@ -16,12 +16,13 @@ export type SharpenResult = { intent: string; verify: string | null }
 type SharpenOpts = {
   root: string
   agent: Agent
+  reviewer?: Agent
   hooks: Hooks
   intent: string
   verify: string | null
 }
 
-type Turn = { role: 'human' | 'agent'; text: string }
+type Turn = { role: 'human' | 'agent' | 'reviewer'; text: string }
 
 // Bound the conversation so a misbehaving agent can't loop forever.
 const MAX_TURNS = 24
@@ -49,6 +50,7 @@ function parseSharpen(text: string): Parsed {
 }
 
 type Question = { q: string; rec: string }
+type QuestionReply = { kind: 'cancel' } | { kind: 'finish' } | { kind: 'answers'; text: string }
 
 // When not ready, the agent batches its questions in a `QUESTIONS` block of
 // `- <question> ||| <recommended answer>` lines (any grounding context goes
@@ -71,6 +73,43 @@ function parseQuestions(text: string): { preamble: string; questions: Question[]
     }
   }
   return { preamble, questions }
+}
+
+type Review =
+  | { kind: 'pass' }
+  | { kind: 'revise'; message: string }
+  | { kind: 'questions'; preamble: string; questions: Question[] }
+
+function firstLine(text: string): string {
+  return (
+    text
+      .split('\n')
+      .map((line) => line.trim())
+      .find(Boolean) ?? ''
+  )
+}
+
+function parseReview(text: string): Review {
+  const marker = firstLine(text)
+  if (marker === 'SHARPEN: PASS') {
+    return { kind: 'pass' }
+  }
+  if (marker === 'SHARPEN: REVISE') {
+    const start = text.indexOf(marker) + marker.length
+    const message = text.slice(start).trim()
+    return {
+      kind: 'revise',
+      message: message || 'Tighten the spec before showing it to the human.',
+    }
+  }
+  const { preamble, questions } = parseQuestions(text)
+  if (questions.length > 0) {
+    return { kind: 'questions', preamble, questions }
+  }
+  return {
+    kind: 'revise',
+    message: text.trim() || 'Tighten the spec before showing it to the human.',
+  }
 }
 
 function ask(rl: Interface, question: string): Promise<string> {
@@ -102,6 +141,34 @@ async function readReply(rl: Interface): Promise<Reply> {
     }
     return { kind: 'text', text: input }
   }
+}
+
+async function readQuestionAnswers(
+  opts: SharpenOpts,
+  rl: Interface,
+  questions: Question[]
+): Promise<QuestionReply> {
+  const answered: string[] = []
+  for (let qi = 0; qi < questions.length; qi++) {
+    const { q, rec } = questions[qi] ?? { q: '', rec: '' }
+    log.log(`\n${BOLD}(${qi + 1}/${questions.length})${RESET} ${styleLine(q)}`)
+    if (rec) {
+      log.info(`  recommend: ${rec}`)
+    }
+    const input = (await waitingForInput(opts, () => ask(rl, 'you> '))).trim()
+    if (input === '/cancel') {
+      return { kind: 'cancel' }
+    }
+    if (input === '/done') {
+      return { kind: 'finish' }
+    }
+    if (input === '/skip') {
+      answered.push(`Q: ${q}\nA: (skipped)`)
+      continue
+    }
+    answered.push(`Q: ${q}\nA: ${input || rec || '(no preference)'}`)
+  }
+  return { kind: 'answers', text: answered.join('\n\n') }
 }
 
 // Drive lifecycle hooks for the interactive sharpen step: active stage while the agent
@@ -164,6 +231,25 @@ function showSpec(spec: string, verify: string | null): void {
   log.info('Enter to queue this · or type a reply to keep refining')
 }
 
+async function reviewSpec(
+  opts: SharpenOpts,
+  turns: Turn[],
+  spec: SharpenResult,
+  tally: { inTok: number; outTok: number }
+): Promise<Review> {
+  log.info('  …checking spec')
+  const { text, usage } = await thinking(opts, () =>
+    runAgent(opts.reviewer ?? opts.agent, {
+      root: opts.root,
+      prompt: sharpenReviewPrompt(transcript(turns), spec.intent, spec.verify),
+      access: 'read',
+    })
+  )
+  tally.inTok += usage.inputTokens
+  tally.outTok += usage.outputTokens
+  return parseReview(text)
+}
+
 export async function sharpen(opts: SharpenOpts): Promise<SharpenResult | null> {
   log.step('sharpen — clarifying intent into a spec')
   log.info(
@@ -197,32 +283,14 @@ export async function sharpen(opts: SharpenOpts): Promise<SharpenResult | null> 
           if (preamble) {
             log.log(`\n${renderAgent(preamble)}`)
           }
-          const answered: string[] = []
-          let finish = false
-          for (let qi = 0; qi < questions.length; qi++) {
-            const { q, rec } = questions[qi] ?? { q: '', rec: '' }
-            log.log(`\n${BOLD}(${qi + 1}/${questions.length})${RESET} ${styleLine(q)}`)
-            if (rec) {
-              log.info(`  recommend: ${rec}`)
-            }
-            const input = (await waitingForInput(opts, () => ask(rl, 'you> '))).trim()
-            if (input === '/cancel') {
-              return null
-            }
-            if (input === '/done') {
-              finish = true
-              break
-            }
-            if (input === '/skip') {
-              answered.push(`Q: ${q}\nA: (skipped)`)
-              continue
-            }
-            answered.push(`Q: ${q}\nA: ${input || rec || '(no preference)'}`)
+          const reply = await readQuestionAnswers(opts, rl, questions)
+          if (reply.kind === 'cancel') {
+            return null
           }
-          if (finish) {
-            return proposed ?? (await finalize(opts, turns, tally))
+          if (reply.kind === 'finish') {
+            return proposed ?? (await finalizeReviewed(opts, turns, tally))
           }
-          turns.push({ role: 'human', text: answered.join('\n\n') })
+          turns.push({ role: 'human', text: reply.text })
           continue
         }
       }
@@ -233,7 +301,39 @@ export async function sharpen(opts: SharpenOpts): Promise<SharpenResult | null> 
         if (parsed.message) {
           log.log(`\n${renderAgent(parsed.message)}\n`)
         }
-        proposed = { intent: parsed.spec, verify: parsed.verify ?? opts.verify }
+        const candidate = { intent: parsed.spec, verify: parsed.verify ?? opts.verify }
+        const review = await reviewSpec(opts, turns, candidate, tally)
+        if (review.kind === 'revise') {
+          turns.push({
+            role: 'reviewer',
+            text:
+              'Internal spec review asked for a revision before showing this to the human:' +
+              `\n\n${review.message}`,
+          })
+          continue
+        }
+        if (review.kind === 'questions') {
+          if (review.preamble) {
+            log.log(`\n${renderAgent(review.preamble)}`)
+          }
+          const reply = await readQuestionAnswers(opts, rl, review.questions)
+          if (reply.kind === 'cancel') {
+            return null
+          }
+          if (reply.kind === 'finish') {
+            turns.push({
+              role: 'human',
+              text: 'Use the spec reviewer recommended answers for those unresolved decisions.',
+            })
+            continue
+          }
+          turns.push({
+            role: 'human',
+            text: `Spec review identified unresolved human decisions:\n\n${reply.text}`,
+          })
+          continue
+        }
+        proposed = candidate
         showSpec(parsed.spec, proposed.verify)
       } else if (parsed.message) {
         log.log(`\n${renderAgent(parsed.message)}\n`)
@@ -245,12 +345,12 @@ export async function sharpen(opts: SharpenOpts): Promise<SharpenResult | null> 
         return null
       }
       if (r.kind === 'done') {
-        return proposed ?? (await finalize(opts, turns, tally))
+        return proposed ?? (await finalizeReviewed(opts, turns, tally))
       }
       turns.push({ role: 'human', text: r.text })
     }
     log.warn('sharpen: reached the turn limit — finalizing')
-    return proposed ?? (await finalize(opts, turns, tally))
+    return proposed ?? (await finalizeReviewed(opts, turns, tally))
   } finally {
     rl.close()
     await emit(opts.root, opts.hooks, 'attention', { state: 'none' })
@@ -259,6 +359,32 @@ export async function sharpen(opts: SharpenOpts): Promise<SharpenResult | null> 
       log.info(`  tokens: ${fmtTok(tally.inTok)} in → ${fmtTok(tally.outTok)} out`)
     }
   }
+}
+
+async function finalizeReviewed(
+  opts: SharpenOpts,
+  turns: Turn[],
+  tally: { inTok: number; outTok: number }
+): Promise<SharpenResult> {
+  const candidate = await finalize(opts, turns, tally)
+  const review = await reviewSpec(opts, turns, candidate, tally)
+  if (review.kind === 'pass') {
+    return candidate
+  }
+  if (review.kind === 'questions') {
+    turns.push({
+      role: 'human',
+      text:
+        'Use the spec reviewer recommended answers for these unresolved decisions:\n\n' +
+        review.questions.map((q) => `Q: ${q.q}\nA: ${q.rec || '(no preference)'}`).join('\n\n'),
+    })
+    return await finalize(opts, turns, tally)
+  }
+  turns.push({
+    role: 'reviewer',
+    text: `Internal spec review asked for a final revision before queueing:\n\n${review.message}`,
+  })
+  return await finalize(opts, turns, tally)
 }
 
 // Force the agent to synthesize the spec from the conversation so far. Falls back

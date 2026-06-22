@@ -48,8 +48,9 @@ its own agents must follow when the repo is the target.
   as the artifact). Stages the conductor parses must keep their exact marker lines:
   `DECISION: PROCEED|ASK`, `COMPLEXITY: TRIVIAL|COMPLEX`, `USER-FACING: YES|NO`,
   `VERDICT: PASS|FAIL`, `VERDICT: CONTINUE|STUCK`, `SHIP: OK|FAILED`,
-  `SPEC READY`, and `CATEGORY:` / `LESSON:` / `SUMMARY:`. If you change a marker,
-  change **both** the prompt (`prompts.ts`) and its parser (`conductor.ts`).
+  `SPEC READY`, `SHARPEN: PASS|REVISE`, and `CATEGORY:` / `LESSON:` / `SUMMARY:`.
+  If you change a marker, change **both** the prompt (`prompts.ts`) and its parser
+  (`conductor.ts` or the owning parser).
 - **codex and claude are peers, shelled out headless.** Do **not** add a
   from-scratch agent loop or a unified LLM client — orchestrating the CLIs is the
   whole point. A new agent CLI is a small adapter in `agents.ts` plus an enum
