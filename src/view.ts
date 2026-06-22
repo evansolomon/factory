@@ -322,7 +322,10 @@ export async function printShow(ctx: WorkContext, query?: string, step?: string)
     ['questions.md', '## Open questions'],
     ['answers.md', '## Answers'],
     ['plan.final.md', '## Final plan'],
+    ['risk.plan.md', '## Plan risk'],
     ['review.md', '## Review (last attempt)'],
+    ['risk.md', '## Merge risk (last attempt)'],
+    ['deploy.md', '## Deploy safety (last attempt)'],
     ['verify.log', '## Verify output (last attempt)'],
   ] as const) {
     const text = await fileText(task, name)

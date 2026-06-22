@@ -79,7 +79,7 @@ COMMANDS
       up where it left off — it reuses the saved plan and the code already in the
       worktree and re-enters at the stage that failed, instead of re-planning from
       scratch. Omit the id for the latest such task; add an optional note as
-      fix-context for the retry. Use this for review/security blocks (after you've
+      fix-context for the retry. Use this for review-panel blocks (after you've
       looked) or to force a transient retry now. (Note: a running 'factory run'
       already auto-reclaims interrupted tasks; this is the manual equivalent.)
       (Contrast 'answer', which re-plans; 'resume' continues.)
@@ -113,7 +113,7 @@ HOW A TASK FLOWS
         → commit → [ship, if configured]
   A failed gate auto-fixes and retries (config.retries) in-run before escalating.
   A transient verify/ship failure is then auto-resumed on a backoff; a review or
-  security block (or an exhausted retry budget) escalates: it shows in 'factory
+  review-panel block (or an exhausted retry budget) escalates: it shows in 'factory
   status' and emits the attention hook once the loop has nothing else runnable.
   The hook consumer decides whether that means a tmux color, bell, notification, or
   something else. Reply to a
@@ -143,6 +143,7 @@ CONFIG (.factory.json — cascades up the dir tree, closest wins)
   triage    classify each task; trivial ones skip the plan ensemble and go
             straight to implement (still reviewed + verified). default true.
   security  run a red-team security gate on the diff (default true).
+            Risk and deploy-safety lenses always run in the review panel.
   ux        UI/UX lenses for user-facing work: an information-architecture
             critique in planning + a design-consistency review of the diff,
             auto-gated per task (triage flags it; review also fires when the

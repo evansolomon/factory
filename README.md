@@ -95,9 +95,12 @@ task.md (intent) + meta.json (verify) [+ answers.md on resume]
   4. REVISE      each revises its own plan w/ the critique  (read-only, parallel)
   5. SELECT      codex picks or merges the stronger plan    (read-only)
                  → clean plan written to plansDir (committed docs)
+  5.5 RISK       [complex path] score plan risk and          (read-only)
+                 verification focus, advisory to implement
   ┌─ 6. IMPLEMENT     codex edits the worktree             (workspace-write)
   │  7. REVIEW PANEL  parallel expert finders on the diff  (read-only, parallel)
-  │                   correctness + security + ux (if UI);
+  │                   correctness + security + risk +
+  │                   deploy safety + ux (if UI);
   │                   each reports findings, none blocks alone
   │  8. CONSOLIDATE   one judge dedupes, drops nits,        (read-only)
   │                   resolves conflicts by priority, marks
@@ -124,16 +127,23 @@ own homework.
 ### The review panel (swarm of experts, without the thrash)
 
 Review is a **panel, not a chain of gates** — the same shape as the planning
-ensemble. Independent expert finders (correctness, security, ux-when-relevant)
-run **in parallel** against the diff; each only *reports findings* — none blocks
-on its own. A single **consolidator** then dedupes them, drops nits, resolves
-conflicts by a fixed priority (correctness > security > test integrity > stated
-requirements > consistency > simplicity > performance > UX polish > docs), and
-classifies each finding **blocking vs advisory**, emitting one verdict + one fix
-list. Only blocking findings drive a single fix pass; advisory ones live in
+ensemble. Independent expert finders (correctness, security, risk, deploy safety,
+ux-when-relevant) run **in parallel** against the diff; each only *reports
+findings* — none blocks on its own. A single **consolidator** then dedupes them,
+drops nits, resolves conflicts by a fixed priority (correctness > security >
+deploy safety > test integrity > stated requirements > consistency > simplicity >
+performance > UX polish > docs), and classifies each finding **blocking vs
+advisory**, emitting one verdict + one fix list. Only blocking findings drive a
+single fix pass; advisory ones live in
 `consolidated.md` (read with `factory show <id> consolidate`) and never block.
 This keeps one consolidated fix per cycle instead of separate gates ping-ponging,
 and makes a new expert a one-prompt addition that can't independently thrash.
+
+The risk lens is deliberately advisory: it answers "0 to 10, how risky is this?"
+with concrete drivers and verification focus. Deploy safety is more concrete: it
+checks mixed-version compatibility, migrations/backfills, config/env requirements,
+queued/event payloads, and rollback safety. A deploy-safety finding may block when
+it names a real unsafe rollout path.
 
 ### The escalation valve (`needs-input`)
 
@@ -183,7 +193,7 @@ factory upgrade                                     # install the latest GitHub 
   already in the worktree and re-enters at the stage that failed — no re-planning.
   Omit the id for the latest blocked/retrying task (or one stranded mid-stage by a
   killed loop); an optional note becomes fix-context for the retry. Use it for
-  review/security blocks (after you've looked) or to force a transient retry now.
+  review-panel blocks (after you've looked) or to force a transient retry now.
   A running `factory run` already auto-reclaims stranded tasks, so this is mainly
   the manual equivalent when no loop is up. (`answer` re-plans; `resume` continues.)
 
@@ -203,10 +213,10 @@ happens next depends on the gate:
   (status `retrying`, no attention event) and the loop **auto-resumes** it on a
   growing backoff (2m → 5m → 15m → 30m → 60m), up to a cap (5). An env flake
   recovers with no action from you. Only after the cap does it escalate to `blocked`.
-- **review / security** (the code was judged bad — re-running churns code without
-  new input) → straight to `blocked` and emits attention once no runnable work is
-  left. You look (`factory show <id> review`), then `factory resume ["note"]` when
-  you're ready.
+- **review panel** (the code or rollout safety was judged bad — re-running churns
+  code without new input) → straight to `blocked` and emits attention once no
+  runnable work is left. You look (`factory show <id> review`), then
+  `factory resume ["note"]` when you're ready.
 
 Either way, resuming reuses prior work: committed already → just re-runs ship;
 uncommitted diff → re-runs the gates on that diff, skipping the initial implement
@@ -230,7 +240,7 @@ factory add "Add exponential backoff to the upload client" --verify "bun test up
 factory run                          # walk away; come back when the window alerts
 # if it asks:
 factory answer "Cap at 5 retries, 30s max backoff"
-# if it's blocked on review/security, after a look:
+# if it's blocked on review-panel findings, after a look:
 factory resume "the reviewer's concern is handled by the lock in upload.ts"
 ```
 
@@ -295,7 +305,7 @@ Fields:
   `<worktree-key>` is the worktree's path with `/`→`-`. The default keeps runtime
   state out of repos; the tradeoff is plans/proof don't travel with the branch.
 - **`retries`** — hard-cap backstop on auto-fix iterations after a failed gate
-  (review/security/verify). The convergence judge normally decides when the loop
+  (review-panel/verify). The convergence judge normally decides when the loop
   is stuck; this only bounds runaway fixing. Default `10`; `0` disables auto-fix.
 - **`triage`** — classify each task first; trivial ones skip the whole plan
   ensemble (research/plan/critique/reconcile/revise/select) and go straight to
@@ -328,7 +338,8 @@ Fields:
   - `planners` (list) — draft + cross-critique + revise. **≥2 different agents
     enables the cross-model ensemble**; 1 → single planner, no critique.
   - `implementer` — also runs triage, research, reconcile, and select (the "lead").
-  - `reviewer` — the fresh adversarial diff review and the red-team security gate
+  - `reviewer` — the fresh adversarial diff review, red-team security gate, risk
+    assessment, and deploy-safety review
     (best a *different* model from the implementer, to avoid self-bias).
   - `delivery` — runs `onComplete`.
 
@@ -437,10 +448,13 @@ or jump-target behavior you want.
   plan.<planner>.v2.md   # revised planner output
   plan.final.md          # selected/merged plan
   plan.md                # selected plan persisted for resume
+  risk.plan.md           # plan risk scores + verification focus, complex path
   implement.log.md       # implementer final message
   diff.patch             # latest worktree diff under review
   review.md              # correctness expert report
   security.md            # red-team report, when enabled
+  risk.md                # advisory merge-risk scores for the implemented diff
+  deploy.md              # deploy-safety report: compatibility/migrations/rollback
   ux.md                  # UX/design report, when applicable
   consolidated.md        # consolidated review verdict + fix list
   converge.md            # latest convergence-judge output
@@ -514,7 +528,7 @@ Tasks usually move through `ready` → `planning` → `implementing` → `review
 `verifying` → `shipping` → `done`. Other resting states are `grilling` (interactive
 intake in progress), `needs-input` (paused for you), `retrying` (transient verify
 or ship failure waiting on backoff), and `blocked` (human attention required:
-no changes, review/security failure, convergence stuck, or retry cap exhausted).
+no changes, review-panel failure, convergence stuck, or retry cap exhausted).
 `needs-input`, `retrying`, and `blocked` are set aside; `factory` moves on.
 `factory answer` returns a `needs-input` task to `ready`; `factory resume` returns
 a blocked/retrying/stranded task to `ready`; due auto-retries are promoted by the

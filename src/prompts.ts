@@ -31,6 +31,12 @@ function baselineBlock(baselineDiff: string | null): string {
     : ''
 }
 
+function riskBlock(riskAssessment: string | null): string {
+  return riskAssessment
+    ? `\n\n## Risk assessment (advisory)\nUse this to calibrate implementation and verification effort. Do not expand scope beyond the plan just because a score is high; use the rationale to make the planned change safer and better proven.\n${riskAssessment}`
+    : ''
+}
+
 // The dedicated research subagent. Runs before planning and gathers the factual
 // groundwork — relevant code, existing patterns, history of the target areas,
 // prior plans, conventions, gotchas — so plans are grounded, not assumed. It
@@ -245,7 +251,8 @@ export function implementPrompt(
   intent: string,
   finalPlan: string,
   verify: string | null,
-  userFacing: boolean
+  userFacing: boolean,
+  riskAssessment: string | null
 ): string {
   return `Implement the plan below in the repository at your working directory. Make the code changes it calls for and nothing more — do not fix, refactor, or comment on unrelated code.
 
@@ -259,7 +266,7 @@ Do NOT commit — leave the changes in the working tree.
 ${intent}
 
 ## Plan
-${finalPlan}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. Make sure it passes.` : ''}${uxBuildNote(userFacing)}`
+${finalPlan}${riskBlock(riskAssessment)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. Make sure it passes.` : ''}${uxBuildNote(userFacing)}`
 }
 
 // First pass: decide whether a task is trivial enough to skip the planning
@@ -326,7 +333,8 @@ export function fixPrompt(
   failure: string,
   history: string[],
   diff: string,
-  userFacing: boolean
+  userFacing: boolean,
+  riskAssessment: string | null
 ): string {
   const tried = history.length
     ? `\n\n## Already attempted (these fixes did NOT work — do not repeat them)\n${history.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
@@ -345,7 +353,7 @@ ${failure}${tried}
 ## Current diff
 \`\`\`diff
 ${diff}
-\`\`\`${uxBuildNote(userFacing)}`
+\`\`\`${riskBlock(riskAssessment)}${uxBuildNote(userFacing)}`
 }
 
 // The convergence judge: after each failed fix attempt, decides whether the loop
@@ -496,6 +504,87 @@ ${diff}
 For each finding, cite the specific code (file:line) and tag it BLOCKING (a correctness, requirements, or test-integrity defect that must be fixed before this ships) or ADVISORY (a real improvement that should not hold up the change). If there are none, say so.`
 }
 
+// Pre-implementation risk assessment. This is advisory context, not a gate: it
+// helps the implementer and reviewer calibrate complexity, blast radius, and proof
+// without mixing a scalar risk score into the binary triage marker.
+export function planRiskPrompt(intent: string, finalPlan: string): string {
+  return `Assess the implementation risk of the plan below. Read the repo as needed and ground the score in concrete facts: touched boundaries, data durability, external APIs, auth/security, concurrency, migrations, rollout order, and verification difficulty.
+
+This is NOT a plan review and NOT a gate. Do not propose a different design unless the plan's risk comes from a specific, concrete flaw; in that case name the flaw as rationale. The goal is calibrated risk metadata that an implementer can use to choose proportionate tests and rollout care.
+
+Use this 0-10 scale:
+- 0-2: small localized change with obvious behavior and easy verification.
+- 3-5: moderate uncertainty or blast radius; normal tests should cover it.
+- 6-8: multiple boundaries, durable data, compatibility, concurrency, security, or hard-to-observe behavior; verification needs extra care.
+- 9-10: high blast radius, irreversible/destructive behavior, complex rollout, or substantial unknowns.
+
+## Task
+${intent}
+
+## Plan
+${finalPlan}
+
+Output ONLY this markdown structure:
+
+## Scores
+RISK: <0-10>
+COMPLEXITY: <0-10>
+MERGE-RISK: <0-10>
+TEST-IMPORTANCE: <0-10>
+CONFIDENCE: LOW|MEDIUM|HIGH
+
+## Rationale
+<bullets citing the concrete risk drivers>
+
+## Verification focus
+<bullets naming the proof that matters most>`
+}
+
+// Post-diff risk lens. It is deliberately advisory: concrete defects belong to
+// the correctness/security/deploy-safety lenses, while this report preserves the
+// scalar "how risky is this?" judgment humans often ask for before merging.
+export function riskReviewPrompt(
+  intent: string,
+  finalPlan: string,
+  diff: string,
+  baselineDiff: string | null
+): string {
+  return `Assess the residual merge risk of the implemented diff below. Read the changed code and adjacent files as needed. Your job is to answer "0 to 10, how risky is this to merge?" with concrete rationale, not to re-review correctness.
+
+Score risk from actual evidence:
+- Complexity and blast radius of the changed code.
+- Data durability, migrations, compatibility, config/env, queues/jobs/events, external APIs, auth/security, concurrency, and rollback difficulty.
+- Whether the diff's tests or verification are proportionate to the risk.
+
+This lens is advisory. Do NOT tag anything BLOCKING. If you notice a concrete defect, mention it as a risk driver and tag it ADVISORY so the consolidator can compare it with the domain experts' reports.
+
+## Task
+${intent}
+
+## Agreed plan
+${finalPlan}
+
+## Diff
+\`\`\`diff
+${diff}
+\`\`\`${baselineBlock(baselineDiff)}
+
+Output ONLY this markdown structure:
+
+## Scores
+RISK: <0-10>
+COMPLEXITY: <0-10>
+MERGE-RISK: <0-10>
+TEST-IMPORTANCE: <0-10>
+CONFIDENCE: LOW|MEDIUM|HIGH
+
+## Rationale
+<bullets citing concrete risk drivers, each tagged ADVISORY>
+
+## Verification gaps
+<bullets tagged ADVISORY, or "none">`
+}
+
 // The dedicated security expert: a red-team researcher audits the implemented
 // diff for vulnerabilities the change introduces or leaves open. Runs as its own
 // panel lens (separate from the correctness review) so security gets first-class,
@@ -530,6 +619,49 @@ ${diff}
 \`\`\`${baselineBlock(baselineDiff)}
 
 For each exploitable finding, name the attack and cite the specific code (file:line), then tag it BLOCKING (an exploitable vulnerability that must be fixed before this ships) or ADVISORY (a real but non-exploitable security improvement). If there are none, say so.`
+}
+
+// The deploy-safety expert audits rollout mechanics rather than local correctness:
+// mixed-version compatibility, migrations/backfills, env/config, queues/events,
+// and rollback. Unlike general risk, concrete unsafe rollout paths may block.
+export function deploySafetyPrompt(
+  intent: string,
+  finalPlan: string,
+  diff: string,
+  baselineDiff: string | null
+): string {
+  return `You are a release engineer auditing whether the diff below is safe to deploy. Judge mixed-version reality, not just whether the code works locally: old and new app versions may overlap, old queued data may meet new workers, old clients may call new APIs, rollback may happen after writes, and migrations/config may arrive before or after code depending on the deploy system.
+
+Look concretely for:
+- Backward and forward compatibility across API/schema/type/config changes.
+- Database migrations, backfills, non-null/default constraints, destructive changes, and required rollout ordering.
+- Queues, jobs, events, caches, and serialized payloads where old producers/consumers interact with new ones.
+- Required env vars/secrets/feature flags and whether missing config fails safely.
+- Rollback safety after new code has written data.
+- Whether verification proves deploy safety, not just local correctness.
+
+Report ONLY deploy hazards introduced or left open by THIS diff. Do not manufacture release-process advice unrelated to the change. If deploy safety is not applicable, say so plainly.
+
+## Task
+${intent}
+
+## Agreed plan
+${finalPlan}
+
+## Diff
+\`\`\`diff
+${diff}
+\`\`\`${baselineBlock(baselineDiff)}
+
+Output in this structure:
+
+## Classification
+DEPLOY-SAFETY: SAFE|UNSAFE|NOT_APPLICABLE|UNCLEAR
+MIGRATIONS: NONE|REQUIRED|UNCLEAR
+ROLLBACK: SAFE|UNSAFE|UNCLEAR
+
+## Findings
+For each finding, cite the specific code or artifact (file:line when possible) and tag it BLOCKING (a concrete compatibility, migration, rollout-order, config, or rollback hazard that must be fixed before this ships) or ADVISORY (real deploy-safety context that should not hold up the change). If there are none, say so.`
 }
 
 // The UI/UX review lens: a design-systems engineer audits a user-facing diff for
@@ -582,8 +714,8 @@ export function consolidatePrompt(
 Do this:
 - Merge duplicates: the same issue raised by multiple experts becomes one item.
 - Drop non-issues: style nits, subjective polish, speculative concerns, or anything not grounded in the actual diff. Manufacturing work just drives churn.
-- Resolve conflicts by this priority (higher wins): correctness > security > test integrity (tests must have teeth) > the task's stated requirements > consistency with the codebase > simplicity > performance > UX polish > docs.
-- Classify each surviving finding as BLOCKING (a correctness, security, requirements, or test-integrity defect that must be fixed before this ships) or ADVISORY (a real but non-blocking improvement). The experts' own BLOCKING/ADVISORY tags are hints, not votes — you own this call. Block on genuine defects, but when a finding is borderline or a matter of degree, prefer ADVISORY so good work ships.
+- Resolve conflicts by this priority (higher wins): correctness > security > deploy safety > test integrity (tests must have teeth) > the task's stated requirements > consistency with the codebase > simplicity > performance > UX polish > docs.
+- Classify each surviving finding as BLOCKING (a correctness, security, deploy-safety, requirements, or test-integrity defect that must be fixed before this ships) or ADVISORY (a real but non-blocking improvement). The experts' own BLOCKING/ADVISORY tags are hints, not votes — you own this call. Block on genuine defects, including concrete unsafe rollout, migration, compatibility, config, or rollback hazards. Treat general risk scores as context, not a veto; when a finding is borderline or a matter of degree, prefer ADVISORY so good work ships.
 
 ## Task
 ${intent}
