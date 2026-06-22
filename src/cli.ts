@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { dirname } from 'node:path'
+import { askFactory } from './ask.ts'
 import { addBacklog, loadBacklog, removeBacklog } from './backlog.ts'
 import { AUTO_CAP, runTask, type TaskOutcome } from './conductor.ts'
 import {
@@ -94,6 +95,8 @@ COMMANDS
 
   factory status              Catch-up dashboard: what's running (and for how long),
                            what's waiting on you, what's blocked, what's done.
+  factory ask [task-id] <question...>
+                           Ask the configured AI about saved factory task state.
   factory show [task-id] [step]  Drill into one task (defaults to the latest here);
                              with a step (e.g. implement, review, plan.codex), show
                              that step's line-by-line agent activity. A lone step
@@ -127,6 +130,7 @@ TYPICAL USE
   Run a continuous loop and feed it (the usual fleet mode):
       factory run                    # in a worktree; leave it running, then walk away
       factory add "Another task..."  # from anywhere; the running loop picks it up
+      factory ask "has ship ran?"    # ask from the saved task state
       factory answer "..."           # only if a task pauses to ask
       factory resume                 # pick a blocked task back up where it left off
 
@@ -158,6 +162,9 @@ CONFIG (.factory.json — cascades up the dir tree, closest wins)
   onComplete  deliver each done task via a full-permission agent. {"skill":
             "name"} runs a skill; {"policy":"text"} follows a policy (open MR/PR,
             iterate CI, reply to review). null (default) = don't ship.
+  ask       {"agent": "claude"} configures the AI used by 'factory ask'. This is
+            separate from agents.reviewer; ask is context-building over saved task
+            state, not a review pipeline role.
   agents    which agent fills each role: planners (list — ≥2 cross-critique),
             implementer (also triage/reconcile/select), reviewer, delivery. Each
             is "codex"/"claude" or {"cli","model"}. default codex+claude.
@@ -534,6 +541,11 @@ async function main(): Promise<number> {
     const ctx = await loadContext(process.cwd())
     await printStatus(ctx)
     return 0
+  }
+
+  if (cmd === 'ask') {
+    const ctx = await loadContext(process.cwd())
+    return askFactory(ctx, rest)
   }
 
   if (cmd === 'config') {

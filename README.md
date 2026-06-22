@@ -187,6 +187,7 @@ factory resume [task-id] [note...]                 # pick a blocked task back up
 factory correct [task-id] [note...]                # record your manual fix of a blocked task as a lesson
 factory backlog [add|rm] ...                       # experimental repo-level backlog
 factory status                                     # catch-up dashboard
+factory ask [task-id] "<question...>"              # AI answer from saved task state
 factory show [task-id] [step]                       # drill into one task / a step's activity
 factory report                                     # telemetry roll-up (manage by numbers)
 factory lessons                                    # curated lessons + raw candidates
@@ -213,6 +214,12 @@ factory upgrade                                     # install the latest GitHub 
   review-panel blocks (after you've looked) or to force a transient retry now.
   A running `factory run` already auto-reclaims stranded tasks, so this is mainly
   the manual equivalent when no loop is up. (`answer` re-plans; `resume` continues.)
+- **`factory ask`** is a conversational, read-only query over saved task state.
+  It builds a compact context packet from `meta.json`, the task index, and relevant
+  artifacts such as `questions.md`, `failures.jsonl`, `postmortem.md`, `proof.md`,
+  `ship.md`, and `verify.log`, then asks the configured `ask.agent` to answer only
+  from that packet. Omit the id to let the packet include the currently relevant
+  tasks; pass an id to focus the answer.
 
 ### Recovery & auto-resume
 
@@ -371,6 +378,12 @@ Fields:
   aside for auto-retry and only blocks after the auto-retry cap is spent. Examples —
   `{"skill": "ship"}`, or
   `{"policy": "open a GitLab MR, no reviewers, iterate CI to green, never merge"}`.
+- **`ask`** — which AI answers `factory ask` questions. This is separate from
+  `agents.reviewer` because asking is about assembling the right saved context, not
+  participating in the task pipeline. Shape:
+  `{ "agent": "claude" }` or
+  `{ "agent": { "cli": "codex", "model": "gpt-5" } }`. Default:
+  `{ "agent": "claude" }`.
 - **`agents`** — which agent fills each role:
   - `planners` (list) — draft + cross-critique + revise. **≥2 different agents
     enables the cross-model ensemble**; 1 → single planner, no critique.
@@ -694,6 +707,7 @@ dollar figure, so there's no consistent number across both models.)
 - `prompts.ts` — stage prompts (incl. the high-bar reconcile/critique prompts)
 - `sharpen.ts` — interactive intent sharpening loop for `factory add` / `backlog add`
 - `task.ts` — task dir format, status, answers
+- `ask.ts` — context packet + AI answer for `factory ask`
 - `view.ts` — `status` dashboard + `show` drill-down + `report` rendering
 - `lessons.ts` — LESSONS.md read + candidate capture (the meta loop)
 - `metrics.ts` — SQLite telemetry store + `report` aggregation (defensive/disposable)

@@ -22,6 +22,7 @@ const config: Config = {
     reviewer: 'claude',
     delivery: 'claude',
   },
+  ask: { agent: 'claude' },
 }
 
 const agents: RoleAgents = {
@@ -45,6 +46,7 @@ async function workContext(): Promise<WorkContext> {
     tasksDir: `${stateDir}/tasks`,
     plansDir: null,
     agents,
+    askAgent: { cli: 'claude' },
     repoStateDir: stateDir,
     metricsPath: `${stateDir}/metrics.db`,
   }
