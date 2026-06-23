@@ -2,6 +2,7 @@
 import { dirname } from 'node:path'
 import { type ParsedAddOptions, parseAddOptions } from './add-options.ts'
 import { askFactory } from './ask.ts'
+import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
 import { addBacklog, loadBacklog, removeBacklog } from './backlog.ts'
 import { AUTO_CAP, runTask, type TaskOutcome } from './conductor.ts'
 import {
@@ -141,6 +142,8 @@ COMMANDS
                            global config by default; flags target another layer.
   factory version | --version    Print the current CLI version.
   factory upgrade                Update factory to the latest GitHub release.
+                               Installed builds also check weekly and prompt
+                               before interactive commands; FACTORY_DISABLE_AUTO_UPGRADE=1 opts out.
 
 HOW A TASK FLOWS
   ready → plan (codex + claude) → cross-critique → reconcile
@@ -211,6 +214,12 @@ CONFIG (.factory.json — cascades up the dir tree, closest wins)
 `
 
 const POLL_MS = 5000
+
+type MainOptions = {
+  argv?: string[]
+  autoUpgrade?: (opts: { command: string }) => Promise<AutoUpgradeResult>
+  upgrade?: () => Promise<number>
+}
 
 function parseAdd(args: string[]): { intent: string; verify: string | null } {
   const i = args.indexOf('--verify')
@@ -294,8 +303,8 @@ async function feedbackFacts(task: Task, hasWorktreeDiff: boolean) {
   return feedbackRouteInput(task, await hasSavedPlan(task), hasWorktreeDiff)
 }
 
-async function main(): Promise<number> {
-  const [cmd, ...rest] = process.argv.slice(2)
+export async function main(opts: MainOptions = {}): Promise<number> {
+  const [cmd, ...rest] = opts.argv ?? process.argv.slice(2)
 
   if (!cmd || cmd === 'help' || cmd === '-h' || cmd === '--help') {
     log.log(HELP)
@@ -308,7 +317,12 @@ async function main(): Promise<number> {
   }
 
   if (cmd === 'upgrade') {
-    return await upgradeFactory()
+    return await (opts.upgrade ?? upgradeFactory)()
+  }
+
+  const autoUpgrade = await (opts.autoUpgrade ?? maybeAutoUpgrade)({ command: cmd })
+  if (autoUpgrade.kind === 'exit') {
+    return autoUpgrade.code
   }
 
   if (cmd === 'add') {
@@ -762,12 +776,18 @@ async function main(): Promise<number> {
 // A bad config or running outside a repo is user error, not a crash: print it
 // cleanly and exit. Anything else is an unexpected bug — let it throw so the
 // stack trace is preserved.
-try {
-  process.exit(await main())
-} catch (err) {
-  if (err instanceof ConfigError || err instanceof NotARepoError) {
-    log.fail(err.message)
-    process.exit(1)
+export async function runCli(): Promise<void> {
+  try {
+    process.exit(await main())
+  } catch (err) {
+    if (err instanceof ConfigError || err instanceof NotARepoError) {
+      log.fail(err.message)
+      process.exit(1)
+    }
+    throw err
   }
-  throw err
+}
+
+if (import.meta.main) {
+  await runCli()
 }

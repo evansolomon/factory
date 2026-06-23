@@ -26,7 +26,8 @@ trap cleanup EXIT
 cd "${build_dir}"
 cat > entrypoint.ts <<EOF
 process.env['FACTORY_BUILD_VERSION'] = ${build_version_json}
-await import(${entrypoint_json})
+const { runCli } = await import(${entrypoint_json})
+await runCli()
 EOF
 bun build entrypoint.ts --compile --outfile "${outfile}"
 chmod +x "${outfile}"

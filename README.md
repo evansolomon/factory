@@ -41,6 +41,17 @@ When `factory upgrade` is run from an installed `factory` binary, it preserves
 that binary's directory. When run from source or through another executable, it
 uses the installer default; custom installs can set `FACTORY_INSTALL_DIR`.
 
+Installed non-dev binaries also check GitHub Releases automatically at most once
+every 7 days before recognized normal commands in an interactive terminal. Help,
+version, explicit `factory upgrade`, source runs, dev builds, and non-TTY runs
+skip the automatic check. Set `FACTORY_DISABLE_AUTO_UPGRADE=1` to disable only
+automatic checks; manual `factory upgrade` remains available.
+
+When a newer release is found, factory prompts before installing. Declining
+suppresses further automatic checks for 7 days and continues the original
+command. Accepting runs the same in-place upgrade flow as `factory upgrade`,
+then exits; rerun the original command under the new binary.
+
 You can also run from a clone:
 
 ```bash

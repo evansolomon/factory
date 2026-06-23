@@ -196,6 +196,10 @@ export function globalConfigFile(): string {
   return `${factoryHome()}/config.json`
 }
 
+export function autoUpgradeStateFile(): string {
+  return `${factoryHome()}/auto-upgrade.json`
+}
+
 // Candidate config files in priority order, lowest first: the global base, then
 // each ancestor from the filesystem root down to the worktree (closest wins).
 function configCandidates(root: string): string[] {
