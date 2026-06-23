@@ -334,8 +334,9 @@ export async function printShow(ctx: WorkContext, query?: string, step?: string)
   const m = task.meta
 
   log.log(`${m.id}  [${m.status}]${m.note ? ` — ${m.note}` : ''}`)
+  const complexity = m.complexity ? `  ·  complexity: ${m.complexity} (declared)` : ''
   log.log(
-    `verify: ${m.verify ?? '(none)'}  ·  sharpen: ${m.sharpen}  ·  created ${age(
+    `verify: ${m.verify ?? '(none)'}${complexity}  ·  sharpen: ${m.sharpen}  ·  created ${age(
       m.createdAt
     )} ago  ·  updated ${age(m.updatedAt)} ago`
   )
