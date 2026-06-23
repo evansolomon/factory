@@ -187,10 +187,10 @@ ready tasks (never idle). You answer async; the running instance picks it back u
 ```bash
 factory add [--raw] [--trivial | --complexity trivial|complex] "<intent...>" [--verify "<cmd...>"]   # queue a task
 factory run [--once|--drain]                       # process tasks
-factory answer [task-id] "<answer...>"             # answer a needs-input task, requeue it
-factory resume [task-id] [note...]                 # pick a blocked task back up where it left off
-factory feedback [task-id] "<feedback...>"         # critique existing progress, generalized on next pass
-factory correct [task-id] [note...]                # record your manual fix of a blocked task as a lesson
+factory answer [task-id] [-m "<answer>" | --edit]  # answer a needs-input task, requeue it
+factory resume [task-id] [-m "<note>" | --edit]    # pick a blocked task back up where it left off
+factory feedback [task-id] [-m "<feedback>" | --edit]  # critique existing progress, generalized on next pass
+factory correct [task-id] [-m "<note>" | --edit]   # record your manual fix of a blocked task as a lesson
 factory backlog [add|rm] ...                       # experimental repo-level backlog
 factory status                                     # catch-up dashboard
 factory ask [task-id] ["<question...>"]            # interactive Q&A over saved task state
@@ -220,19 +220,21 @@ factory upgrade                                     # install the latest GitHub 
 - **`factory answer`** (for **needs-input**) appends to `answers.md` and flips the
   task back to `ready`; the resumed run continues from durable state, either
   sharpening again with your answer or re-planning with it threaded in (stateless
-  — no held session). Omit the id for the latest needs-input task.
+  — no held session). Omit the id for the latest needs-input task. Pass the answer
+  with `-m`, or omit it to compose in `$EDITOR` (or pipe it via stdin).
 - **`factory resume`** (for **blocked**) **reuses** the saved plan + the diff
   already in the worktree and re-enters at the stage that failed — no re-planning.
   Omit the id for the latest blocked/retrying task (or one stranded mid-stage by a
-  killed loop); an optional note becomes fix-context for the retry. Use it for
-  review-panel blocks (after you've looked) or to force a transient retry now.
-  A running `factory run` already auto-reclaims stranded tasks, so this is mainly
-  the manual equivalent when no loop is up. (`answer` re-plans; `resume` continues.)
+  killed loop); an optional note (via `-m` or `--edit`) becomes fix-context for the
+  retry. Use it for review-panel blocks (after you've looked) or to force a transient
+  retry now. A running `factory run` already auto-reclaims stranded tasks, so this is
+  mainly the manual equivalent when no loop is up. (`answer` re-plans; `resume` continues.)
 - **`factory feedback`** records critique after you review or test existing task
   progress. It is not new work (`add`) and it is not an ephemeral retry note
   (`resume`): feedback is appended to `human-feedback.md`, shown by `factory show`, and
   the next pass first analyzes the concrete comment into an abstract/root-cause
-  pattern, searches for sibling cases, and changes only justified cases. Active
+  pattern, searches for sibling cases, and changes only justified cases. Pass it with
+  `-m`, or omit it to compose in `$EDITOR` (or pipe it via stdin). Active
   post-progress tasks are requeued in place. Done or already-committed tasks are
   left closed and get a linked follow-up task instead.
 - **`factory ask`** is an interactive, read-only session over saved task state.
@@ -307,11 +309,11 @@ wt add fix-upload-retry          # make a worktree (existing tooling)
 factory add "Add exponential backoff to the upload client" --verify "bun test upload"
 factory run                          # walk away; come back when the window alerts
 # if it asks:
-factory answer "Cap at 5 retries, 30s max backoff"
+factory answer -m "Cap at 5 retries, 30s max backoff"
 # if it's blocked on review-panel findings, after a look:
-factory resume "the reviewer's concern is handled by the lock in upload.ts"
+factory resume -m "the reviewer's concern is handled by the lock in upload.ts"
 # if you reviewed progress and found a concrete issue:
-factory feedback "the mobile button wraps; check sibling controls too"
+factory feedback -m "the mobile button wraps; check sibling controls too"
 ```
 
 ## Spawning & the fleet (the integration pattern)
