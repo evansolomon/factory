@@ -126,6 +126,25 @@ export function formatQuestions(preamble: string, questions: Question[]): string
   return [preamble.trim(), ...lines].filter(Boolean).join('\n\n')
 }
 
+export function parseFormattedQuestions(text: string): { preamble: string; questions: Question[] } {
+  const preamble: string[] = []
+  const questions: Question[] = []
+
+  for (const block of text.trim().split(/\n{2,}/)) {
+    const lines = block.split('\n')
+    const question = /^\s*-\s+(.+?)\s*$/.exec(lines[0] ?? '')
+    const recommendation = /^\s+Recommended:\s*(.*)$/.exec(lines[1] ?? '')
+    if (!question?.[1] || !recommendation) {
+      preamble.push(block)
+      continue
+    }
+    const rec = [recommendation[1] ?? '', ...lines.slice(2)].join('\n').trim()
+    questions.push({ q: question[1].trim(), rec })
+  }
+
+  return { preamble: preamble.join('\n\n').trim(), questions }
+}
+
 function ask(rl: Interface, question: string): Promise<string> {
   return new Promise((resolve) => rl.question(question, resolve))
 }
