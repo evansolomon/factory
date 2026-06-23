@@ -104,8 +104,10 @@ COMMANDS
 
   factory status              Catch-up dashboard: what's running (and for how long),
                            what's waiting on you, what's blocked, what's done.
-  factory ask [task-id] <question...>
-                           Ask the configured AI about saved factory task state.
+  factory ask [task-id] [question...]
+                           Interactive Q&A over saved factory task state (TTY).
+  factory ask --print [task-id] <question...>
+                           One-shot, scriptable answer (required in non-TTY).
   factory show [task-id] [step]  Drill into one task (defaults to the latest here);
                              with a step (e.g. implement, review, plan.codex), show
                              that step's line-by-line agent activity. A lone step
@@ -139,7 +141,7 @@ TYPICAL USE
   Run a continuous loop and feed it (the usual fleet mode):
       factory run                    # in a worktree; leave it running, then walk away
       factory add "Another task..."  # from anywhere; the running loop picks it up
-      factory ask "has ship ran?"    # ask from the saved task state
+      factory ask "has ship ran?"    # ask, then keep the session open for follow-ups
       factory answer "..."           # only if a task pauses to ask
       factory resume                 # pick a blocked task back up where it left off
 
