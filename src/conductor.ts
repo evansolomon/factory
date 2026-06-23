@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { type AgentResult, agentLabel, runAgent } from './agents.ts'
 import type { Agent, WorkContext } from './config.ts'
 import { run } from './exec.ts'
-import { commitAll, currentBranch, hasChanges, headSha, worktreeDiff } from './git.ts'
+import { commitAll, commitDiff, currentBranch, hasChanges, headSha, worktreeDiff } from './git.ts'
 import { emit } from './hooks.ts'
 import { appendCandidate, readLessons } from './lessons.ts'
 import { log } from './log.ts'
@@ -20,6 +20,7 @@ import {
   convergePrompt,
   critiquePrompt,
   deploySafetyPrompt,
+  feedbackPrompt,
   fixPrompt,
   implementPrompt,
   type Labeled,
@@ -54,6 +55,7 @@ import {
   appendFailure,
   type Failure,
   readAnswers,
+  readArtifact,
   readFailures,
   readIntent,
   readPlan,
@@ -226,11 +228,6 @@ function slugify(text: string): string {
     .slice(0, 60)
     .replace(/-+$/g, '')
   return slug.length > 0 ? slug : 'plan'
-}
-
-async function readArtifact(task: Task, name: string): Promise<string | null> {
-  const file = Bun.file(`${task.dir}/${name}`)
-  return (await file.exists()) ? (await file.text()).trim() : null
 }
 
 // A model id (e.g. "grok-4", "anthropic/claude-x") made filesystem/label-safe.
@@ -1266,6 +1263,49 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
 // skill or follow a policy). Split out so a resume whose work already committed can
 // re-run just this step. A ship failure is transient (CI/network), so it feeds the
 // same backoff auto-retry as verify rather than hard-blocking.
+const FEEDBACK_INPUT_LIMIT = 12_000
+
+function clipFeedbackInput(text: string | null, max: number = FEEDBACK_INPUT_LIMIT): string | null {
+  if (!text) {
+    return null
+  }
+  if (text.length <= max) {
+    return text
+  }
+  return `${text.slice(0, max)}\n\n[clipped for feedback prompt]`
+}
+
+async function writeCompletionFeedback(ctx: WorkContext, task: Task, intent: string, meter: Meter) {
+  try {
+    await progress(ctx, task, 'feedback', 'summarizing handoff')
+    const diff = task.meta.commit ? await commitDiff(ctx.root, task.meta.commit) : null
+    await agentStep(
+      meter,
+      'feedback',
+      agentLabel(ctx.agents.delivery),
+      runAgent(ctx.agents.delivery, {
+        root: ctx.root,
+        prompt: feedbackPrompt({
+          taskId: task.id,
+          intent: clipFeedbackInput(intent) ?? '',
+          finalPlan: clipFeedbackInput(await readPlan(task)),
+          verify: task.meta.verify,
+          diff: clipFeedbackInput(diff),
+          proof: clipFeedbackInput(await readArtifact(task, 'proof.md')),
+          verifyLog: clipFeedbackInput(await readArtifact(task, 'verify.log')),
+          ship: clipFeedbackInput(await readArtifact(task, 'ship.md')),
+        }),
+        access: 'read',
+        outFile: `${task.dir}/feedback.md`,
+      }),
+      'handoff'
+    )
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    log.warn(`${task.id}: handoff unavailable (task still done) — ${message}`)
+  }
+}
+
 async function shipAndFinish(
   ctx: WorkContext,
   task: Task,
@@ -1295,6 +1335,7 @@ async function shipAndFinish(
     }
   }
 
+  await writeCompletionFeedback(ctx, task, intent, meter)
   logTotal(meter)
   recordTask(ctx, task, meter, 'done', stats)
   return { ok: true }

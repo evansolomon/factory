@@ -7,7 +7,7 @@ import type { WorkContext } from './config.ts'
 //   task.md   — human-owned intent (free-form markdown; what sharpening enriches)
 //   meta.json — machine-owned status/verify/sharpen/timestamps
 //   meter.json — machine-owned live token/stage counts for the current pass
-//   plan.*.md, review.md, proof.md, diff.patch — conductor artifacts
+//   plan.*.md, review.md, proof.md, feedback.md — conductor artifacts
 // Splitting human prose from machine state means factory flips status without
 // ever rewriting what you wrote.
 
@@ -341,11 +341,15 @@ export async function readIntent(task: Task): Promise<string> {
   return (await Bun.file(`${task.dir}/task.md`).text()).trim()
 }
 
+export async function readArtifact(task: Task, name: string): Promise<string | null> {
+  const file = Bun.file(`${task.dir}/${name}`)
+  return (await file.exists()) ? (await file.text()).trim() : null
+}
+
 // The selected final plan, saved as an artifact after SELECT so a resume can reuse
 // it and skip the planning ensemble. null if absent (e.g. a task from before this).
 export async function readPlan(task: Task): Promise<string | null> {
-  const file = Bun.file(`${task.dir}/plan.md`)
-  return (await file.exists()) ? (await file.text()).trim() : null
+  return readArtifact(task, 'plan.md')
 }
 
 // One failed fix-loop attempt: which gate rejected it, a one-line root-cause

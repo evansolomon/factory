@@ -326,6 +326,58 @@ SHIP: OK
 SHIP: FAILED <one-line reason>`
 }
 
+export type FeedbackPromptInput = {
+  taskId: string
+  intent: string
+  finalPlan: string | null
+  verify: string | null
+  diff: string | null
+  proof: string | null
+  verifyLog: string | null
+  ship: string | null
+}
+
+function optionalFeedbackBlock(label: string, text: string | null): string {
+  return text ? `\n\n## ${label}\n${text}` : ''
+}
+
+export function feedbackPrompt(input: FeedbackPromptInput): string {
+  const verifyLine = input.verify
+    ? `\n\nThe verification command that already passed is: \`${input.verify}\`. Include that exact command in "What to verify next".`
+    : '\n\nNo verification command is recorded for this task. Say that plainly if it matters.'
+
+  return `Write a concise human-facing completion handoff for a successfully completed factory task.
+
+Output markdown only. Start with \`## Summary\`.
+
+Use exactly these sections, in this order:
+## Summary
+## What to verify next
+## Useful artifacts
+
+Requirements:
+- The Summary section must be 2-3 concise sentences describing what changed and why.
+- In What to verify next, include the verification command that already passed when one is provided.
+- Include concrete manual/UI/code-review checks only when they are grounded in the task, plan, diff, proof, verify output, or delivery output.
+- Do not invent URLs, UI paths, commands, deployment status, or manual checks.
+- If no UI or manual check is identifiable from the provided context, say so plainly.
+- Do not paste raw diffs, raw logs, secrets, or large blobs.
+- In Useful artifacts, refer users to \`factory show ${input.taskId}\` for saved artifacts.
+- Do not include marker lines, parser contracts, or a top-level \`# Feedback\` heading.
+
+## Task id
+${input.taskId}
+
+## Task intent
+${input.intent}${verifyLine}${optionalFeedbackBlock('Final plan', input.finalPlan)}${optionalFeedbackBlock(
+  'Committed diff',
+  input.diff
+)}${optionalFeedbackBlock('Proof artifact', input.proof)}${optionalFeedbackBlock(
+  'Verify log',
+  input.verifyLog
+)}${optionalFeedbackBlock('Delivery output', input.ship)}`
+}
+
 // Used on a retry after a gate (review or verify) failed: feed the failure and
 // current diff back so the implementer fixes it in place.
 export function fixPrompt(
