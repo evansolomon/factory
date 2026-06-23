@@ -206,6 +206,7 @@ factory backlog [add|rm] ...                       # experimental repo-level bac
 factory status                                     # catch-up dashboard
 factory ask [task-id] ["<question...>"]            # interactive Q&A over saved task state
 factory ask --print [task-id] "<question...>"      # one-shot/scriptable saved-state answer
+factory session [--agent codex|claude] [task-id]   # realtime agent tweak session from task artifacts
 factory show [task-id] [step]                       # drill into one task / a step's activity
 factory report                                     # telemetry roll-up (manage by numbers)
 factory lessons                                    # curated lessons + raw candidates
@@ -253,13 +254,22 @@ factory upgrade                                     # install the latest GitHub 
   follow-ups; `factory ask <task-id>` opens a session scoped to that task. Each
   turn rebuilds a compact context packet from `meta.json`, the task index, and
   relevant artifacts such as `questions.md`, `failures.jsonl`, `postmortem.md`,
-  `feedback.md`, `proof.md`, `ship.md`, and `verify.log`, then asks the configured
-  `ask.agent` to answer only from that packet. The live session transcript is kept
+  `feedback.md`, `agent-session.summary.md`, `proof.md`, `ship.md`, and
+  `verify.log`, then asks the configured `ask.agent` to answer only from that packet.
+  The live session transcript is kept
   only in process memory and is used for conversational references; saved task
   state and artifacts remain the factual evidence. Empty input or `/done` exits,
   `/edit` opens a long reply in `$EDITOR`, and `/cancel` aborts. Non-TTY callers
   must use `factory ask --print [task-id] "<question...>"`, which preserves the
   one-shot scriptable behavior.
+- **`factory session`** opens a normal interactive Codex or Claude session for
+  realtime follow-up tweaks after a task is done. It defaults to Codex and the
+  latest `done` task; use `--agent claude` to choose Claude. `factory codex` and
+  `factory claude` are shortcuts. The command writes `agent-session.md` as a
+  manifest of useful artifact paths and asks the agent to append
+  `agent-session.summary.md` before exiting. This is an escape hatch for
+  human-in-the-loop editing; it does not change task status or route work back
+  through the autonomous loop.
 - **`factory show`** displays the saved completion feedback near the top when a
   done task has `feedback.md`, followed by the plan, review, verify, delivery, and
   activity artifacts.
@@ -575,6 +585,8 @@ or jump-target behavior you want.
   remediate[.N].md       # verify-failure doctor: diagnosis + env repair, when it runs
   proof.md               # pass proof written before commit
   feedback.md            # completion handoff on success: summary + next verification steps
+  agent-session.md       # manifest for a realtime interactive agent tweak session
+  agent-session.summary.md # optional summary from that interactive session
   postmortem.md          # blocked-task diagnosis, when enabled
   ship.md                # delivery output, when onComplete is configured
   *.activity.jsonl       # raw agent event streams beside agent-written artifacts

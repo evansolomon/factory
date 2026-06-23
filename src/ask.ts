@@ -135,6 +135,7 @@ async function taskArtifacts(task: Task): Promise<string[]> {
     'questions.md',
     'answers.md',
     'feedback.md',
+    'agent-session.summary.md',
     'human-feedback.md',
     'human-feedback.analysis.md',
     'plan.final.md',

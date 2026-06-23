@@ -130,6 +130,7 @@ async function fileText(task: Task, name: string): Promise<string | null> {
 
 export const SHOW_ARTIFACTS = [
   ['feedback.md', '## Completion feedback'],
+  ['agent-session.summary.md', '## Agent session summary'],
   ['human-feedback.md', '## Feedback'],
   ['human-feedback.analysis.md', '## Feedback analysis (last pass)'],
   ['questions.md', '## Open questions'],
