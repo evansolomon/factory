@@ -39,7 +39,8 @@ export function shouldInstallLatest(localVersion: string, latestVersion: string)
 }
 
 export async function fetchLatestRelease(
-  fetchImpl: FetchImpl = fetch
+  fetchImpl: FetchImpl = fetch,
+  opts?: { signal?: AbortSignal }
 ): Promise<{ tagName: string; version: string }> {
   let response: Response
   try {
@@ -48,6 +49,7 @@ export async function fetchLatestRelease(
         Accept: 'application/vnd.github+json',
         'User-Agent': 'factory',
       },
+      signal: opts?.signal,
     })
   } catch (err) {
     throw new UpgradeError(`failed to fetch latest GitHub release: ${errorMessage(err)}`)
