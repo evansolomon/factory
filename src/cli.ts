@@ -14,6 +14,7 @@ import {
 } from './config.ts'
 import { composeInEditor, openEditor } from './editor.ts'
 import { captureCorrection, captureEvalCase } from './evals.ts'
+import { renderTerminalFeedback } from './feedback.ts'
 import { NotARepoError } from './git.ts'
 import { emit, type Hooks } from './hooks.ts'
 import { readCandidates, readLessons } from './lessons.ts'
@@ -28,6 +29,7 @@ import {
   loadTasks,
   nextRunnable,
   RESUMABLE_STATUSES,
+  readArtifact,
   setStatus,
 } from './task.ts'
 import { upgradeFactory } from './upgrade.ts'
@@ -442,6 +444,12 @@ async function main(): Promise<number> {
           commit: task.meta.commit,
         })
         log.ok(`${task.id}: done`)
+        const feedback = await readArtifact(task, 'feedback.md')
+        if (feedback) {
+          for (const line of renderTerminalFeedback(feedback, task.id)) {
+            log.log(line)
+          }
+        }
       } else if (outcome.kind === 'needs-input') {
         await setStatus(task, 'needs-input', 'awaiting answer — see questions.md')
         await emit(ctx.root, ctx.config.hooks, 'task.needs_input', { task: task.id })

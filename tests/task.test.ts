@@ -3,7 +3,15 @@ import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { addBacklog, loadBacklog, removeBacklog } from '../src/backlog.ts'
 import type { Config, RepoContext, RoleAgents, WorkContext } from '../src/config.ts'
-import { addTask, loadTasks, nextRunnable, saveMeta, type Task } from '../src/task.ts'
+import {
+  addTask,
+  loadTasks,
+  nextRunnable,
+  readArtifact,
+  saveMeta,
+  type Task,
+  writeArtifact,
+} from '../src/task.ts'
 
 const config: Config = {
   retries: 10,
@@ -199,6 +207,17 @@ describe('task state transitions', () => {
 
     expect(tasks.map((t) => t.id).sort()).toEqual(['same-task', 'same-task-2', 'same-task-3'])
     expect(tasks.every((t) => t.meta.sharpen === 'pending')).toBe(true)
+  })
+
+  test('readArtifact trims existing artifacts and returns null for missing files', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Read artifact', null)
+
+    expect(await readArtifact(task, 'feedback.md')).toBeNull()
+
+    await writeArtifact(task, 'feedback.md', '\n\n## Summary\nDone.\n\n')
+
+    expect(await readArtifact(task, 'feedback.md')).toBe('## Summary\nDone.')
   })
 })
 

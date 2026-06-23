@@ -132,8 +132,9 @@ task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.m
         A flake or an environment problem it can't fix → set-aside (backoff)
         │ (pass)
   commit → 12. SHIP (if configured) full-perms agent: MR/PR, CI, review
+        → 13. FEEDBACK read-only local handoff
         │
-        ├─ pass → write proof.md, status: done (shipped if ship set)
+        ├─ pass → write proof.md + feedback.md, status: done (shipped if ship set)
         └─ fail → status: retrying (auto-resume), then blocked if the cap is spent
 ```
 
@@ -227,10 +228,13 @@ factory upgrade                                     # install the latest GitHub 
   the manual equivalent when no loop is up. (`answer` re-plans; `resume` continues.)
 - **`factory ask`** is a conversational, read-only query over saved task state.
   It builds a compact context packet from `meta.json`, the task index, and relevant
-  artifacts such as `questions.md`, `failures.jsonl`, `postmortem.md`, `proof.md`,
-  `ship.md`, and `verify.log`, then asks the configured `ask.agent` to answer only
-  from that packet. Omit the id to let the packet include the currently relevant
-  tasks; pass an id to focus the answer.
+  artifacts such as `questions.md`, `failures.jsonl`, `postmortem.md`,
+  `feedback.md`, `proof.md`, `ship.md`, and `verify.log`, then asks the configured
+  `ask.agent` to answer only from that packet. Omit the id to let the packet
+  include the currently relevant tasks; pass an id to focus the answer.
+- **`factory show`** displays the saved completion feedback near the top when a
+  done task has `feedback.md`, followed by the plan, review, verify, delivery, and
+  activity artifacts.
 
 ### Recovery & auto-resume
 
@@ -276,6 +280,8 @@ candidate** richer than the raw reason. And when *you* take over and fix it,
 **`factory correct`** captures the highest-signal lesson there is: it pairs the
 agent's failed attempt with your in-worktree fix (the answer key), distills what it
 should have done, saves a lesson + a paired eval case, and marks the task done.
+`factory correct` does not generate completion feedback; it is a manual override
+path, not a clean successful pipeline completion.
 Together these close the learning loop — every block and every takeover becomes
 something the factory can learn from, not just a dead end.
 
@@ -388,6 +394,14 @@ Fields:
   (default) = don't ship. Outward-facing, so opt-in; runs only after all gates
   pass. Delivery failure is treated like a transient gate failure: the task is set
   aside for auto-retry and only blocks after the auto-retry cap is spent. Examples —
+
+Successful pipeline-completed tasks also get a local `feedback.md` handoff after
+optional delivery. This read-only feedback is always attempted, even when
+`onComplete` is disabled, and it summarizes the work plus concrete next
+verification steps. It is best-effort: a feedback failure logs a warning but never
+blocks `done`, telemetry, hooks, eval capture, or delivery behavior. `factory run`
+prints a bounded rendering of the handoff with `detail: factory show <task-id>`;
+`factory show <task-id>` displays the saved artifact.
   `{"skill": "ship"}`, or
   `{"policy": "open a GitLab MR, no reviewers, iterate CI to green, never merge"}`.
 - **`ask`** — which AI answers `factory ask` questions. This is separate from
@@ -528,6 +542,7 @@ or jump-target behavior you want.
   verify.log             # latest verify output
   remediate[.N].md       # verify-failure doctor: diagnosis + env repair, when it runs
   proof.md               # pass proof written before commit
+  feedback.md            # concise completion handoff: summary + next verification steps
   postmortem.md          # blocked-task diagnosis, when enabled
   ship.md                # delivery output, when onComplete is configured
   *.activity.jsonl       # raw agent event streams beside agent-written artifacts

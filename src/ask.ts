@@ -103,6 +103,7 @@ async function taskArtifacts(task: Task): Promise<string[]> {
     'plan.final.md',
     'consolidated.md',
     'postmortem.md',
+    'feedback.md',
     'proof.md',
     'ship.md',
     'verify.log',

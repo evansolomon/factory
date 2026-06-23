@@ -126,6 +126,18 @@ async function fileText(task: Task, name: string): Promise<string | null> {
   return (await file.exists()) ? (await file.text()).trim() : null
 }
 
+export const SHOW_ARTIFACTS = [
+  ['feedback.md', '## Completion feedback'],
+  ['questions.md', '## Open questions'],
+  ['answers.md', '## Answers'],
+  ['plan.final.md', '## Final plan'],
+  ['risk.plan.md', '## Plan risk'],
+  ['review.md', '## Review (last attempt)'],
+  ['risk.md', '## Merge risk (last attempt)'],
+  ['deploy.md', '## Deploy safety (last attempt)'],
+  ['verify.log', '## Verify output (last attempt)'],
+] as const
+
 async function firstQuestion(task: Task): Promise<string> {
   const text = await fileText(task, 'questions.md')
   if (!text) {
@@ -348,16 +360,7 @@ export async function printShow(ctx: WorkContext, query?: string, step?: string)
     log.log(intent)
   }
 
-  for (const [name, heading] of [
-    ['questions.md', '## Open questions'],
-    ['answers.md', '## Answers'],
-    ['plan.final.md', '## Final plan'],
-    ['risk.plan.md', '## Plan risk'],
-    ['review.md', '## Review (last attempt)'],
-    ['risk.md', '## Merge risk (last attempt)'],
-    ['deploy.md', '## Deploy safety (last attempt)'],
-    ['verify.log', '## Verify output (last attempt)'],
-  ] as const) {
+  for (const [name, heading] of SHOW_ARTIFACTS) {
     const text = await fileText(task, name)
     if (text) {
       log.log('')
