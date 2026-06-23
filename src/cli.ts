@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { dirname } from 'node:path'
 import { type ParsedAddOptions, parseAddOptions } from './add-options.ts'
+import { openAgentSession } from './agent-session.ts'
 import { askFactory } from './ask.ts'
 import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
 import { addBacklog, loadBacklog, removeBacklog } from './backlog.ts'
@@ -130,6 +131,10 @@ COMMANDS
                            Interactive Q&A over saved factory task state (TTY).
   factory ask --print [task-id] <question...>
                            One-shot, scriptable answer (required in non-TTY).
+  factory session [--agent codex|claude] [task-id]
+                           Open an interactive agent session seeded with saved
+                           task artifacts. Defaults to codex + latest done task.
+                           Shortcuts: factory codex [task-id], factory claude [task-id].
   factory show [task-id] [step]  Drill into one task (defaults to the latest here);
                              with a step (e.g. implement, review, plan.codex), show
                              that step's line-by-line agent activity. A lone step
@@ -166,6 +171,7 @@ TYPICAL USE
       factory run                    # in a worktree; leave it running, then walk away
       factory add "Another task..."  # from anywhere; the running loop picks it up
       factory ask "has ship ran?"    # ask, then keep the session open for follow-ups
+      factory session --agent claude # realtime tweak session for the latest done task
       factory answer -m "..."        # only if a task pauses to ask
       factory resume                 # pick a blocked task back up where it left off
 
@@ -714,6 +720,16 @@ export async function main(opts: MainOptions = {}): Promise<number> {
   if (cmd === 'ask') {
     const ctx = await loadContext(process.cwd())
     return askFactory(ctx, rest)
+  }
+
+  if (cmd === 'session') {
+    const ctx = await loadContext(process.cwd())
+    return openAgentSession(ctx, rest, { commandName: 'session' })
+  }
+
+  if (cmd === 'codex' || cmd === 'claude') {
+    const ctx = await loadContext(process.cwd())
+    return openAgentSession(ctx, rest, { defaultAgent: cmd, commandName: cmd })
   }
 
   if (cmd === 'config') {
