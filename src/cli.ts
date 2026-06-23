@@ -18,6 +18,7 @@ import { NotARepoError } from './git.ts'
 import { emit, type Hooks } from './hooks.ts'
 import { readCandidates, readLessons } from './lessons.ts'
 import { log } from './log.ts'
+import { startPromptWorker } from './prompt.ts'
 import { sharpen } from './sharpen.ts'
 import {
   addTask,
@@ -58,16 +59,19 @@ COMMANDS
       piped. --trivial / --complexity skip sharpening too and use the declared
       runtime complexity instead of triage.
 
-  factory run [--once | --drain]
+  factory run [--once | --drain] [--no-prompt]
       Work the queue. Default: stay running and pick up tasks as they're added
       (factory add), unblocked (factory resume/answer), due for an auto-retry, or
       stranded mid-stage by a previously killed loop (Ctrl-C/crash) — shovel coal
       into the engine. So restarting after a Ctrl-C just resumes the interrupted
       task. A transient gate failure (verify/ship) is set aside and AUTO-RESUMED on
       a backoff (up to a cap) before it truly blocks, so env/CI flakes recover with
-      no action from you.
-        --once    do one ready task, then exit (good for trying it out)
-        --drain   work until the queue is empty, then exit
+      no action from you. In watch mode on a terminal it also prompts you inline for
+      needs-input answers (no need to switch terminals); the loop keeps working
+      other tasks while a prompt is open.
+        --once       do one ready task, then exit (good for trying it out)
+        --drain      work until the queue is empty, then exit
+        --no-prompt  don't prompt inline; set needs-input aside for factory answer
 
   factory answer [task-id] <answer...>
       When a task is too ambiguous to build safely, the loop PAUSES it (status
@@ -75,6 +79,8 @@ COMMANDS
       them in 'factory status' and 'factory show <id>'. This command replies to those
       questions and puts the task back in the queue; your answer is folded into the
       next sharpen or planning pass. Omit the id to answer the latest needs-input task.
+      A watch-mode 'factory run' on a terminal prompts for this inline; use this
+      command for detached/CI runs, from another terminal, or after --no-prompt.
 
   factory resume [task-id] [note...]
       Pick a BLOCKED, waiting-to-retry, or interrupted (killed mid-stage) task back
@@ -367,6 +373,17 @@ async function main(): Promise<number> {
       once ? 'running one task' : drain ? 'draining queue' : 'watching queue (Ctrl-C to stop)'
     )
 
+    // In the long-lived watch mode, when someone is at the terminal, prompt for
+    // needs-input answers inline instead of making them switch terminals to run
+    // `factory answer`. The worker runs concurrently — the loop keeps working
+    // other tasks while a prompt is open. Bounded runs (--once/--drain) and
+    // non-TTY/piped runs keep the set-aside + `factory answer` behavior; opt out
+    // with --no-prompt.
+    const interactive = !once && !drain && process.stdin.isTTY && !rest.includes('--no-prompt')
+    if (interactive) {
+      startPromptWorker(ctx)
+    }
+
     // The attention hook means "factory is stopped, waiting on you" — so it is
     // raised only when the loop has no runnable work left, never while it's
     // actively churning other tasks. Dedup by last-emitted state so a long idle
@@ -428,7 +445,11 @@ async function main(): Promise<number> {
       } else if (outcome.kind === 'needs-input') {
         await setStatus(task, 'needs-input', 'awaiting answer — see questions.md')
         await emit(ctx.root, ctx.config.hooks, 'task.needs_input', { task: task.id })
-        log.warn(`${task.id}: needs input — run: factory answer "..."`)
+        // In interactive mode the prompt worker announces and collects the answer
+        // inline; only point at `factory answer` when nothing will prompt here.
+        if (!interactive) {
+          log.warn(`${task.id}: needs input — run: factory answer "..."`)
+        }
       } else if (outcome.kind === 'retrying') {
         // Transient gate failure: set aside (no alert) and let the loop auto-resume
         // it once the backoff elapses, up to the cap, before it truly blocks.

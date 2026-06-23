@@ -14,6 +14,23 @@ const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`
 // to its on-screen width, which we use to blank it.
 let statusText = ''
 
+// An interactive prompt (factory run's inline answer prompt) can also pin a line
+// to the bottom. While one is active it OWNS the bottom line: permanent prints
+// clear and redraw the prompt (with the user's in-progress input) instead of the
+// heartbeat, and the heartbeat is suppressed so the two don't fight for the line.
+// `text()` returns the full plain prompt line (label + current input buffer).
+type ActivePrompt = { text: () => string }
+let activePrompt: ActivePrompt | null = null
+
+export function setActivePrompt(prompt: ActivePrompt | null): void {
+  if (prompt && statusText) {
+    // The prompt is taking the bottom line — wipe any heartbeat residue first.
+    process.stdout.write(`\r${' '.repeat(statusText.length)}\r`)
+    statusText = ''
+  }
+  activePrompt = prompt
+}
+
 function fitStatusLine(text: string): string {
   const columns = process.stdout.columns
   if (!columns || columns < 2) {
@@ -31,12 +48,13 @@ function fitStatusLine(text: string): string {
 }
 
 function emit(line: string): void {
-  if (statusText) {
-    process.stdout.write(`\r${' '.repeat(statusText.length)}\r`)
+  const bottom = activePrompt ? activePrompt.text() : statusText
+  if (bottom) {
+    process.stdout.write(`\r${' '.repeat(bottom.length)}\r`)
   }
   console.log(line)
-  if (statusText) {
-    process.stdout.write(statusText)
+  if (bottom) {
+    process.stdout.write(bottom)
   }
 }
 
@@ -66,7 +84,7 @@ export const log = {
   // Overwrite the single in-place status line (no newline), e.g. a live heartbeat.
   // TTY only — a no-op when piped, so logs/files don't fill with carriage returns.
   status(text: string): void {
-    if (!process.stdout.isTTY) {
+    if (!process.stdout.isTTY || activePrompt) {
       return
     }
     const fitted = fitStatusLine(text)
