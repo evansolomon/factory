@@ -5,7 +5,15 @@ import { composeInEditor } from './editor.ts'
 import { emit, type Hooks } from './hooks.ts'
 import { log } from './log.ts'
 import { sharpenPrompt, sharpenReviewPrompt } from './prompts.ts'
-import { BOLD, CYAN, DIM, GREEN, RESET, styleSharpenMarkdownLine } from './sharpen-render.ts'
+import {
+  BOLD,
+  CYAN,
+  DIM,
+  GREEN,
+  RESET,
+  renderAgentMarkdown,
+  styleSharpenMarkdownLine,
+} from './sharpen-render.ts'
 
 // Interactive sharpen step. Seeded with the raw intent, an agent interrogates it
 // into a self-contained goal spec, exploring the repo itself. Each agent turn is
@@ -142,7 +150,7 @@ async function readReply(rl: Interface): Promise<Reply> {
         log.info('  (nothing entered)')
         continue
       }
-      log.log(`\n${renderAgent(edited)}\n`)
+      log.log(`\n${renderAgentMarkdown(edited)}\n`)
       return { kind: 'text', text: edited }
     }
     return { kind: 'text', text: input }
@@ -202,18 +210,9 @@ function fmtTok(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`
 }
 
-// Frame an agent turn with a dim left gutter so a multi-paragraph message reads
-// as one block, visually distinct from your left-aligned `you>` input.
-function renderAgent(text: string): string {
-  return text
-    .split('\n')
-    .map((line) => `${DIM}│${RESET} ${styleSharpenMarkdownLine(line)}`)
-    .join('\n')
-}
-
 function showSpec(spec: string, verify: string | null): void {
   log.log(`\n${GREEN}${BOLD}┌─ proposed spec ────────────────────────────${RESET}`)
-  log.log(renderAgent(spec))
+  log.log(renderAgentMarkdown(spec))
   if (verify) {
     log.log(`${DIM}│${RESET} ${BOLD}verify:${RESET} ${CYAN}${verify}${RESET}`)
   }
@@ -271,7 +270,7 @@ export async function sharpen(opts: SharpenOpts): Promise<SharpenResult | null> 
         const { preamble, questions } = parseQuestions(text)
         if (questions.length > 0) {
           if (preamble) {
-            log.log(`\n${renderAgent(preamble)}`)
+            log.log(`\n${renderAgentMarkdown(preamble)}`)
           }
           const reply = await readQuestionAnswers(opts, rl, questions)
           if (reply.kind === 'cancel') {
@@ -289,7 +288,7 @@ export async function sharpen(opts: SharpenOpts): Promise<SharpenResult | null> 
       // conversational reply (line, /edit, /done, /cancel).
       if (parsed.ready) {
         if (parsed.message) {
-          log.log(`\n${renderAgent(parsed.message)}\n`)
+          log.log(`\n${renderAgentMarkdown(parsed.message)}\n`)
         }
         const candidate = { intent: parsed.spec, verify: parsed.verify ?? opts.verify }
         const review = await reviewSpec(opts, turns, candidate, tally)
@@ -304,7 +303,7 @@ export async function sharpen(opts: SharpenOpts): Promise<SharpenResult | null> 
         }
         if (review.kind === 'questions') {
           if (review.preamble) {
-            log.log(`\n${renderAgent(review.preamble)}`)
+            log.log(`\n${renderAgentMarkdown(review.preamble)}`)
           }
           const reply = await readQuestionAnswers(opts, rl, review.questions)
           if (reply.kind === 'cancel') {
@@ -326,7 +325,7 @@ export async function sharpen(opts: SharpenOpts): Promise<SharpenResult | null> 
         proposed = candidate
         showSpec(parsed.spec, proposed.verify)
       } else if (parsed.message) {
-        log.log(`\n${renderAgent(parsed.message)}\n`)
+        log.log(`\n${renderAgentMarkdown(parsed.message)}\n`)
       } else {
         log.info('(no response — type a reply to retry, or Enter to finish)')
       }

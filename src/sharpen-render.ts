@@ -44,3 +44,10 @@ export function styleSharpenMarkdownLine(line: string): string {
 
   return styleInlineMarkdown(line)
 }
+
+export function renderAgentMarkdown(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => `${DIM}│${RESET} ${styleSharpenMarkdownLine(line)}`)
+    .join('\n')
+}
