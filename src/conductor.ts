@@ -20,6 +20,7 @@ import {
   convergePrompt,
   critiquePrompt,
   deploySafetyPrompt,
+  feedbackAnalysisPrompt,
   feedbackPrompt,
   fixPrompt,
   implementPrompt,
@@ -54,12 +55,16 @@ import {
 import {
   appendFailure,
   type Failure,
+  markFeedbackConsumed,
+  pendingFeedbackCount,
   readAnswers,
   readArtifact,
   readFailures,
   readIntent,
+  readPendingFeedback,
   readPlan,
   readySharpenedTask,
+  refreshFeedbackState,
   saveMeta,
   setStatus,
   type Task,
@@ -228,6 +233,41 @@ function slugify(text: string): string {
     .slice(0, 60)
     .replace(/-+$/g, '')
   return slug.length > 0 ? slug : 'plan'
+}
+
+type FeedbackContext = {
+  count: number
+  raw: string
+  analysis: string
+}
+
+async function analyzeFeedbackIfPending(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  intent: string,
+  finalPlan: string
+): Promise<FeedbackContext | null> {
+  if (pendingFeedbackCount(task) === 0) {
+    return null
+  }
+  const raw = await readPendingFeedback(task)
+  if (!raw) {
+    return null
+  }
+  await progress(ctx, task, 'feedback', 'feedback — generalizing your feedback')
+  const analysis = await agentStep(
+    meter,
+    'feedback',
+    agentLabel(ctx.agents.implementer),
+    runAgent(ctx.agents.implementer, {
+      root: ctx.root,
+      prompt: feedbackAnalysisPrompt(intent, raw, await worktreeDiff(ctx.root), finalPlan),
+      access: 'read',
+      outFile: `${task.dir}/human-feedback.analysis.md`,
+    })
+  )
+  return { count: task.meta.feedbackCount, raw, analysis }
 }
 
 // A model id (e.g. "grok-4", "anthropic/claude-x") made filesystem/label-safe.
@@ -975,6 +1015,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     await writeArtifact(task, 'plan.md', finalPlan)
   }
 
+  const feedbackContext = await analyzeFeedbackIfPending(ctx, task, meter, intent, finalPlan)
+
   // A resume whose work already committed only has delivery left — skip the build.
   if (resuming && task.meta.commit) {
     return shipAndFinish(ctx, task, intent, meter, stats)
@@ -1001,10 +1043,10 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   // but DON'T re-implement (a verify env-flake mustn't churn code) — so jump to the
   // hard cap, letting any failure escalate at once (verify→backoff retry,
   // review-panel→block). A note means the human wants a change, so keep iterating.
-  if (skipImplement && resumeKind === 'auto-retry' && !resumeNote) {
+  if (skipImplement && resumeKind === 'auto-retry' && !resumeNote && !feedbackContext) {
     attempt = hardCap
   }
-  if (skipImplement && resumeNote) {
+  if (skipImplement && (resumeNote || feedbackContext)) {
     skipImplement = false
     attempt = Math.max(1, failures.length)
   }
@@ -1031,6 +1073,9 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       if (resumeNote) {
         parts.push(`Human guidance on retry: ${resumeNote}`)
       }
+      if (feedbackContext && !latest) {
+        parts.push('Human feedback requires a follow-up fix pass.')
+      }
       const failureCtx = parts.join('\n\n')
       const priorSummaries = failures.slice(0, -1).map((f) => `${f.gate}: ${f.summary}`)
       const stagePrompt = fixing
@@ -1041,9 +1086,17 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             priorSummaries,
             await worktreeDiff(ctx.root),
             userFacing,
-            riskAssessment
+            riskAssessment,
+            feedbackContext?.analysis ?? null
           )
-        : implementPrompt(intent, finalPlan, verify, userFacing, riskAssessment)
+        : implementPrompt(
+            intent,
+            finalPlan,
+            verify,
+            userFacing,
+            riskAssessment,
+            feedbackContext?.analysis ?? null
+          )
       await agentStep(
         meter,
         'implement',
@@ -1254,6 +1307,10 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
 
   await commitAll(ctx.root, commitMessage(intent))
   task.meta.commit = await headSha(ctx.root)
+  if (feedbackContext) {
+    await refreshFeedbackState(task)
+    markFeedbackConsumed(task, feedbackContext.count)
+  }
   await saveMeta(task)
 
   return shipAndFinish(ctx, task, intent, meter, stats)

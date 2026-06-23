@@ -96,6 +96,11 @@ const MetaSchema = z.object({
   autoRetries: z.number().int().default(0),
   // Explicit complexity declared by `factory add`; null means runtime triage decides.
   complexity: TaskComplexitySchema.nullable().default(null),
+  // Human feedback recorded after progress exists. Counted separately from answers
+  // so the conductor can consume feedback only after a verified commit.
+  feedbackCount: z.number().int().nonnegative().default(0),
+  feedbackConsumed: z.number().int().nonnegative().default(0),
+  feedbackSourceTaskId: z.string().nullable().default(null),
 })
 export type Meta = z.infer<typeof MetaSchema>
 
@@ -145,6 +150,7 @@ export type AddTaskOptions = {
   status?: Status
   sharpen?: SharpenState
   complexity?: TaskComplexity | null
+  feedbackSourceTaskId?: string | null
 }
 
 async function listTaskDirs(tasksDir: string): Promise<string[]> {
@@ -202,6 +208,9 @@ export async function addTask(
     retryAt: null,
     autoRetries: 0,
     complexity: options.complexity ?? null,
+    feedbackCount: 0,
+    feedbackConsumed: 0,
+    feedbackSourceTaskId: options.feedbackSourceTaskId ?? null,
   }
 
   await Bun.write(`${dir}/task.md`, `${intent.trim()}\n`)
@@ -398,6 +407,57 @@ export async function appendAnswer(task: Task, text: string): Promise<void> {
   const existing = (await readAnswers(task)) ?? ''
   const entry = `## Answer (${new Date().toISOString()})\n${text.trim()}\n`
   await Bun.write(`${task.dir}/answers.md`, existing ? `${existing}\n\n${entry}` : entry)
+}
+
+export function pendingFeedbackCount(task: Task): number {
+  return Math.max(0, task.meta.feedbackCount - task.meta.feedbackConsumed)
+}
+
+// Human feedback lives in human-feedback.md, kept separate from the success-path
+// completion handoff in feedback.md so the handoff write can't clobber pending,
+// not-yet-consumed feedback.
+export async function readFeedback(task: Task): Promise<string | null> {
+  const file = Bun.file(`${task.dir}/human-feedback.md`)
+  return (await file.exists()) ? (await file.text()).trim() : null
+}
+
+function feedbackEntries(text: string): string[] {
+  const starts = [...text.matchAll(/^## Feedback \([^)]+\)\n/gm)].map((match) => match.index)
+  return starts
+    .map((start, i) => text.slice(start, starts[i + 1] ?? text.length).trim())
+    .filter(Boolean)
+}
+
+export async function readPendingFeedback(task: Task): Promise<string | null> {
+  const text = await readFeedback(task)
+  if (!text) {
+    return null
+  }
+  const entries = feedbackEntries(text).slice(task.meta.feedbackConsumed)
+  return entries.length > 0 ? entries.join('\n\n') : null
+}
+
+export async function appendFeedback(task: Task, text: string): Promise<void> {
+  const existing = (await readFeedback(task)) ?? ''
+  const entry = `## Feedback (${new Date().toISOString()})\n\n${text.trim()}\n`
+  await Bun.write(`${task.dir}/human-feedback.md`, existing ? `${existing}\n\n${entry}` : entry)
+  task.meta.feedbackCount += 1
+  task.meta.updatedAt = new Date().toISOString()
+  await writeMeta(task.dir, task.meta)
+}
+
+export function markFeedbackConsumed(task: Task, count: number): void {
+  task.meta.feedbackConsumed = Math.max(task.meta.feedbackConsumed, count)
+}
+
+export async function refreshFeedbackState(task: Task): Promise<void> {
+  const file = Bun.file(`${task.dir}/meta.json`)
+  if (!(await file.exists())) {
+    return
+  }
+  const latest = MetaSchema.parse(await file.json())
+  task.meta.feedbackCount = Math.max(task.meta.feedbackCount, latest.feedbackCount)
+  task.meta.feedbackConsumed = Math.max(task.meta.feedbackConsumed, latest.feedbackConsumed)
 }
 
 export async function readLiveMeter(task: Task): Promise<LiveMeter | null> {

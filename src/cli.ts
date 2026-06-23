@@ -14,8 +14,15 @@ import {
 } from './config.ts'
 import { composeInEditor, openEditor } from './editor.ts'
 import { captureCorrection, captureEvalCase } from './evals.ts'
-import { renderTerminalFeedback } from './feedback.ts'
-import { NotARepoError } from './git.ts'
+import {
+  decideFeedbackRoute,
+  feedbackRouteInput,
+  followUpIntent,
+  latestFeedbackTarget,
+  parseFeedbackArgs,
+  renderTerminalFeedback,
+} from './feedback.ts'
+import { hasChanges, NotARepoError } from './git.ts'
 import { emit, type Hooks } from './hooks.ts'
 import { readCandidates, readLessons } from './lessons.ts'
 import { log } from './log.ts'
@@ -24,13 +31,18 @@ import { sharpen } from './sharpen.ts'
 import {
   addTask,
   appendAnswer,
+  appendFeedback,
   findTask,
   latestTask,
   loadTasks,
+  markFeedbackConsumed,
   nextRunnable,
   RESUMABLE_STATUSES,
   readArtifact,
+  readPlan,
+  saveMeta,
   setStatus,
+  type Task,
 } from './task.ts'
 import { upgradeFactory } from './upgrade.ts'
 import { FACTORY_VERSION } from './version.ts'
@@ -93,6 +105,13 @@ COMMANDS
       looked) or to force a transient retry now. (Note: a running 'factory run'
       already auto-reclaims interrupted tasks; this is the manual equivalent.)
       (Contrast 'answer', which re-plans; 'resume' continues.)
+
+  factory feedback [task-id] <feedback...>
+      Record human critique after reviewing or testing existing task work. Unlike
+      'add', this is not new work; unlike 'resume', the feedback is durable and the
+      next autonomous pass is told to generalize from the concrete comment before
+      changing code. Omit the id for the latest sensible feedback target. Done or
+      committed tasks get a linked follow-up instead of being reopened.
 
   factory correct [task-id] [note...]
       When you take over a BLOCKED task and fix it yourself, record the lesson: it
@@ -263,6 +282,14 @@ async function queueState(ctx: WorkContext): Promise<AlertState | null> {
   const has = (s: string) => tasks.some((t) => t.meta.status === s)
   const allDone = tasks.length > 0 && tasks.every((t) => t.meta.status === 'done')
   return has('blocked') ? 'blocked' : has('needs-input') ? 'needs-input' : allDone ? 'done' : null
+}
+
+async function hasSavedPlan(task: Task): Promise<boolean> {
+  return (await readPlan(task)) !== null
+}
+
+async function feedbackFacts(task: Task, hasWorktreeDiff: boolean) {
+  return feedbackRouteInput(task, await hasSavedPlan(task), hasWorktreeDiff)
 }
 
 async function main(): Promise<number> {
@@ -528,6 +555,57 @@ async function main(): Promise<number> {
     await appendAnswer(task, text.join(' '))
     await setStatus(task, 'ready')
     log.ok(`${task.id}: answered, back in queue`)
+    return 0
+  }
+
+  if (cmd === 'feedback') {
+    const ctx = await loadContext(process.cwd())
+    const tasks = await loadTasks(ctx)
+    const parsed = parseFeedbackArgs(rest, tasks)
+    if (!parsed.ok) {
+      log.fail(parsed.message)
+      return 1
+    }
+    const hasWorktreeDiff = await hasChanges(ctx.root)
+    const hasPlanEntries: Array<[string, boolean]> = []
+    for (const candidate of tasks) {
+      hasPlanEntries.push([candidate.id, await hasSavedPlan(candidate)])
+    }
+    const hasPlanByTask = new Map(hasPlanEntries)
+    const task =
+      parsed.task ??
+      latestFeedbackTarget(tasks, (candidate) =>
+        feedbackRouteInput(candidate, hasPlanByTask.get(candidate.id) ?? false, hasWorktreeDiff)
+      )
+    if (!task) {
+      log.fail('no feedback target with existing progress')
+      return 1
+    }
+    const route = decideFeedbackRoute(await feedbackFacts(task, hasWorktreeDiff))
+    if (route.kind === 'reject') {
+      log.fail(route.message)
+      return 1
+    }
+    if (route.kind === 'follow-up') {
+      await appendFeedback(task, parsed.text)
+      markFeedbackConsumed(task, task.meta.feedbackCount)
+      await saveMeta(task)
+      const followUp = await addTask(ctx, followUpIntent(task, parsed.text), task.meta.verify, {
+        sharpen: 'skipped',
+        feedbackSourceTaskId: task.id,
+      })
+      log.ok(`${task.id}: done — queued follow-up ${followUp.id} for feedback`)
+      return 0
+    }
+
+    await appendFeedback(task, parsed.text)
+    task.meta.resume = true
+    task.meta.resumeKind = 'manual'
+    task.meta.resumeNote = null
+    task.meta.autoRetries = 0
+    task.meta.retryAt = null
+    await setStatus(task, 'ready')
+    log.ok(`${task.id}: feedback recorded — back in queue`)
     return 0
   }
 

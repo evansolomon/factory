@@ -38,6 +38,50 @@ function riskBlock(riskAssessment: string | null): string {
     : ''
 }
 
+export function feedbackAnalysisBlock(feedbackAnalysis: string | null): string {
+  return feedbackAnalysis
+    ? `\n\n## Human feedback analysis\n${feedbackAnalysis}\n\nApply this as post-progress feedback: change only the concrete cases justified by the inferred abstract problem or root cause.`
+    : ''
+}
+
+export function feedbackAnalysisPrompt(
+  intent: string,
+  feedback: string,
+  currentDiff: string,
+  finalPlan: string
+): string {
+  return `Interpret the human feedback below as post-progress critique on an existing task. Do not make code changes. Generalize from the concrete comment before deciding what should change.
+
+Report:
+- Concrete observation: what the human specifically pointed at.
+- Inferred abstract problem or root cause: the broader issue that explains the comment.
+- Repo and diff surfaces inspected: files, artifacts, and current diff areas you checked.
+- Other applicable concrete instances: sibling cases where the same abstraction applies.
+- Non-applicable look-alikes: similar-looking cases you inspected and intentionally excluded.
+- Specific required changes: the exact cases that should change.
+
+Rules:
+- First infer the abstraction/root cause, then search downward for concrete affected cases.
+- Change only cases justified by that abstraction; do not expand into unrelated cleanup.
+- If the feedback is too narrow to generalize, say that explicitly and still list what you inspected.
+
+## Task
+${intent}
+
+## Final plan
+${finalPlan}
+
+## Human feedback
+${feedback}
+
+## Current diff
+\`\`\`diff
+${currentDiff}
+\`\`\`
+
+Output ONLY markdown under the report headings above. Make no code changes.`
+}
+
 // The dedicated research subagent. Runs before planning and gathers the factual
 // groundwork — relevant code, existing patterns, history of the target areas,
 // prior plans, conventions, gotchas — so plans are grounded, not assumed. It
@@ -253,7 +297,8 @@ export function implementPrompt(
   finalPlan: string,
   verify: string | null,
   userFacing: boolean,
-  riskAssessment: string | null
+  riskAssessment: string | null,
+  feedbackAnalysis: string | null = null
 ): string {
   return `Implement the plan below in the repository at your working directory. Make the code changes it calls for and nothing more — do not fix, refactor, or comment on unrelated code.
 
@@ -267,7 +312,7 @@ Do NOT commit — leave the changes in the working tree.
 ${intent}
 
 ## Plan
-${finalPlan}${riskBlock(riskAssessment)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. Make sure it passes.` : ''}${uxBuildNote(userFacing)}`
+${finalPlan}${feedbackAnalysisBlock(feedbackAnalysis)}${riskBlock(riskAssessment)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. Make sure it passes.` : ''}${uxBuildNote(userFacing)}`
 }
 
 // First pass: decide whether a task is trivial enough to skip the planning
@@ -387,7 +432,8 @@ export function fixPrompt(
   history: string[],
   diff: string,
   userFacing: boolean,
-  riskAssessment: string | null
+  riskAssessment: string | null,
+  feedbackAnalysis: string | null = null
 ): string {
   const tried = history.length
     ? `\n\n## Already attempted (these fixes did NOT work — do not repeat them)\n${history.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
@@ -406,7 +452,7 @@ ${failure}${tried}
 ## Current diff
 \`\`\`diff
 ${diff}
-\`\`\`${riskBlock(riskAssessment)}${uxBuildNote(userFacing)}`
+\`\`\`${feedbackAnalysisBlock(feedbackAnalysis)}${riskBlock(riskAssessment)}${uxBuildNote(userFacing)}`
 }
 
 // The verify-gate doctor: runs with FULL access when the verify command fails.

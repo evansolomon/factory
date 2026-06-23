@@ -189,6 +189,7 @@ factory add [--raw] [--trivial | --complexity trivial|complex] "<intent...>" [--
 factory run [--once|--drain]                       # process tasks
 factory answer [task-id] "<answer...>"             # answer a needs-input task, requeue it
 factory resume [task-id] [note...]                 # pick a blocked task back up where it left off
+factory feedback [task-id] "<feedback...>"         # critique existing progress, generalized on next pass
 factory correct [task-id] [note...]                # record your manual fix of a blocked task as a lesson
 factory backlog [add|rm] ...                       # experimental repo-level backlog
 factory status                                     # catch-up dashboard
@@ -227,6 +228,13 @@ factory upgrade                                     # install the latest GitHub 
   review-panel blocks (after you've looked) or to force a transient retry now.
   A running `factory run` already auto-reclaims stranded tasks, so this is mainly
   the manual equivalent when no loop is up. (`answer` re-plans; `resume` continues.)
+- **`factory feedback`** records critique after you review or test existing task
+  progress. It is not new work (`add`) and it is not an ephemeral retry note
+  (`resume`): feedback is appended to `human-feedback.md`, shown by `factory show`, and
+  the next pass first analyzes the concrete comment into an abstract/root-cause
+  pattern, searches for sibling cases, and changes only justified cases. Active
+  post-progress tasks are requeued in place. Done or already-committed tasks are
+  left closed and get a linked follow-up task instead.
 - **`factory ask`** is an interactive, read-only session over saved task state.
   `factory ask "has ship ran?"` answers that first question, then stays open for
   follow-ups; `factory ask <task-id>` opens a session scoped to that task. Each
@@ -302,6 +310,8 @@ factory run                          # walk away; come back when the window aler
 factory answer "Cap at 5 retries, 30s max backoff"
 # if it's blocked on review-panel findings, after a look:
 factory resume "the reviewer's concern is handled by the lock in upload.ts"
+# if you reviewed progress and found a concrete issue:
+factory feedback "the mobile button wraps; check sibling controls too"
 ```
 
 ## Spawning & the fleet (the integration pattern)
@@ -532,6 +542,8 @@ or jump-target behavior you want.
   reconcile.md           # proceed vs ask decision
   questions.md           # open questions when status = needs-input
   answers.md             # your answers, appended by factory answer
+  human-feedback.md      # post-progress human feedback, appended by factory feedback
+  human-feedback.analysis.md  # latest root-cause/sibling-case analysis of pending feedback
   plan.<planner>.v2.md   # revised planner output
   plan.final.md          # selected/merged plan
   plan.md                # selected plan persisted for resume
@@ -549,7 +561,7 @@ or jump-target behavior you want.
   verify.log             # latest verify output
   remediate[.N].md       # verify-failure doctor: diagnosis + env repair, when it runs
   proof.md               # pass proof written before commit
-  feedback.md            # concise completion handoff: summary + next verification steps
+  feedback.md            # completion handoff on success: summary + next verification steps
   postmortem.md          # blocked-task diagnosis, when enabled
   ship.md                # delivery output, when onComplete is configured
   *.activity.jsonl       # raw agent event streams beside agent-written artifacts
@@ -559,8 +571,10 @@ or jump-target behavior you want.
 status without rewriting your prose, except when the run-loop sharpen stage
 finishes: then `task.md` is replaced with the refined spec. A complexity override
 from `factory add --trivial` or `--complexity trivial|complex` lives in
-`meta.json`; `triage.md` exists only for model triage output. Repo-level state
-lives under the main worktree's state dir, shared across linked worktrees:
+`meta.json`; feedback bookkeeping lives there too as `feedbackCount`,
+`feedbackConsumed`, and `feedbackSourceTaskId` for linked follow-ups. `triage.md`
+exists only for model triage output. Repo-level state lives under the main
+worktree's state dir, shared across linked worktrees:
 `LESSONS.md`, `LESSONS.candidates.md`, `metrics.db`, `eval-candidates/`, and
 `backlog/`.
 
@@ -647,7 +661,10 @@ cap exhausted).
 `needs-input`, `retrying`, and `blocked` are set aside; `factory` moves on.
 `factory answer` returns a `needs-input` task to `ready`; `factory resume` returns
 a blocked/retrying/stranded task to `ready`; due auto-retries are promoted by the
-run loop.
+run loop. `factory feedback` returns an active post-progress task to `ready` with
+pending feedback analysis for the next pass. Feedback remains pending until a
+reviewed, verified pass commits and consumes it; if the task is already done or
+has a commit, feedback queues a linked follow-up instead of reopening it.
 
 ## Telemetry (`factory report`)
 
