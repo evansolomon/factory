@@ -1,6 +1,15 @@
 import { describe, expect, test } from 'bun:test'
-import { renderTerminalFeedback } from '../src/feedback.ts'
+import {
+  decideFeedbackRoute,
+  type FeedbackRouteInput,
+  followUpIntent,
+  isDefaultFeedbackTarget,
+  latestFeedbackTarget,
+  parseFeedbackArgs,
+  renderTerminalFeedback,
+} from '../src/feedback.ts'
 import { feedbackPrompt } from '../src/prompts.ts'
+import type { Task } from '../src/task.ts'
 import { SHOW_ARTIFACTS } from '../src/view.ts'
 
 describe('feedbackPrompt', () => {
@@ -104,3 +113,167 @@ describe('SHOW_ARTIFACTS', () => {
     expect(names.indexOf('feedback.md')).toBeLessThan(names.indexOf('plan.final.md'))
   })
 })
+
+function task(id: string, updatedAt: string, overrides: Partial<Task['meta']> = {}): Task {
+  return {
+    id,
+    dir: `/tmp/factory/tasks/${id}`,
+    meta: {
+      id,
+      slug: id,
+      status: 'ready',
+      verify: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt,
+      commit: null,
+      note: null,
+      sharpen: 'done',
+      resume: false,
+      resumeNote: null,
+      resumeKind: null,
+      retryAt: null,
+      autoRetries: 0,
+      complexity: null,
+      feedbackCount: 0,
+      feedbackConsumed: 0,
+      feedbackSourceTaskId: null,
+      ...overrides,
+    },
+  }
+}
+
+function route(overrides: Partial<FeedbackRouteInput>) {
+  return decideFeedbackRoute({
+    status: 'ready',
+    hasPlan: false,
+    hasWorktreeDiff: false,
+    hasCommit: false,
+    pendingFeedback: false,
+    ...overrides,
+  })
+}
+
+describe('feedback argument parsing', () => {
+  test('parses explicit task id', () => {
+    const target = task('fix-layout', '2026-01-01T00:00:00.000Z')
+
+    expect(parseFeedbackArgs(['fix-layout', 'button', 'wraps'], [target])).toEqual({
+      ok: true,
+      task: target,
+      text: 'button wraps',
+    })
+  })
+
+  test('treats non-task first argument as feedback text', () => {
+    expect(parseFeedbackArgs(['button', 'wraps'], [])).toEqual({
+      ok: true,
+      task: null,
+      text: 'button wraps',
+    })
+  })
+
+  test('rejects missing feedback text', () => {
+    const target = task('fix-layout', '2026-01-01T00:00:00.000Z')
+
+    expect(parseFeedbackArgs([], [target])).toEqual({
+      ok: false,
+      message: 'usage: factory feedback [task-id] <feedback...>',
+    })
+    expect(parseFeedbackArgs(['fix-layout'], [target])).toEqual({
+      ok: false,
+      message: 'usage: factory feedback [task-id] <feedback...>',
+    })
+  })
+})
+
+describe('feedback routing', () => {
+  test('done routes to follow-up', () => {
+    expect(route({ status: 'done' })).toEqual({ kind: 'follow-up' })
+  })
+
+  test('any committed task routes to follow-up', () => {
+    expect(route({ status: 'retrying', hasCommit: true, hasWorktreeDiff: true })).toEqual({
+      kind: 'follow-up',
+    })
+  })
+
+  test('needs-input rejects with answer guidance', () => {
+    expect(route({ status: 'needs-input' })).toEqual({
+      kind: 'reject',
+      message: 'task is waiting for answers; use factory answer',
+    })
+  })
+
+  test('fresh ready rejects with add guidance', () => {
+    expect(route({ status: 'ready' })).toEqual({
+      kind: 'reject',
+      message: 'task has no progress to give feedback on; use factory add for new work',
+    })
+  })
+
+  test('ready with diff routes to resume', () => {
+    expect(route({ status: 'ready', hasWorktreeDiff: true })).toEqual({ kind: 'resume' })
+  })
+
+  test('blocked with plan routes to resume', () => {
+    expect(route({ status: 'blocked', hasPlan: true })).toEqual({ kind: 'resume' })
+  })
+
+  test('retrying with diff routes to resume', () => {
+    expect(route({ status: 'retrying', hasWorktreeDiff: true })).toEqual({ kind: 'resume' })
+  })
+
+  test('default-target predicate excludes fresh, needs-input, and live pre-plan tasks', () => {
+    expect(isDefaultFeedbackTarget({ ...baseInput(), status: 'ready' })).toBe(false)
+    expect(isDefaultFeedbackTarget({ ...baseInput(), status: 'needs-input' })).toBe(false)
+    expect(isDefaultFeedbackTarget({ ...baseInput(), status: 'planning' })).toBe(false)
+    expect(isDefaultFeedbackTarget({ ...baseInput(), status: 'ready', hasPlan: true })).toBe(true)
+  })
+
+  test('latest feedback target uses the filtered eligible set', () => {
+    const fresh = task('fresh', '2026-01-03T00:00:00.000Z')
+    const eligible = task('eligible', '2026-01-02T00:00:00.000Z')
+    const needsInput = task('needs-input', '2026-01-04T00:00:00.000Z', {
+      status: 'needs-input',
+    })
+
+    const target = latestFeedbackTarget([eligible, fresh, needsInput], (candidate) =>
+      baseInput({
+        status: candidate.meta.status,
+        hasPlan: candidate.id === eligible.id,
+      })
+    )
+
+    expect(target?.id).toBe('eligible')
+  })
+})
+
+describe('feedback follow-up intent', () => {
+  test('includes source task details and raw feedback', () => {
+    const source = task('fix-layout', '2026-01-01T00:00:00.000Z', {
+      commit: 'abc1234',
+      verify: 'bun test',
+    })
+
+    const intent = followUpIntent(source, 'The mobile button wraps badly.')
+
+    expect(intent).toContain('Address feedback on fix-layout')
+    expect(intent).toContain('- id: fix-layout')
+    expect(intent).toContain('- commit: abc1234')
+    expect(intent).toContain('- task dir: /tmp/factory/tasks/fix-layout')
+    expect(intent).toContain('- inspect: factory show fix-layout')
+    expect(intent).toContain('- verify: bun test')
+    expect(intent).toContain('The mobile button wraps badly.')
+  })
+})
+
+function baseInput(overrides: Partial<FeedbackRouteInput> = {}): FeedbackRouteInput {
+  return {
+    status: 'ready',
+    hasPlan: false,
+    hasWorktreeDiff: false,
+    hasCommit: false,
+    pendingFeedback: false,
+    ...overrides,
+  }
+}

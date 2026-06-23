@@ -12,7 +12,9 @@ import {
   type LiveMeter,
   latestTask,
   loadTasks,
+  pendingFeedbackCount,
   readLiveMeter,
+  readPendingFeedback,
   type Task,
 } from './task.ts'
 
@@ -128,6 +130,8 @@ async function fileText(task: Task, name: string): Promise<string | null> {
 
 export const SHOW_ARTIFACTS = [
   ['feedback.md', '## Completion feedback'],
+  ['human-feedback.md', '## Feedback'],
+  ['human-feedback.analysis.md', '## Feedback analysis (last pass)'],
   ['questions.md', '## Open questions'],
   ['answers.md', '## Answers'],
   ['plan.final.md', '## Final plan'],
@@ -148,6 +152,18 @@ async function firstQuestion(task: Task): Promise<string> {
     .map((l) => l.trim())
     .find((l) => l.length > 0 && !/^DECISION:/i.test(l))
   return (line ?? '').replace(/^[-*]\s*/, '')
+}
+
+async function firstFeedbackLine(task: Task): Promise<string> {
+  const text = await readPendingFeedback(task)
+  if (!text) {
+    return ''
+  }
+  const line = text
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0 && !/^## Feedback \(/.test(l))
+  return line ?? ''
 }
 
 function liveMeterSummary(meter: LiveMeter | null): string {
@@ -174,11 +190,13 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
   }
 
   const inProgress = tasks.filter((t) => !SETTLED.has(t.meta.status))
-  const needsInput = tasks.filter((t) => t.meta.status === 'needs-input')
-  const retrying = tasks.filter((t) => t.meta.status === 'retrying')
-  const blocked = tasks.filter((t) => t.meta.status === 'blocked')
-  const done = tasks.filter((t) => t.meta.status === 'done')
-  const ready = tasks.filter((t) => t.meta.status === 'ready')
+  const feedbackPending = tasks.filter((t) => pendingFeedbackCount(t) > 0)
+  const notFeedbackPending = (task: Task) => pendingFeedbackCount(task) === 0
+  const needsInput = tasks.filter((t) => t.meta.status === 'needs-input' && notFeedbackPending(t))
+  const retrying = tasks.filter((t) => t.meta.status === 'retrying' && notFeedbackPending(t))
+  const blocked = tasks.filter((t) => t.meta.status === 'blocked' && notFeedbackPending(t))
+  const done = tasks.filter((t) => t.meta.status === 'done' && notFeedbackPending(t))
+  const ready = tasks.filter((t) => t.meta.status === 'ready' && notFeedbackPending(t))
   const sharpenPending = ready.filter((t) => t.meta.sharpen === 'pending')
   const readyWork = ready.filter((t) => t.meta.sharpen !== 'pending')
 
@@ -197,6 +215,15 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
       const q = await firstQuestion(t)
       log.log(`   ${t.id}${q ? ` — ${q}` : ''}`)
       log.log(`        → factory answer ${t.id} "…"`)
+    }
+  }
+
+  if (feedbackPending.length > 0) {
+    log.log('')
+    log.log(`feedback pending (${feedbackPending.length}):`)
+    for (const t of feedbackPending) {
+      const line = await firstFeedbackLine(t)
+      log.log(`   ${t.id} [${t.meta.status}]${line ? ` — ${line}` : ''}`)
     }
   }
 
@@ -347,8 +374,13 @@ export async function printShow(ctx: WorkContext, query?: string, step?: string)
 
   log.log(`${m.id}  [${m.status}]${m.note ? ` — ${m.note}` : ''}`)
   const complexity = m.complexity ? `  ·  complexity: ${m.complexity} (declared)` : ''
+  const feedback = pendingFeedbackCount(task)
+  const feedbackSummary = feedback > 0 ? `  ·  feedback pending: ${feedback}` : ''
+  const feedbackSource = m.feedbackSourceTaskId
+    ? `  ·  ↩ feedback on ${m.feedbackSourceTaskId}`
+    : ''
   log.log(
-    `verify: ${m.verify ?? '(none)'}${complexity}  ·  sharpen: ${m.sharpen}  ·  created ${age(
+    `verify: ${m.verify ?? '(none)'}${complexity}${feedbackSummary}${feedbackSource}  ·  sharpen: ${m.sharpen}  ·  created ${age(
       m.createdAt
     )} ago  ·  updated ${age(m.updatedAt)} ago`
   )

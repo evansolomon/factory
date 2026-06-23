@@ -5,9 +5,15 @@ import { addBacklog, loadBacklog, removeBacklog } from '../src/backlog.ts'
 import type { Config, RepoContext, RoleAgents, WorkContext } from '../src/config.ts'
 import {
   addTask,
+  appendFeedback,
   loadTasks,
+  markFeedbackConsumed,
   nextRunnable,
+  pendingFeedbackCount,
   readArtifact,
+  readFeedback,
+  readPendingFeedback,
+  refreshFeedbackState,
   saveMeta,
   type Task,
   writeArtifact,
@@ -176,6 +182,9 @@ describe('task state transitions', () => {
     expect(task?.meta.resumeKind).toBeNull()
     expect(task?.meta.autoRetries).toBe(0)
     expect(task?.meta.complexity).toBeNull()
+    expect(task?.meta.feedbackCount).toBe(0)
+    expect(task?.meta.feedbackConsumed).toBe(0)
+    expect(task?.meta.feedbackSourceTaskId).toBeNull()
   })
 
   test('persists declared trivial task complexity', async () => {
@@ -218,6 +227,72 @@ describe('task state transitions', () => {
     await writeArtifact(task, 'feedback.md', '\n\n## Summary\nDone.\n\n')
 
     expect(await readArtifact(task, 'feedback.md')).toBe('## Summary\nDone.')
+  })
+
+  test('appendFeedback writes feedback and increments count', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Improve layout', null)
+
+    await appendFeedback(task, 'The button wraps on mobile.')
+
+    expect(task.meta.feedbackCount).toBe(1)
+    expect(task.meta.feedbackConsumed).toBe(0)
+    expect(await readFeedback(task)).toContain('The button wraps on mobile.')
+  })
+
+  test('pending feedback count drops after markFeedbackConsumed', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Improve layout', null)
+    await appendFeedback(task, 'First note.')
+    await appendFeedback(task, 'Second note.')
+
+    markFeedbackConsumed(task, 1)
+
+    expect(pendingFeedbackCount(task)).toBe(1)
+    expect(await readPendingFeedback(task)).toContain('Second note.')
+    expect(await readPendingFeedback(task)).not.toContain('First note.')
+  })
+
+  test('new feedback after consumption is the only pending feedback read', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Improve layout', null)
+    await appendFeedback(task, 'Old note.')
+    markFeedbackConsumed(task, task.meta.feedbackCount)
+    await appendFeedback(task, 'New note.')
+
+    const pending = await readPendingFeedback(task)
+
+    expect(pending).toContain('New note.')
+    expect(pending).not.toContain('Old note.')
+  })
+
+  test('refreshFeedbackState preserves feedback appended by another task object', async () => {
+    const ctx = await workContext()
+    const stale = await addTask(ctx, 'Improve layout', null)
+    await appendFeedback(stale, 'Analyzed note.')
+    const latest = (await loadTasks(ctx)).find((t) => t.id === stale.id)
+    if (!latest) {
+      throw new Error('expected task to reload')
+    }
+    await appendFeedback(latest, 'Later note.')
+
+    await refreshFeedbackState(stale)
+    markFeedbackConsumed(stale, 1)
+
+    expect(stale.meta.feedbackCount).toBe(2)
+    expect(stale.meta.feedbackConsumed).toBe(1)
+    expect(pendingFeedbackCount(stale)).toBe(1)
+  })
+
+  test('addTask persists feedback source backlink', async () => {
+    const ctx = await workContext()
+    const added = await addTask(ctx, 'Address feedback on source', null, {
+      feedbackSourceTaskId: 'source-task',
+    })
+
+    const task = (await loadTasks(ctx)).find((t) => t.id === added.id)
+
+    expect(task?.meta.feedbackSourceTaskId).toBe('source-task')
   })
 })
 
