@@ -13,6 +13,8 @@ import { createInterface, type Interface } from 'node:readline'
 import type { WorkContext } from './config.ts'
 import { composeInEditor } from './editor.ts'
 import { log, setActivePrompt } from './log.ts'
+import { parseFormattedQuestions, type Question } from './sharpen.ts'
+import { BOLD, RESET, renderAgentMarkdown, styleSharpenMarkdownLine } from './sharpen-render.ts'
 import { appendAnswer, loadTasks, setStatus, type Task } from './task.ts'
 
 const POLL_MS = 500
@@ -58,20 +60,40 @@ async function nextNeedsInput(ctx: WorkContext, deferred: Set<string>): Promise<
 
 async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
   const questionsFile = Bun.file(`${task.dir}/questions.md`)
-  const questions = (await questionsFile.exists()) ? (await questionsFile.text()).trim() : ''
+  const questionsText = (await questionsFile.exists()) ? (await questionsFile.text()).trim() : ''
+  const parsed = questionsText ? parseFormattedQuestions(questionsText) : null
   log.log('')
   log.warn(`${task.id} needs input:`)
-  if (questions) {
-    log.log(questions)
+  if (parsed?.questions.length) {
+    if (parsed.preamble) {
+      log.log(renderAgentMarkdown(parsed.preamble))
+    }
+    log.info('  Enter accepts a recommendation · /skip a question · /edit for a long reply')
+    log.info('  /defer to answer later with `factory answer`')
+  } else if (questionsText) {
+    log.log(questionsText)
+    log.info('  type your answer · /edit for a long reply · /skip to defer to `factory answer`')
+  } else {
+    log.info('  type your answer · /edit for a long reply · /skip to defer to `factory answer`')
   }
-  log.info('  type your answer · /edit for a long reply · /skip to defer to `factory answer`')
 
   const rl = createInterface({ input: process.stdin, output: process.stdout })
-  const label = `answer ${task.id}> `
-  setActivePrompt({ text: () => label + rl.line })
+  let label = `answer ${task.id}> `
+  const pinPrompt = () => setActivePrompt({ text: () => label + rl.line })
+  pinPrompt()
   try {
-    const reply = await readAnswer(rl, label)
-    if (reply.kind === 'skip') {
+    let reply: Answer
+    if (parsed && parsed.questions.length > 0) {
+      reply = await readQuestionAnswers(rl, task.id, parsed.questions, {
+        pinPrompt,
+        setLabel: (next) => {
+          label = next
+        },
+      })
+    } else {
+      reply = await readAnswer(rl, label, pinPrompt)
+    }
+    if (reply.kind === 'defer') {
       deferred.add(task.id)
       log.info(`  deferred — answer later with: factory answer ${task.id} "…"`)
       return
@@ -85,22 +107,22 @@ async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
   }
 }
 
-type Answer = { kind: 'skip' } | { kind: 'answer'; text: string }
+type Answer = { kind: 'defer' } | { kind: 'answer'; text: string }
 
 // One answer: a line of text answers, /edit composes a long reply in $EDITOR,
 // /skip defers. An empty line re-prompts rather than recording a blank answer.
-async function readAnswer(rl: Interface, label: string): Promise<Answer> {
+async function readAnswer(rl: Interface, label: string, pinPrompt: () => void): Promise<Answer> {
   while (true) {
     const input = (await ask(rl, label)).trim()
     if (input === '/skip') {
-      return { kind: 'skip' }
+      return { kind: 'defer' }
     }
     if (input === '/edit') {
       // The editor takes over the terminal — release the bottom line so concurrent
       // loop output doesn't repaint a stale prompt over it, then re-pin after.
       setActivePrompt(null)
       const edited = await composeInEditor()
-      setActivePrompt({ text: () => label + rl.line })
+      pinPrompt()
       if (!edited) {
         log.info('  (nothing entered)')
         continue
@@ -111,6 +133,59 @@ async function readAnswer(rl: Interface, label: string): Promise<Answer> {
       continue
     }
     return { kind: 'answer', text: input }
+  }
+}
+
+async function readQuestionAnswers(
+  rl: Interface,
+  taskId: string,
+  questions: Question[],
+  prompt: { pinPrompt: () => void; setLabel: (label: string) => void }
+): Promise<Answer> {
+  const answered: string[] = []
+  for (let qi = 0; qi < questions.length; qi++) {
+    const { q, rec } = questions[qi] ?? { q: '', rec: '' }
+    log.log(`\n${BOLD}(${qi + 1}/${questions.length})${RESET} ${styleSharpenMarkdownLine(q)}`)
+    if (rec) {
+      log.info(`  recommend: ${rec}`)
+    }
+    const label = `answer ${taskId} (${qi + 1}/${questions.length})> `
+    prompt.setLabel(label)
+    prompt.pinPrompt()
+    const reply = await readQuestionAnswer(rl, label, rec, prompt.pinPrompt)
+    if (reply.kind === 'defer') {
+      return reply
+    }
+    answered.push(`Q: ${q}\nA: ${reply.text}`)
+  }
+  return { kind: 'answer', text: answered.join('\n\n') }
+}
+
+async function readQuestionAnswer(
+  rl: Interface,
+  label: string,
+  recommendation: string,
+  pinPrompt: () => void
+): Promise<Answer> {
+  while (true) {
+    const input = (await ask(rl, label)).trim()
+    if (input === '/defer') {
+      return { kind: 'defer' }
+    }
+    if (input === '/skip') {
+      return { kind: 'answer', text: '(skipped)' }
+    }
+    if (input === '/edit') {
+      setActivePrompt(null)
+      const edited = await composeInEditor()
+      pinPrompt()
+      if (!edited) {
+        log.info('  (nothing entered)')
+        continue
+      }
+      return { kind: 'answer', text: edited }
+    }
+    return { kind: 'answer', text: input || recommendation || '(no preference)' }
   }
 }
 
