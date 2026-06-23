@@ -5,7 +5,6 @@ import {
   followUpIntent,
   isDefaultFeedbackTarget,
   latestFeedbackTarget,
-  parseFeedbackArgs,
   renderTerminalFeedback,
 } from '../src/feedback.ts'
 import { feedbackPrompt } from '../src/prompts.ts'
@@ -152,39 +151,6 @@ function route(overrides: Partial<FeedbackRouteInput>) {
     ...overrides,
   })
 }
-
-describe('feedback argument parsing', () => {
-  test('parses explicit task id', () => {
-    const target = task('fix-layout', '2026-01-01T00:00:00.000Z')
-
-    expect(parseFeedbackArgs(['fix-layout', 'button', 'wraps'], [target])).toEqual({
-      ok: true,
-      task: target,
-      text: 'button wraps',
-    })
-  })
-
-  test('treats non-task first argument as feedback text', () => {
-    expect(parseFeedbackArgs(['button', 'wraps'], [])).toEqual({
-      ok: true,
-      task: null,
-      text: 'button wraps',
-    })
-  })
-
-  test('rejects missing feedback text', () => {
-    const target = task('fix-layout', '2026-01-01T00:00:00.000Z')
-
-    expect(parseFeedbackArgs([], [target])).toEqual({
-      ok: false,
-      message: 'usage: factory feedback [task-id] <feedback...>',
-    })
-    expect(parseFeedbackArgs(['fix-layout'], [target])).toEqual({
-      ok: false,
-      message: 'usage: factory feedback [task-id] <feedback...>',
-    })
-  })
-})
 
 describe('feedback routing', () => {
   test('done routes to follow-up', () => {

@@ -19,11 +19,11 @@ import {
   feedbackRouteInput,
   followUpIntent,
   latestFeedbackTarget,
-  parseFeedbackArgs,
   renderTerminalFeedback,
 } from './feedback.ts'
 import { hasChanges, NotARepoError } from './git.ts'
 import { emit, type Hooks } from './hooks.ts'
+import { parseInputArgs, resolveMessage } from './input.ts'
 import { readCandidates, readLessons } from './lessons.ts'
 import { log } from './log.ts'
 import { startPromptWorker } from './prompt.ts'
@@ -87,39 +87,41 @@ COMMANDS
         --drain      work until the queue is empty, then exit
         --no-prompt  don't prompt inline; set needs-input aside for factory answer
 
-  factory answer [task-id] <answer...>
+  factory answer [task-id] [-m <answer> | --edit]
       When a task is too ambiguous to build safely, the loop PAUSES it (status
       'needs-input') and writes the questions it needs you to settle — you'll see
       them in 'factory status' and 'factory show <id>'. This command replies to those
       questions and puts the task back in the queue; your answer is folded into the
       next sharpen or planning pass. Omit the id to answer the latest needs-input task.
+      Pass the answer with -m, or omit it to compose in $EDITOR (or pipe via stdin).
       A watch-mode 'factory run' on a terminal prompts for this inline; use this
       command for detached/CI runs, from another terminal, or after --no-prompt.
 
-  factory resume [task-id] [note...]
+  factory resume [task-id] [-m <note> | --edit]
       Pick a BLOCKED, waiting-to-retry, or interrupted (killed mid-stage) task back
       up where it left off — it reuses the saved plan and the code already in the
       worktree and re-enters at the stage that failed, instead of re-planning from
-      scratch. Omit the id for the latest such task; add an optional note as
-      fix-context for the retry. Use this for review-panel blocks (after you've
-      looked) or to force a transient retry now. (Note: a running 'factory run'
+      scratch. Omit the id for the latest such task; add an optional note (with -m or
+      --edit) as fix-context for the retry. Use this for review-panel blocks (after
+      you've looked) or to force a transient retry now. (Note: a running 'factory run'
       already auto-reclaims interrupted tasks; this is the manual equivalent.)
       (Contrast 'answer', which re-plans; 'resume' continues.)
 
-  factory feedback [task-id] <feedback...>
+  factory feedback [task-id] [-m <feedback> | --edit]
       Record human critique after reviewing or testing existing task work. Unlike
       'add', this is not new work; unlike 'resume', the feedback is durable and the
       next autonomous pass is told to generalize from the concrete comment before
-      changing code. Omit the id for the latest sensible feedback target. Done or
+      changing code. Omit the id for the latest sensible feedback target; pass the
+      feedback with -m, or omit it to compose in $EDITOR (or pipe via stdin). Done or
       committed tasks get a linked follow-up instead of being reopened.
 
-  factory correct [task-id] [note...]
+  factory correct [task-id] [-m <note> | --edit]
       When you take over a BLOCKED task and fix it yourself, record the lesson: it
       pairs the agent's failed attempt with your in-worktree fix, distills what it
       should have done (sharpened by your note), saves a lesson + eval case, and
       marks the task done. Run it with your fix in the worktree, before committing.
-      Omit the id for the latest blocked task. (The highest-signal way the factory
-      learns — your corrections are the answer key.)
+      Omit the id for the latest blocked task; add an optional note with -m or --edit.
+      (The highest-signal way the factory learns — your corrections are the answer key.)
 
   factory status              Catch-up dashboard: what's running (and for how long),
                            what's waiting on you, what's blocked, what's done.
@@ -161,7 +163,7 @@ TYPICAL USE
       factory run                    # in a worktree; leave it running, then walk away
       factory add "Another task..."  # from anywhere; the running loop picks it up
       factory ask "has ship ran?"    # ask, then keep the session open for follow-ups
-      factory answer "..."           # only if a task pauses to ask
+      factory answer -m "..."        # only if a task pauses to ask
       factory resume                 # pick a blocked task back up where it left off
 
   Run one loop per git worktree (each in its own tmux window) for a fleet; wire a
@@ -485,7 +487,7 @@ async function main(): Promise<number> {
         // In interactive mode the prompt worker announces and collects the answer
         // inline; only point at `factory answer` when nothing will prompt here.
         if (!interactive) {
-          log.warn(`${task.id}: needs input — run: factory answer "..."`)
+          log.warn(`${task.id}: needs input — run: factory answer -m "..."`)
         }
       } else if (outcome.kind === 'retrying') {
         // Transient gate failure: set aside (no alert) and let the loop auto-resume
@@ -534,51 +536,62 @@ async function main(): Promise<number> {
   }
 
   if (cmd === 'answer') {
+    const usage = 'usage: factory answer [task-id] [-m <answer> | --edit]'
     const ctx = await loadContext(process.cwd())
-    // id optional: a first arg that matches a task is the id; otherwise the whole
-    // rest is the answer for the latest needs-input task (factory answer "...").
-    const [first, ...textParts] = rest
-    let task = first ? await findTask(ctx, first) : await latestTask(ctx, ['needs-input'])
-    let text = textParts
-    if (first && !task) {
-      task = await latestTask(ctx, ['needs-input'])
-      text = rest
+    const parsed = parseInputArgs(rest, usage)
+    if (!parsed.ok) {
+      log.fail(parsed.error)
+      return 1
     }
+    const task = parsed.taskQuery
+      ? await findTask(ctx, parsed.taskQuery)
+      : await latestTask(ctx, ['needs-input'])
     if (!task) {
-      log.fail('no needs-input task to answer')
+      log.fail(
+        parsed.taskQuery ? `no task matching ${parsed.taskQuery}` : 'no needs-input task to answer'
+      )
       return 1
     }
-    if (text.length === 0) {
-      log.fail('usage: factory answer [task-id] <answer...>')
+    const text = await resolveMessage(parsed, 'required')
+    if (!text) {
+      log.fail(usage)
       return 1
     }
-    await appendAnswer(task, text.join(' '))
+    await appendAnswer(task, text)
     await setStatus(task, 'ready')
     log.ok(`${task.id}: answered, back in queue`)
     return 0
   }
 
   if (cmd === 'feedback') {
+    const usage = 'usage: factory feedback [task-id] [-m <feedback> | --edit]'
     const ctx = await loadContext(process.cwd())
-    const tasks = await loadTasks(ctx)
-    const parsed = parseFeedbackArgs(rest, tasks)
+    const parsed = parseInputArgs(rest, usage)
     if (!parsed.ok) {
-      log.fail(parsed.message)
+      log.fail(parsed.error)
       return 1
     }
     const hasWorktreeDiff = await hasChanges(ctx.root)
-    const hasPlanEntries: Array<[string, boolean]> = []
-    for (const candidate of tasks) {
-      hasPlanEntries.push([candidate.id, await hasSavedPlan(candidate)])
-    }
-    const hasPlanByTask = new Map(hasPlanEntries)
-    const task =
-      parsed.task ??
-      latestFeedbackTarget(tasks, (candidate) =>
+    let task: Task | null
+    if (parsed.taskQuery) {
+      task = await findTask(ctx, parsed.taskQuery)
+    } else {
+      const tasks = await loadTasks(ctx)
+      const hasPlanEntries: Array<[string, boolean]> = []
+      for (const candidate of tasks) {
+        hasPlanEntries.push([candidate.id, await hasSavedPlan(candidate)])
+      }
+      const hasPlanByTask = new Map(hasPlanEntries)
+      task = latestFeedbackTarget(tasks, (candidate) =>
         feedbackRouteInput(candidate, hasPlanByTask.get(candidate.id) ?? false, hasWorktreeDiff)
       )
+    }
     if (!task) {
-      log.fail('no feedback target with existing progress')
+      log.fail(
+        parsed.taskQuery
+          ? `no task matching ${parsed.taskQuery}`
+          : 'no feedback target with existing progress'
+      )
       return 1
     }
     const route = decideFeedbackRoute(await feedbackFacts(task, hasWorktreeDiff))
@@ -586,11 +599,18 @@ async function main(): Promise<number> {
       log.fail(route.message)
       return 1
     }
+    // Resolve the message only after the task can actually take feedback, so a
+    // rejected route never makes the user write into an editor for nothing.
+    const text = await resolveMessage(parsed, 'required')
+    if (!text) {
+      log.fail(usage)
+      return 1
+    }
     if (route.kind === 'follow-up') {
-      await appendFeedback(task, parsed.text)
+      await appendFeedback(task, text)
       markFeedbackConsumed(task, task.meta.feedbackCount)
       await saveMeta(task)
-      const followUp = await addTask(ctx, followUpIntent(task, parsed.text), task.meta.verify, {
+      const followUp = await addTask(ctx, followUpIntent(task, text), task.meta.verify, {
         sharpen: 'skipped',
         feedbackSourceTaskId: task.id,
       })
@@ -598,7 +618,7 @@ async function main(): Promise<number> {
       return 0
     }
 
-    await appendFeedback(task, parsed.text)
+    await appendFeedback(task, text)
     task.meta.resume = true
     task.meta.resumeKind = 'manual'
     task.meta.resumeNote = null
@@ -610,50 +630,62 @@ async function main(): Promise<number> {
   }
 
   if (cmd === 'resume') {
-    const ctx = await loadContext(process.cwd())
     // Pick up a stuck task where it left off — reuse its plan + diff, no re-plan.
     // id optional (defaults to the latest blocked/retrying task, or one stranded
-    // mid-stage by a killed loop); a first arg that isn't a task is taken as the
-    // (optional) note for that latest task.
-    const [first, ...noteParts] = rest
-    let task = first ? await findTask(ctx, first) : await latestTask(ctx, RESUMABLE_STATUSES)
-    let note = noteParts
-    if (first && !task) {
-      task = await latestTask(ctx, RESUMABLE_STATUSES)
-      note = rest
-    }
-    if (!task) {
-      log.fail('no resumable task (blocked, retrying, or interrupted mid-stage)')
+    // mid-stage by a killed loop). The note is optional and only set via -m/--edit,
+    // so a bare `factory resume` still just retries.
+    const usage = 'usage: factory resume [task-id] [-m <note> | --edit]'
+    const ctx = await loadContext(process.cwd())
+    const parsed = parseInputArgs(rest, usage)
+    if (!parsed.ok) {
+      log.fail(parsed.error)
       return 1
     }
+    const task = parsed.taskQuery
+      ? await findTask(ctx, parsed.taskQuery)
+      : await latestTask(ctx, RESUMABLE_STATUSES)
+    if (!task) {
+      log.fail(
+        parsed.taskQuery
+          ? `no task matching ${parsed.taskQuery}`
+          : 'no resumable task (blocked, retrying, or interrupted mid-stage)'
+      )
+      return 1
+    }
+    const note = await resolveMessage(parsed, 'optional')
     task.meta.resume = true
-    task.meta.resumeNote = note.length > 0 ? note.join(' ') : null
+    task.meta.resumeNote = note
     task.meta.resumeKind = 'manual'
     // Manual resume restores the full auto-retry budget for transient failures.
     task.meta.autoRetries = 0
     task.meta.retryAt = null
     await setStatus(task, 'ready')
-    log.ok(`${task.id}: resuming — back in queue${note.length > 0 ? ' with note' : ''}`)
+    log.ok(`${task.id}: resuming — back in queue${note ? ' with note' : ''}`)
     return 0
   }
 
   if (cmd === 'correct') {
-    const ctx = await loadContext(process.cwd())
     // Record a manual takeover of a blocked task: pair the agent's attempt with your
     // in-worktree fix into a lesson + eval case, then mark it done. id optional
-    // (latest blocked); a first arg that isn't a task is taken as the note.
-    const [first, ...noteParts] = rest
-    let task = first ? await findTask(ctx, first) : await latestTask(ctx, ['blocked'])
-    let note = noteParts
-    if (first && !task) {
-      task = await latestTask(ctx, ['blocked'])
-      note = rest
-    }
-    if (!task) {
-      log.fail('no blocked task to correct')
+    // (latest blocked); the note is optional and only set via -m/--edit.
+    const usage = 'usage: factory correct [task-id] [-m <note> | --edit]'
+    const ctx = await loadContext(process.cwd())
+    const parsed = parseInputArgs(rest, usage)
+    if (!parsed.ok) {
+      log.fail(parsed.error)
       return 1
     }
-    await captureCorrection(ctx, task, note.join(' '))
+    const task = parsed.taskQuery
+      ? await findTask(ctx, parsed.taskQuery)
+      : await latestTask(ctx, ['blocked'])
+    if (!task) {
+      log.fail(
+        parsed.taskQuery ? `no task matching ${parsed.taskQuery}` : 'no blocked task to correct'
+      )
+      return 1
+    }
+    const note = await resolveMessage(parsed, 'optional')
+    await captureCorrection(ctx, task, note ?? '')
     await setStatus(task, 'done')
     log.ok(`${task.id}: correction recorded, marked done`)
     return 0

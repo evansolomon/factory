@@ -33,10 +33,6 @@ export function renderTerminalFeedback(feedback: string, taskId: string): string
   return [...lines, '', `detail: factory show ${taskId}`]
 }
 
-export type FeedbackArgs =
-  | { ok: true; task: Task | null; text: string }
-  | { ok: false; message: string }
-
 export type FeedbackRouteInput = {
   status: Status
   hasPlan: boolean
@@ -49,29 +45,6 @@ export type FeedbackRoute =
   | { kind: 'resume' }
   | { kind: 'follow-up' }
   | { kind: 'reject'; message: string }
-
-function matchesTask(task: Task, query: string): boolean {
-  return task.id === query || task.id.includes(query)
-}
-
-export function parseFeedbackArgs(args: string[], tasks: Task[]): FeedbackArgs {
-  const [first, ...rest] = args
-  if (!first) {
-    return { ok: false, message: 'usage: factory feedback [task-id] <feedback...>' }
-  }
-  const task = tasks.find((candidate) => matchesTask(candidate, first)) ?? null
-  if (task) {
-    const text = rest.join(' ').trim()
-    if (!text) {
-      return { ok: false, message: 'usage: factory feedback [task-id] <feedback...>' }
-    }
-    return { ok: true, task, text }
-  }
-  const text = args.join(' ').trim()
-  return text
-    ? { ok: true, task: null, text }
-    : { ok: false, message: 'usage: factory feedback [task-id] <feedback...>' }
-}
 
 export function decideFeedbackRoute(input: FeedbackRouteInput): FeedbackRoute {
   if (input.status === 'needs-input') {
