@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+if [ -x "${repo_root}/dist/factory" ]; then
+  exec "${repo_root}/dist/factory" "$@"
+fi
+
+dev_binary="${repo_root}/dist/factory-dev"
+needs_build=0
+if [ ! -x "${dev_binary}" ]; then
+  needs_build=1
+elif [ -n "$(find "${repo_root}/cmd" "${repo_root}/internal" "${repo_root}/go.mod" "${repo_root}/go.sum" -newer "${dev_binary}" -print -quit)" ]; then
+  needs_build=1
+fi
+
+if [ "${needs_build}" = "1" ]; then
+  mkdir -p "${repo_root}/dist"
+  base_version="$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' "${repo_root}/package.json" | head -n 1)"
+  go -C "${repo_root}" build -ldflags "-X main.version=${base_version}-go-dev" -o "${dev_binary}" ./cmd/factory
+fi
+
+exec "${dev_binary}" "$@"

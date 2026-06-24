@@ -13,13 +13,13 @@
     "bun": ">=1.0.0"
   },
   "bin": {
-    "factory": "src/cli.ts"
+    "factory": "bin/factory"
   },
   "scripts": {
     "build": "bash scripts/build.sh",
     "build:local": "bash scripts/build-local.sh",
     "build:release": "bash .github/scripts/build-binaries.sh",
-    "test": "biome check . && tsc --noEmit && bun test",
+    "test": "go test ./... && biome check . && tsc --noEmit && bun test",
     "fix": "biome check --write ."
   },
   "dependencies": {

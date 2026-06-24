@@ -56,7 +56,7 @@ You can also run from a clone:
 
 ```bash
 bun install
-bun run src/cli.ts
+go run ./cmd/factory
 ```
 
 Or build a local executable for this machine:
@@ -71,12 +71,14 @@ bun run build:local -- /path/to/factory
 /path/to/factory
 ```
 
-For development, run `bun run test` (`biome check` + `tsc --noEmit` + `bun test`);
-run `bun run fix` to autofix.
+For development, run `bun run test` (`go test ./...` + `biome check` +
+`tsc --noEmit` + `bun test`); run `bun run fix` to autofix the remaining
+TypeScript compatibility checks.
 
 - **Runtime requirement:** the `codex` and `claude` CLIs on `PATH`. Those are the
   two built-in agent adapters; adding a third (e.g. gemini) is a small adapter in
-  `agents.ts` plus an enum entry, not config (see Configuration).
+  `internal/agents` plus an enum entry, not config (see Configuration). Running
+  from source or building locally also requires Go.
 
 ## Mental model
 
@@ -152,7 +154,7 @@ task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.m
 ### Why two CLIs
 
 codex and claude are **peers** — neither hosts the other. A neutral conductor
-(`conductor.ts`) shells out to both headless and passes markdown artifacts
+(`internal/conductor`) shells out to both headless and passes markdown artifacts
 between stages. codex researches, selects + implements; claude is the fresh
 adversarial reviewer and red-team. Cross-model review beats a model grading its
 own homework.
@@ -369,13 +371,13 @@ Because state is in files, a shell prompt precmd can show a compact per-worktree
 status — e.g. `factory ⟳implement ⚠1 ✗1` (current stage · needs-input · blocked) — by
 reading `meta.json` directly, with no `factory` process per prompt. Render nothing
 outside a factory worktree or when there's no outstanding work. (Keep its
-worktree-key derivation in sync with `config.ts`.)
+worktree-key derivation in sync with `internal/config`.)
 
 ## Configuration
 
 Config lives in **`.factory.json`** files and **cascades**: resolution walks
 from the worktree root up the directory tree, merging every file it finds, with
-the **closest (deepest) winning** — like git/eslint config (`config.ts`). So you
+the **closest (deepest) winning** — like git/eslint config (`internal/config`). So you
 can drop one file at `~/repos/code/` that covers every worktree of that repo
 (uncommitted, per-machine), and a different repo gets its own — while a committed
 file at a worktree root can still override per-branch.
@@ -734,7 +736,7 @@ system against itself.
 
 ## How the agents are invoked (read this when a stage misbehaves)
 
-These headless flags are the contract with the two CLIs (`agents.ts`). They're
+These headless flags are the contract with the two CLIs (`internal/agents`). They're
 the most likely thing to need tuning:
 
 - **codex** (read-only stages):
@@ -766,7 +768,7 @@ The **verify** command runs as `bash -lc "<verify>"` in the worktree root.
 **Adding another agent (e.g. gemini):** roles are CLI-agnostic — a stage just
 needs `runAgent(agent, {prompt, access}) → {text, usage}`. But each CLI has its
 own flags, output format, sandbox model, and usage reporting, so a new one is an
-**adapter** (a `runX` in `agents.ts` wired into `runAgent` + added to the `cli`
+**adapter** (a `runX` in `internal/agents` wired into `Run` + added to the CLI
 enum), not a config string. `codex` and `claude` are the two built-in adapters.
 
 Each stage prints a completion line with elapsed time and token usage, plus a
@@ -793,24 +795,19 @@ dollar figure, so there's no consistent number across both models.)
 
 ## Files
 
-- `cli.ts` — arg parsing + the long-lived run loop
-- `conductor.ts` — the per-task pipeline + live stage updates
-- `agents.ts` — headless codex/claude wrappers
-- `prompts.ts` — stage prompts (incl. the high-bar reconcile/critique prompts)
-- `sharpen.ts` — intent sharpening parser and prompts for add/backlog/run flows
-- `task.ts` — task dir format, status, answers
-- `ask.ts` — context packet + AI answer for `factory ask`
-- `view.ts` — `status` dashboard + `show` drill-down + `report` rendering
-- `lessons.ts` — LESSONS.md read + candidate capture (the meta loop)
-- `metrics.ts` — SQLite telemetry store + `report` aggregation (defensive/disposable)
-- `evals.ts` — eval-candidate and correction capture
-- `hooks.ts` — lifecycle hook emission
-- `backlog.ts` — repo-level backlog entries
-- `editor.ts` — blocking editor helpers for compose/edit flows
-- `config.ts` — `.factory.json` loading + path resolution
-- `git.ts` — diff / commit / repo root
-- `exec.ts` — subprocess helper
-- `log.ts` — CLI output
+- `cmd/factory/main.go` — arg parsing, source launcher target, and the long-lived run loop
+- `internal/conductor` — the per-task pipeline + live stage updates
+- `internal/agents` — headless codex/claude wrappers
+- `internal/task` — task dir format, status, answers, feedback, failures
+- `internal/ask` — context packet + AI answer for `factory ask`
+- `internal/metrics` — SQLite telemetry store + `report` aggregation
+- `internal/evals` — eval-candidate and correction capture
+- `internal/hooks` — lifecycle hook emission
+- `internal/backlog` — repo-level backlog entries
+- `internal/config` — `.factory.json` loading + path resolution
+- `internal/gitutil` — diff / commit / repo root helpers
+- `internal/executil` — subprocess helper
+- `internal/upgrade` — explicit and automatic binary upgrades
 
 ## Security
 
