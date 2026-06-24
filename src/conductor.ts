@@ -1010,7 +1010,9 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       for (let n = 2; await Bun.file(`${ctx.plansDir}/${name}.md`).exists(); n++) {
         name = `${base}-${n}`
       }
-      await Bun.write(`${ctx.plansDir}/${name}.md`, `# ${firstLine(intent)}\n\n${finalPlan}\n`)
+      // The selected plan is already the committed document; prepending the raw
+      // task intent turns user prompts into awkward or invalid markdown headings.
+      await Bun.write(`${ctx.plansDir}/${name}.md`, `${finalPlan.trim()}\n`)
     }
 
     // Persist the selected plan as a task artifact so a resume can reuse it.
