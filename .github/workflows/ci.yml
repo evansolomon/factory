@@ -7,6 +7,8 @@ on:
   push:
     branches:
       - master
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
@@ -25,31 +27,36 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Run tests
+      - name: Run Rust tests
+        run: cargo fmt -- --check && cargo test --locked --quiet
+
+      - name: Run Bun tests
         run: bun run test
 
-  release:
-    name: Build release binaries
+  determine-release:
+    name: Determine release
     needs: test
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+
+    outputs:
+      should_publish: ${{ steps.release.outputs.should_publish }}
+      tag: ${{ steps.release.outputs.tag }}
 
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Check out source
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
 
       - name: Determine release
         id: release
@@ -58,22 +65,82 @@ jobs:
           PREVIOUS_SHA: ${{ github.event.before }}
         run: bash .github/scripts/determine-release.sh
 
-      - name: Install dependencies
-        if: steps.release.outputs.should_publish == 'true'
-        run: bun install --frozen-lockfile
+  release-build:
+    name: Build ${{ matrix.asset }}
+    needs:
+      - test
+      - determine-release
+    if: needs.determine-release.outputs.should_publish == 'true'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: factory-linux-x64-baseline
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - asset: factory-linux-arm64
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - asset: factory-darwin-x64
+            target: x86_64-apple-darwin
+            os: macos-13
+          - asset: factory-darwin-arm64
+            target: aarch64-apple-darwin
+            os: macos-14
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Build binaries
-        if: steps.release.outputs.should_publish == 'true'
-        run: bun run build:release
+        env:
+          FACTORY_RELEASE_TARGET: ${{ matrix.target }}
+          FACTORY_RELEASE_ASSET: ${{ matrix.asset }}
+        run: bash .github/scripts/build-binaries.sh
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs:
+      - determine-release
+      - release-build
+    runs-on: ubuntu-latest
+    if: needs.determine-release.outputs.should_publish == 'true'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: factory-*
+          path: dist
+          merge-multiple: true
 
       - name: Generate checksums
-        if: steps.release.outputs.should_publish == 'true'
         run: bash .github/scripts/generate-checksums.sh
 
       - name: Publish release assets
-        if: steps.release.outputs.should_publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ steps.release.outputs.tag }}
+          TAG_NAME: ${{ needs.determine-release.outputs.tag }}
           TARGET_SHA: ${{ github.sha }}
         run: bash .github/scripts/publish-release-assets.sh

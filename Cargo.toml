@@ -1,0 +1,18 @@
+[package]
+name = "factory"
+version = "0.1.6"
+edition = "2021"
+license = "MIT"
+description = "A self-improving coding loop."
+
+[dependencies]
+regex = "1.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
+ureq = "2.10"
+
+[dev-dependencies]
+tempfile = "3.10"

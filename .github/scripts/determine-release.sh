@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
+version="$(awk -F\" '/^version = / { print $2; exit }' Cargo.toml)"
 tag="v${version}"
 should_publish=true
 
@@ -17,15 +17,15 @@ elif [ "${GITHUB_EVENT_NAME:-}" = "push" ]; then
 
   if [ -n "${PREVIOUS_SHA:-}" ] &&
     ! printf '%s' "${PREVIOUS_SHA}" | grep -Eq '^0+$' &&
-    git cat-file -e "${PREVIOUS_SHA}:package.json" 2>/dev/null; then
+    git cat-file -e "${PREVIOUS_SHA}:Cargo.toml" 2>/dev/null; then
     previous_version="$(
-      git show "${PREVIOUS_SHA}:package.json" |
-        bun -e 'const text = await new Response(Bun.stdin.stream()).text(); console.log(JSON.parse(text).version)'
+      git show "${PREVIOUS_SHA}:Cargo.toml" |
+        awk -F\" '/^version = / { print $2; exit }'
     )"
   fi
 
   if [ "${previous_version}" = "${version}" ]; then
-    echo "package.json version is still ${version}; skipping release."
+    echo "Cargo.toml version is still ${version}; skipping release."
     should_publish=false
   fi
 fi
