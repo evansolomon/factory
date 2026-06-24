@@ -83,7 +83,7 @@ run `bun run fix` to autofix.
 Your job is to **feed vetted tasks faster than `factory` drains them** — shovel
 coal into a running engine. `factory`'s job is everything after: turn each task
 into a good plan, build it, prove it, commit it. The one place it pulls you back
-in is when a task is genuinely ambiguous — it asks, you answer, it resumes.
+in is when a task is genuinely ambiguous — it asks, you answer, it keeps going.
 
 There is **one phase, not two.** Refinement isn't a separate planning session;
 it's `factory` pausing mid-cycle to ask. "Good enough, proceed" is the default —
@@ -96,7 +96,7 @@ dir, so a crash leaves an inspectable trail and the committed queue carries the
 plan + proof as provenance.
 
 ```
-task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.md on resume]
+task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.md after input]
         │
   1. TRIAGE      trivial? → fast path: skip to IMPLEMENT   (read-only)
                  also flags user-facing? → gates the UX lenses
@@ -196,10 +196,9 @@ ready tasks (never idle). You answer async; the running instance picks it back u
 `factory` is the CLI binary.
 
 ```bash
-factory add [--raw] [--trivial | --complexity trivial|complex] "<intent...>" [--verify "<cmd...>"]   # queue a task
+factory add [--raw] [--trivial | --complexity trivial|complex] "<intent...>" [--verify "<cmd...>"]   # tell this workstream something
 factory run [--once|--drain]                       # process tasks
-factory answer [task-id] [-m "<answer>" | --edit]  # answer a needs-input task, requeue it
-factory resume [task-id] [-m "<note>" | --edit]    # pick a blocked task back up where it left off
+factory retry [task-id] [-m "<note>" | --edit]     # pick a blocked task back up where it left off
 factory feedback [task-id] [-m "<feedback>" | --edit]  # critique existing progress, generalized on next pass
 factory correct [task-id] [-m "<note>" | --edit]   # record your manual fix of a blocked task as a lesson
 factory backlog [add|rm] ...                       # experimental repo-level backlog
@@ -217,7 +216,7 @@ factory upgrade                                     # install the latest GitHub 
 
 - **`factory run`** is **long-lived by default**: when the queue drains it polls
   (every 5s) instead of exiting, so tasks added later (`factory add`), unblocked
-  later (`factory resume`/`answer`), **due for an auto-retry**, or **stranded
+  later (`factory retry`), **due for an auto-retry**, or **stranded
   mid-stage by a killed loop** (Ctrl-C/crash) get picked up automatically — so
   restarting after a Ctrl-C just resumes the interrupted task. Its lifetime = the
   tmux window's lifetime.
@@ -229,21 +228,19 @@ factory upgrade                                     # install the latest GitHub 
   also skips model triage, but still runs the full planning ensemble. Complexity
   flags must appear before `--verify`; `--edit` still opens the editor first.
   `--raw` skips sharpening only — it does not declare runtime complexity.
-- **`factory answer`** (for **needs-input**) appends to `answers.md` and flips the
-  task back to `ready`; the resumed run continues from durable state, either
-  sharpening again with your answer or re-planning with it threaded in (stateless
-  — no held session). Omit the id for the latest needs-input task. Pass the answer
-  with `-m`, or omit it to compose in `$EDITOR` (or pipe it via stdin).
-- **`factory resume`** (for **blocked**) **reuses** the saved plan + the diff
+- **`factory add`** is state-aware. It answers a `needs-input` task, records
+  feedback on active progress, queues a linked follow-up for completed work, retries
+  blocked/retrying work, or creates a new task when there is no current work.
+- **`factory retry`** (for **blocked**) **reuses** the saved plan + the diff
   already in the worktree and re-enters at the stage that failed — no re-planning.
   Omit the id for the latest blocked/retrying task (or one stranded mid-stage by a
   killed loop); an optional note (via `-m` or `--edit`) becomes fix-context for the
   retry. Use it for review-panel blocks (after you've looked) or to force a transient
   retry now. A running `factory run` already auto-reclaims stranded tasks, so this is
-  mainly the manual equivalent when no loop is up. (`answer` re-plans; `resume` continues.)
+  mainly the manual equivalent when no loop is up. `factory resume` is a deprecated alias.
 - **`factory feedback`** records critique after you review or test existing task
   progress. It is not new work (`add`) and it is not an ephemeral retry note
-  (`resume`): feedback is appended to `human-feedback.md`, shown by `factory show`, and
+  (`retry`): feedback is appended to `human-feedback.md`, shown by `factory show`, and
   the next pass first analyzes the concrete comment into an abstract/root-cause
   pattern, searches for sibling cases, and changes only justified cases. Pass it with
   `-m`, or omit it to compose in `$EDITOR` (or pipe it via stdin). Active
@@ -305,7 +302,7 @@ gate:
 - **review panel** (the code or rollout safety was judged bad — re-running churns
   code without new input) → straight to `blocked` and emits attention once no
   runnable work is left. You look (`factory show <id> review`), then
-  `factory resume ["note"]` when you're ready.
+  `factory retry ["note"]` when you're ready.
 
 Either way, resuming reuses prior work: committed already → just re-runs ship;
 uncommitted diff → re-runs the gates on that diff, skipping the initial implement
@@ -330,11 +327,11 @@ wt add fix-upload-retry          # make a worktree (existing tooling)
 factory add "Add exponential backoff to the upload client" --verify "bun test upload"
 factory run                          # walk away; come back when the window alerts
 # if it asks:
-factory answer -m "Cap at 5 retries, 30s max backoff"
+factory add "Cap at 5 retries, 30s max backoff"
 # if it's blocked on review-panel findings, after a look:
-factory resume -m "the reviewer's concern is handled by the lock in upload.ts"
+factory retry -m "the reviewer's concern is handled by the lock in upload.ts"
 # if you reviewed progress and found a concrete issue:
-factory feedback -m "the mobile button wraps; check sibling controls too"
+factory add "the mobile button wraps; check sibling controls too"
 ```
 
 ## Spawning & the fleet (the integration pattern)
@@ -564,8 +561,8 @@ or jump-target behavior you want.
   ux.plan.md             # user-facing information architecture critique
   reconcile.md           # proceed vs ask decision
   questions.md           # open questions when status = needs-input
-  answers.md             # your answers, appended by factory answer
-  human-feedback.md      # post-progress human feedback, appended by factory feedback
+  answers.md             # your answers, appended by factory add or the inline prompt
+  human-feedback.md      # post-progress human feedback, appended by factory add/feedback
   human-feedback.analysis.md  # latest root-cause/sibling-case analysis of pending feedback
   plan.<planner>.v2.md   # revised planner output
   plan.final.md          # selected/merged plan
@@ -623,10 +620,11 @@ high-signal. `factory lessons` prints both.
 ## Intent sharpening (`factory run`)
 
 The proactive complement to the reactive reconcile valve: resolve ambiguity after
-triage and before planning. By default `factory add` queues the raw intent
-immediately with `sharpen: pending`; the long-lived `factory run` process then
-sharpens non-trivial pending tasks. Trivial tasks skip sharpening and take the
-fast path. An agent (the configured `implementer`) turns the raw intent into a
+triage and before planning. When state-aware `factory add` creates a new task, it
+queues the raw intent immediately with `sharpen: pending`; the long-lived
+`factory run` process then sharpens non-trivial pending tasks. Trivial tasks skip
+sharpening and take the fast path. An agent (the configured `implementer`) turns
+the raw intent into a
 self-contained spec, reading the repo itself to answer what it can. The
 spec is the durable handoff: problem, goal, context, verified current state,
 priorities, scope, constraints, decisions and tradeoffs, rejected alternatives,
@@ -634,7 +632,7 @@ non-binding ideas, acceptance criteria, and assumptions.
 
 The run-loop sharpener cannot hold an interactive terminal hostage. If it needs a
 human decision, it writes `questions.md`, marks the task `needs-input`, and moves
-on to other runnable work. `factory answer` appends your answer to `answers.md`;
+on to other runnable work. State-aware `factory add` appends your answer to `answers.md`;
 the next run pass sharpens again with that answer in context. `--raw` skips
 sharpening and queues the intent as-is, and sharpening still auto-skips when the
 intent is piped.
@@ -684,9 +682,9 @@ non-trivial tasks), then continue through `reviewing` → `verifying` → `shipp
 attention required: no changes, review-panel failure, convergence stuck, or retry
 cap exhausted).
 `needs-input`, `retrying`, and `blocked` are set aside; `factory` moves on.
-`factory answer` returns a `needs-input` task to `ready`; `factory resume` returns
-a blocked/retrying/stranded task to `ready`; due auto-retries are promoted by the
-run loop. `factory feedback` returns an active post-progress task to `ready` with
+State-aware `factory add` returns a `needs-input` task to `ready`; `factory retry`
+returns a blocked/retrying/stranded task to `ready`; due auto-retries are promoted
+by the run loop. `factory add` also returns an active post-progress task to `ready` with
 pending feedback analysis for the next pass. Feedback remains pending until a
 reviewed, verified pass commits and consumes it; if the task is already done or
 has a commit, feedback queues a linked follow-up instead of reopening it.
@@ -778,7 +776,7 @@ dollar figure, so there's no consistent number across both models.)
 ## Current state
 
 - ✅ Conductor: full ensemble + reconcile valve, bounded auto-fix retry,
-  `add/run/answer/status/show/report/lessons`, long-lived watcher, custom dir,
+  `add/run/retry/status/show/report/lessons`, long-lived watcher, custom dir,
   `needs-input` escalation. Proven end-to-end on real tasks.
 - ✅ **Configurable agents:** planners / implementer / reviewer / delivery roles,
   each `codex`/`claude` (+ optional model).

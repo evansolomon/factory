@@ -31,6 +31,7 @@ const AUTO_UPGRADE_COMMANDS = new Set([
   'run',
   'answer',
   'feedback',
+  'retry',
   'resume',
   'correct',
   'status',

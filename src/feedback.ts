@@ -48,7 +48,7 @@ export type FeedbackRoute =
 
 export function decideFeedbackRoute(input: FeedbackRouteInput): FeedbackRoute {
   if (input.status === 'needs-input') {
-    return { kind: 'reject', message: 'task is waiting for answers; use factory answer' }
+    return { kind: 'reject', message: 'task is waiting for answers; use factory add' }
   }
   if (input.status === 'done' || input.hasCommit) {
     return { kind: 'follow-up' }
@@ -79,7 +79,7 @@ export function decideFeedbackRoute(input: FeedbackRouteInput): FeedbackRoute {
   if (isStranded(input.status)) {
     return {
       kind: 'reject',
-      message: `task was interrupted during ${input.status}; use factory resume first`,
+      message: `task was interrupted during ${input.status}; use factory retry first`,
     }
   }
   return {

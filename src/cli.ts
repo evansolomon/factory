@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { dirname } from 'node:path'
 import { type ParsedAddOptions, parseAddOptions } from './add-options.ts'
+import { type AddRouteTask, selectAddRoute } from './add-route.ts'
 import { openAgentSession } from './agent-session.ts'
 import { askFactory } from './ask.ts'
 import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
@@ -39,6 +40,7 @@ import {
   loadTasks,
   markFeedbackConsumed,
   nextRunnable,
+  pendingFeedbackCount,
   RESUMABLE_STATUSES,
   readArtifact,
   readPlan,
@@ -61,23 +63,19 @@ COMMANDS
                              add/rm take the same intent forms as 'factory add';
                              automatic dispatch is not built yet.
   factory add [--raw] [--trivial | --complexity trivial|complex] [intent...] [--verify <cmd...>] [--edit]
-      Add a task to this worktree's queue. This ONLY queues — it does not start
-      working. A running 'factory run' (below) is what actually picks tasks up.
-      With no intent (or --edit), opens $EDITOR to compose it — handy when a fresh
-      worktree opens and you want to write the first task before walking away. The
-      intent can also be piped on stdin (multi-line specs). --verify is the command
-      that proves the task works; it's run for real before commit.
-      By default the running loop triages the task, then SHARPENS non-trivial
-      pending intents before planning: an agent refines them into self-contained
-      specs, reading the repo itself and pausing with questions.md only when it
-      needs a human decision. --raw skips sharpening and queues the intent as-is;
-      runtime triage still decides complexity. Auto-skipped when the intent is
-      piped. --trivial / --complexity skip sharpening too and use the declared
-      runtime complexity instead of triage.
+      Tell this factory/workstream something. If a current task needs input, has
+      progress, is blocked/retrying, or just completed, the input is routed into
+      that task. If there is no current work, it queues a new task. A running
+      'factory run' (below) is what actually picks queued work up.
+      With no intent (or --edit), opens $EDITOR. The intent can also be piped on
+      stdin (multi-line specs). --verify is for newly queued tasks only.
+      For new tasks, the running loop triages and sharpens non-trivial pending
+      intents. --raw skips sharpening; --trivial / --complexity also use the
+      declared runtime complexity instead of triage.
 
   factory run [--once | --drain] [--no-prompt]
       Work the queue. Default: stay running and pick up tasks as they're added
-      (factory add), unblocked (factory resume/answer), due for an auto-retry, or
+      (factory add), unblocked (factory retry), due for an auto-retry, or
       stranded mid-stage by a previously killed loop (Ctrl-C/crash) — shovel coal
       into the engine. So restarting after a Ctrl-C just resumes the interrupted
       task. A transient gate failure (verify/ship) is set aside and AUTO-RESUMED on
@@ -87,19 +85,9 @@ COMMANDS
       other tasks while a prompt is open.
         --once       do one ready task, then exit (good for trying it out)
         --drain      work until the queue is empty, then exit
-        --no-prompt  don't prompt inline; set needs-input aside for factory answer
+        --no-prompt  don't prompt inline; needs-input waits for factory add
 
-  factory answer [task-id] [-m <answer> | --edit]
-      When a task is too ambiguous to build safely, the loop PAUSES it (status
-      'needs-input') and writes the questions it needs you to settle — you'll see
-      them in 'factory status' and 'factory show <id>'. This command replies to those
-      questions and puts the task back in the queue; your answer is folded into the
-      next sharpen or planning pass. Omit the id to answer the latest needs-input task.
-      Pass the answer with -m, or omit it to compose in $EDITOR (or pipe via stdin).
-      A watch-mode 'factory run' on a terminal prompts for this inline; use this
-      command for detached/CI runs, from another terminal, or after --no-prompt.
-
-  factory resume [task-id] [-m <note> | --edit]
+  factory retry [task-id] [-m <note> | --edit]
       Pick a BLOCKED, waiting-to-retry, or interrupted (killed mid-stage) task back
       up where it left off — it reuses the saved plan and the code already in the
       worktree and re-enters at the stage that failed, instead of re-planning from
@@ -107,11 +95,11 @@ COMMANDS
       --edit) as fix-context for the retry. Use this for review-panel blocks (after
       you've looked) or to force a transient retry now. (Note: a running 'factory run'
       already auto-reclaims interrupted tasks; this is the manual equivalent.)
-      (Contrast 'answer', which re-plans; 'resume' continues.)
+      'factory resume' is a deprecated alias.
 
   factory feedback [task-id] [-m <feedback> | --edit]
       Record human critique after reviewing or testing existing task work. Unlike
-      'add', this is not new work; unlike 'resume', the feedback is durable and the
+      'add', this is not new work; unlike 'retry', the feedback is durable and the
       next autonomous pass is told to generalize from the concrete comment before
       changing code. Omit the id for the latest sensible feedback target; pass the
       feedback with -m, or omit it to compose in $EDITOR (or pipe via stdin). Done or
@@ -159,8 +147,8 @@ HOW A TASK FLOWS
   review-panel block (or an exhausted retry budget) escalates: it shows in 'factory
   status' and emits the attention hook once the loop has nothing else runnable.
   The hook consumer decides whether that means a tmux color, bell, notification, or
-  something else. Reply to a
-  question with 'factory answer'; pick a block back up with 'factory resume'.
+  something else. Reply to a question with 'factory add'; pick a block back up with
+  'factory retry'.
 
 TYPICAL USE
   Try one task end to end (queue, then process it):
@@ -172,8 +160,8 @@ TYPICAL USE
       factory add "Another task..."  # from anywhere; the running loop picks it up
       factory ask "has ship ran?"    # ask, then keep the session open for follow-ups
       factory session --agent claude # realtime tweak session for the latest done task
-      factory answer -m "..."        # only if a task pauses to ask
-      factory resume                 # pick a blocked task back up where it left off
+      factory add "..."              # answer, feedback, or follow-up for current work
+      factory retry                  # pick a blocked task back up where it left off
 
   Run one loop per git worktree (each in its own tmux window) for a fleet; wire a
   hook to reflect window state (see the hooks config / README).
@@ -309,6 +297,61 @@ async function feedbackFacts(task: Task, hasWorktreeDiff: boolean) {
   return feedbackRouteInput(task, await hasSavedPlan(task), hasWorktreeDiff)
 }
 
+async function addRouteTasks(tasks: Task[]): Promise<AddRouteTask[]> {
+  const routed: AddRouteTask[] = []
+  for (const task of tasks) {
+    routed.push({
+      id: task.id,
+      status: task.meta.status,
+      createdAt: task.meta.createdAt,
+      updatedAt: task.meta.updatedAt,
+      hasPlan: await hasSavedPlan(task),
+      hasCommit: task.meta.commit !== null,
+      pendingFeedback: pendingFeedbackCount(task) > 0,
+    })
+  }
+  return routed
+}
+
+function findLoadedTask(tasks: Task[], id: string): Task {
+  const task = tasks.find((candidate) => candidate.id === id)
+  if (!task) {
+    throw new Error(`selected task disappeared: ${id}`)
+  }
+  return task
+}
+
+function addOptionsRequireNewTask(options: ParsedAddOptions): string | null {
+  if (options.raw) {
+    return '--raw only applies when add queues a new task'
+  }
+  if (options.complexity !== null) {
+    return '--trivial/--complexity only apply when add queues a new task'
+  }
+  return null
+}
+
+async function queueNewTask(
+  ctx: WorkContext,
+  base: { intent: string; verify: string | null },
+  options: ParsedAddOptions
+): Promise<void> {
+  // factory add only enqueues new work; the run loop sharpens non-trivial pending
+  // intents. --raw, a declared complexity, or piped input all skip that sharpen
+  // pre-stage — and a declared complexity also skips runtime triage.
+  const skipSharpen = options.raw || options.complexity !== null || !process.stdin.isTTY
+  const task = await addTask(ctx, base.intent, base.verify, {
+    sharpen: skipSharpen ? 'skipped' : 'pending',
+    complexity: options.complexity,
+  })
+  const suffix = queuedSuffix({
+    verify: base.verify,
+    complexity: task.meta.complexity,
+    sharpenPending: task.meta.sharpen === 'pending',
+  })
+  log.ok(`queued ${task.id}${suffix}`)
+}
+
 export async function main(opts: MainOptions = {}): Promise<number> {
   const [cmd, ...rest] = opts.argv ?? process.argv.slice(2)
 
@@ -343,21 +386,59 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       return 1
     }
     const ctx = await loadContext(process.cwd())
-    // factory add only enqueues; the run loop sharpens non-trivial pending intents.
-    // --raw, a declared complexity, or piped input all skip that sharpen pre-stage —
-    // and a declared complexity also skips runtime triage.
-    const skipSharpen =
-      parsed.options.raw || parsed.options.complexity !== null || !process.stdin.isTTY
-    const task = await addTask(ctx, base.intent, base.verify, {
-      sharpen: skipSharpen ? 'skipped' : 'pending',
-      complexity: parsed.options.complexity,
+    const tasks = await loadTasks(ctx)
+    const route = selectAddRoute(await addRouteTasks(tasks), await hasChanges(ctx.root))
+    if (route.kind === 'new-task') {
+      await queueNewTask(ctx, base, parsed.options)
+      return 0
+    }
+    const newTaskOnlyError = addOptionsRequireNewTask(parsed.options)
+    if (newTaskOnlyError) {
+      log.fail(newTaskOnlyError)
+      return 1
+    }
+    if (base.verify) {
+      log.fail('--verify only applies when add queues a new task')
+      return 1
+    }
+    const task = findLoadedTask(tasks, route.taskId)
+    if (route.kind === 'answer') {
+      await appendAnswer(task, base.intent)
+      await setStatus(task, 'ready')
+      log.ok(`${task.id}: routed as answer — ${route.reason}`)
+      return 0
+    }
+    if (route.kind === 'retry') {
+      task.meta.resume = true
+      task.meta.resumeNote = base.intent
+      task.meta.resumeKind = 'manual'
+      task.meta.autoRetries = 0
+      task.meta.retryAt = null
+      await setStatus(task, 'ready')
+      log.ok(`${task.id}: routed as retry — ${route.reason}`)
+      return 0
+    }
+    if (route.kind === 'feedback') {
+      await appendFeedback(task, base.intent)
+      task.meta.resume = true
+      task.meta.resumeKind = 'manual'
+      task.meta.resumeNote = null
+      task.meta.autoRetries = 0
+      task.meta.retryAt = null
+      await setStatus(task, 'ready')
+      log.ok(`${task.id}: routed as feedback — ${route.reason}`)
+      return 0
+    }
+    if (route.recordOnSource) {
+      await appendFeedback(task, base.intent)
+      markFeedbackConsumed(task, task.meta.feedbackCount)
+      await saveMeta(task)
+    }
+    const followUp = await addTask(ctx, followUpIntent(task, base.intent), task.meta.verify, {
+      sharpen: 'skipped',
+      feedbackSourceTaskId: task.id,
     })
-    const suffix = queuedSuffix({
-      verify: base.verify,
-      complexity: task.meta.complexity,
-      sharpenPending: task.meta.sharpen === 'pending',
-    })
-    log.ok(`queued ${task.id}${suffix}`)
+    log.ok(`${task.id}: routed as follow-up — ${route.reason}; queued ${followUp.id}`)
     return 0
   }
 
@@ -427,11 +508,10 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     )
 
     // In the long-lived watch mode, when someone is at the terminal, prompt for
-    // needs-input answers inline instead of making them switch terminals to run
-    // `factory answer`. The worker runs concurrently — the loop keeps working
-    // other tasks while a prompt is open. Bounded runs (--once/--drain) and
-    // non-TTY/piped runs keep the set-aside + `factory answer` behavior; opt out
-    // with --no-prompt.
+    // needs-input answers inline. The worker runs concurrently — the loop keeps
+    // working other tasks while a prompt is open. Bounded runs (--once/--drain) and
+    // non-TTY/piped runs keep the set-aside + state-aware `factory add` behavior;
+    // opt out with --no-prompt.
     const interactive = !once && !drain && process.stdin.isTTY && !rest.includes('--no-prompt')
     if (interactive) {
       startPromptWorker(ctx)
@@ -451,7 +531,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     }
 
     // Long-lived by default: when no task is ready, wait and poll so tasks added
-    // later (factory add), unblocked later (factory resume/answer), or due for an
+    // later (factory add), unblocked later (factory retry), or due for an
     // auto-retry get picked up. needs-input/blocked/retrying tasks are set aside,
     // not stopped on, so factory stays busy.
     while (true) {
@@ -505,9 +585,9 @@ export async function main(opts: MainOptions = {}): Promise<number> {
         await setStatus(task, 'needs-input', 'awaiting answer — see questions.md')
         await emit(ctx.root, ctx.config.hooks, 'task.needs_input', { task: task.id })
         // In interactive mode the prompt worker announces and collects the answer
-        // inline; only point at `factory answer` when nothing will prompt here.
+        // inline; point at state-aware `factory add` when nothing will prompt here.
         if (!interactive) {
-          log.warn(`${task.id}: needs input — run: factory answer -m "..."`)
+          log.warn(`${task.id}: needs input — run: factory add "..."`)
         }
       } else if (outcome.kind === 'retrying') {
         // Transient gate failure: set aside (no alert) and let the loop auto-resume
@@ -540,7 +620,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
         for (const line of why) {
           log.log(`    ${line}`)
         }
-        log.info(`    detail: factory show ${task.id}  ·  retry: factory resume`)
+        log.info(`    detail: factory show ${task.id}  ·  retry: factory retry`)
       }
 
       if (once) {
@@ -558,6 +638,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
   if (cmd === 'answer') {
     const usage = 'usage: factory answer [task-id] [-m <answer> | --edit]'
     const ctx = await loadContext(process.cwd())
+    log.warn('factory answer is deprecated; use factory add "..." or the inline run prompt')
     const parsed = parseInputArgs(rest, usage)
     if (!parsed.ok) {
       log.fail(parsed.error)
@@ -649,12 +730,12 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     return 0
   }
 
-  if (cmd === 'resume') {
+  if (cmd === 'retry' || cmd === 'resume') {
     // Pick up a stuck task where it left off — reuse its plan + diff, no re-plan.
     // id optional (defaults to the latest blocked/retrying task, or one stranded
     // mid-stage by a killed loop). The note is optional and only set via -m/--edit,
-    // so a bare `factory resume` still just retries.
-    const usage = 'usage: factory resume [task-id] [-m <note> | --edit]'
+    // so a bare `factory retry` still just retries.
+    const usage = `usage: factory ${cmd} [task-id] [-m <note> | --edit]`
     const ctx = await loadContext(process.cwd())
     const parsed = parseInputArgs(rest, usage)
     if (!parsed.ok) {
@@ -676,11 +757,11 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     task.meta.resume = true
     task.meta.resumeNote = note
     task.meta.resumeKind = 'manual'
-    // Manual resume restores the full auto-retry budget for transient failures.
+    // Manual retry restores the full auto-retry budget for transient failures.
     task.meta.autoRetries = 0
     task.meta.retryAt = null
     await setStatus(task, 'ready')
-    log.ok(`${task.id}: resuming — back in queue${note ? ' with note' : ''}`)
+    log.ok(`${task.id}: retrying — back in queue${note ? ' with note' : ''}`)
     return 0
   }
 

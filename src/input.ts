@@ -1,6 +1,6 @@
 import { composeInEditor } from './editor.ts'
 
-// Shared argument handling for the human-input commands (answer/resume/feedback).
+// Shared argument handling for the human-input commands (answer/retry/feedback).
 // The message is NEVER positional: the single optional positional is always the
 // task id. That removes the old id-vs-text ambiguity, where a feedback/answer/note
 // whose first word happened to match (or be a substring of) a task id silently
@@ -47,8 +47,8 @@ export function parseInputArgs(args: string[], usage: string): ParsedInput {
 
 // Resolve the free-text message from the parsed flags. 'required' commands
 // (answer/feedback) fall back to $EDITOR in a TTY or stdin when piped; 'optional'
-// commands (resume) only produce a note from an explicit -m or --edit, so a bare
-// `factory resume` still just retries with no note. Returns null when empty.
+// commands (retry) only produce a note from an explicit -m or --edit, so a bare
+// `factory retry` still just retries with no note. Returns null when empty.
 export async function resolveMessage(
   parsed: { message: string | null; edit: boolean },
   mode: 'required' | 'optional'

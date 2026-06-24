@@ -60,7 +60,7 @@ export function isStranded(status: Status): boolean {
   return !SETTLED.includes(status)
 }
 
-// Statuses a `factory resume` with no id will adopt: a blocked/retrying task, or one
+// Statuses a `factory retry` with no id will adopt: a blocked/retrying task, or one
 // stranded mid-stage. (An explicit id resumes a task regardless of status.)
 export const RESUMABLE_STATUSES: Status[] = StatusSchema.options.filter(
   (s) => s === 'blocked' || s === 'retrying' || isStranded(s)
@@ -85,7 +85,7 @@ const MetaSchema = z.object({
   sharpen: SharpenStateSchema.default('done'),
   // Resume bookkeeping. `resume` tells the next run to pick up where the task left
   // off — reuse the saved plan + existing diff, skip the planning ensemble — set by
-  // `factory resume` and by the loop's auto-resume; consumed (cleared) on the run.
+  // `factory retry` and by the loop's auto-resume; consumed (cleared) on the run.
   // `resumeNote` carries optional human fix-context, consumed with it.
   resume: z.boolean().default(false),
   resumeNote: z.string().nullable().default(null),
@@ -315,7 +315,7 @@ async function recoverStranded(task: Task): Promise<Task> {
 }
 
 // Most recently-updated task in this worktree, optionally restricted to certain
-// statuses. The sensible default target for show/answer/resume when no id is given.
+// statuses. The sensible default target for show/add/retry when no id is given.
 export async function latestTask(ctx: WorkContext, statuses?: Status[]): Promise<Task | null> {
   const tasks = (await loadTasks(ctx)).filter((t) => !statuses || statuses.includes(t.meta.status))
   if (tasks.length === 0) {
