@@ -15,6 +15,7 @@ import {
   parseTriage,
 } from './markers.ts'
 import { recordRun, type StageStat } from './metrics.ts'
+import { resolveOnComplete } from './on-complete.ts'
 import {
   consolidatePrompt,
   convergePrompt,
@@ -65,6 +66,7 @@ import {
   readPlan,
   readySharpenedTask,
   refreshFeedbackState,
+  refreshMeta,
   saveMeta,
   setStatus,
   type Task,
@@ -1370,7 +1372,8 @@ async function shipAndFinish(
   meter: Meter,
   stats: RunStats
 ): Promise<TaskOutcome> {
-  const onComplete = ctx.config.onComplete
+  await refreshMeta(task)
+  const onComplete = resolveOnComplete(task.meta.onComplete, ctx.config.onComplete)
   if (onComplete) {
     await setStatus(task, 'shipping')
     await progress(ctx, task, 'ship', 'onComplete — delivering')

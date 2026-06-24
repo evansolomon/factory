@@ -203,6 +203,10 @@ factory resume [task-id] [-m "<note>" | --edit]    # pick a blocked task back up
 factory feedback [task-id] [-m "<feedback>" | --edit]  # critique existing progress, generalized on next pass
 factory correct [task-id] [-m "<note>" | --edit]   # record your manual fix of a blocked task as a lesson
 factory backlog [add|rm] ...                       # experimental repo-level backlog
+factory config set on-complete "<instructions>"     # task-local delivery override
+factory config get on-complete                     # show task override + effective delivery
+factory config unset on-complete                    # disable delivery for the active task
+factory config inherit on-complete                  # clear task override; use config default
 factory status                                     # catch-up dashboard
 factory ask [task-id] ["<question...>"]            # interactive Q&A over saved task state
 factory ask --print [task-id] "<question...>"      # one-shot/scriptable saved-state answer
@@ -210,7 +214,7 @@ factory session [--agent codex|claude] [task-id]   # realtime agent tweak sessio
 factory show [task-id] [step]                       # drill into one task / a step's activity
 factory report                                     # telemetry roll-up (manage by numbers)
 factory lessons                                    # curated lessons + raw candidates
-factory config [edit ...]                           # show/edit effective config
+factory config [edit ...]                           # show/edit effective config defaults
 factory version | --version                         # print the current CLI version
 factory upgrade                                     # install the latest GitHub Release
 ```
@@ -444,6 +448,15 @@ prints a bounded rendering of the handoff with `detail: factory show <task-id>`;
 `factory show <task-id>` displays the saved artifact.
   `{"skill": "ship"}`, or
   `{"policy": "open a GitLab MR, no reviewers, iterate CI to green, never merge"}`.
+
+  A task can override the configured default without editing `.factory.json`:
+  `factory config set on-complete "Make a GitHub PR, monitor CI, don't merge"`.
+  Run it from the worktree whose active task you want to change; if multiple
+  active tasks are ambiguous, pass `--task <id>`. `factory config get
+  on-complete` shows the selected task's override plus the effective delivery
+  value. `factory config unset on-complete` disables delivery for that task, and
+  `factory config inherit on-complete` clears the override so the cascaded config
+  applies again.
 - **`ask`** — which AI answers `factory ask` questions. This is separate from
   `agents.reviewer` because asking is about assembling the right saved context, not
   participating in the task pipeline. Shape:
