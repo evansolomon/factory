@@ -68,6 +68,7 @@ describe('auto-upgrade eligibility', () => {
       'run',
       'answer',
       'feedback',
+      'retry',
       'resume',
       'correct',
       'status',

@@ -166,7 +166,7 @@ describe('feedback routing', () => {
   test('needs-input rejects with answer guidance', () => {
     expect(route({ status: 'needs-input' })).toEqual({
       kind: 'reject',
-      message: 'task is waiting for answers; use factory answer',
+      message: 'task is waiting for answers; use factory add',
     })
   })
 

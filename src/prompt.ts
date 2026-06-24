@@ -2,12 +2,12 @@
 // human input — needs-input tasks are set aside so it stays busy — so this worker
 // runs CONCURRENTLY with the loop (it is started, never awaited). It watches for
 // needs-input tasks and prompts for an answer right in the run terminal, then
-// folds the reply back via the same primitive as `factory answer` (appendAnswer +
-// set ready) so the loop picks the task up on its next poll. The loop keeps
-// pulling and running other queued tasks while a prompt is open.
+// folds the reply back via the same primitive as state-aware `factory add`
+// (appendAnswer + set ready) so the loop picks the task up on its next poll. The
+// loop keeps pulling and running other queued tasks while a prompt is open.
 //
 // Non-TTY runs (detached/CI/piped) skip this entirely and fall back to the hook +
-// `factory answer` path; that's why `answer` stays the out-of-band entry point.
+// state-aware `factory add` path.
 
 import { createInterface, type Interface } from 'node:readline'
 import type { WorkContext } from './config.ts'
@@ -27,7 +27,7 @@ export type PromptWorker = { stop: () => Promise<void> }
 export function startPromptWorker(ctx: WorkContext): PromptWorker {
   const state = { stopped: false }
   // Tasks the user chose to defer with /skip: leave them needs-input for
-  // `factory answer` instead of re-prompting in a tight loop this session.
+  // state-aware `factory add` instead of re-prompting in a tight loop this session.
   const deferred = new Set<string>()
   const done = run(ctx, state, deferred)
   return {
@@ -69,12 +69,12 @@ async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
       log.log(renderAgentMarkdown(parsed.preamble))
     }
     log.info('  Enter accepts a recommendation · /skip a question · /edit for a long reply')
-    log.info('  /defer to answer later with `factory answer`')
+    log.info('  /defer to answer later with `factory add`')
   } else if (questionsText) {
     log.log(questionsText)
-    log.info('  type your answer · /edit for a long reply · /skip to defer to `factory answer`')
+    log.info('  type your answer · /edit for a long reply · /skip to defer to `factory add`')
   } else {
-    log.info('  type your answer · /edit for a long reply · /skip to defer to `factory answer`')
+    log.info('  type your answer · /edit for a long reply · /skip to defer to `factory add`')
   }
 
   const rl = createInterface({ input: process.stdin, output: process.stdout })
@@ -95,7 +95,7 @@ async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
     }
     if (reply.kind === 'defer') {
       deferred.add(task.id)
-      log.info(`  deferred — answer later with: factory answer ${task.id} "…"`)
+      log.info(`  deferred — answer later with: factory add "…"`)
       return
     }
     await appendAnswer(task, reply.text)

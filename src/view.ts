@@ -215,7 +215,7 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
     for (const t of needsInput) {
       const q = await firstQuestion(t)
       log.log(`   ${t.id}${q ? ` — ${q}` : ''}`)
-      log.log(`        → factory answer ${t.id} "…"`)
+      log.log(`        → factory add "…"`)
     }
   }
 
@@ -241,7 +241,7 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
     log.log('')
     log.log(`✗ blocked (${blocked.length}):`)
     for (const t of blocked) {
-      log.log(`   ${t.id}${t.meta.note ? ` — ${t.meta.note}` : ''}   → factory resume`)
+      log.log(`   ${t.id}${t.meta.note ? ` — ${t.meta.note}` : ''}   → factory retry`)
     }
   }
 
