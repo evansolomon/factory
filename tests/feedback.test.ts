@@ -133,6 +133,7 @@ function task(id: string, updatedAt: string, overrides: Partial<Task['meta']> = 
       retryAt: null,
       autoRetries: 0,
       complexity: null,
+      onComplete: { mode: 'inherit' },
       feedbackCount: 0,
       feedbackConsumed: 0,
       feedbackSourceTaskId: null,

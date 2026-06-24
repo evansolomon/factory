@@ -234,7 +234,7 @@ Factory context:
 - worktree: ${ctx.root}
 - stateDir: ${ctx.stateDir}
 - tasksDir: ${ctx.tasksDir}
-- onComplete: ${onCompleteLabel(ctx)}
+- default onComplete: ${onCompleteLabel(ctx)}
 
 Task index, ordered by likely relevance:
 ${taskIndex}

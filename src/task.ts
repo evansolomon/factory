@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { z } from 'zod'
 import type { WorkContext } from './config.ts'
+import { type TaskOnComplete, TaskOnCompleteSchema } from './on-complete.ts'
 
 // A task is a directory under <dir>/tasks/<id>/ containing:
 //   task.md   — human-owned intent (free-form markdown; what sharpening enriches)
@@ -96,6 +97,9 @@ const MetaSchema = z.object({
   autoRetries: z.number().int().default(0),
   // Explicit complexity declared by `factory add`; null means runtime triage decides.
   complexity: TaskComplexitySchema.nullable().default(null),
+  // Task-local delivery override. "inherit" uses config.onComplete; other modes let
+  // a running factory change just this task without editing config files.
+  onComplete: TaskOnCompleteSchema,
   // Human feedback recorded after progress exists. Counted separately from answers
   // so the conductor can consume feedback only after a verified commit.
   feedbackCount: z.number().int().nonnegative().default(0),
@@ -208,6 +212,7 @@ export async function addTask(
     retryAt: null,
     autoRetries: 0,
     complexity: options.complexity ?? null,
+    onComplete: { mode: 'inherit' },
     feedbackCount: 0,
     feedbackConsumed: 0,
     feedbackSourceTaskId: options.feedbackSourceTaskId ?? null,
@@ -339,6 +344,18 @@ export async function setStatus(
 // Persist meta after mutating a field directly (e.g. recording the commit SHA).
 export async function saveMeta(task: Task): Promise<void> {
   await writeMeta(task.dir, task.meta)
+}
+
+export async function refreshMeta(task: Task): Promise<void> {
+  task.meta = await readMeta(task.dir)
+}
+
+export async function setTaskOnComplete(task: Task, onComplete: TaskOnComplete): Promise<void> {
+  const latest = await readMeta(task.dir)
+  latest.onComplete = onComplete
+  latest.updatedAt = new Date().toISOString()
+  task.meta = latest
+  await writeMeta(task.dir, latest, { preserveOnComplete: false })
 }
 
 export async function findTask(ctx: WorkContext, query: string): Promise<Task | null> {
@@ -484,9 +501,21 @@ export async function writeArtifact(task: Task, name: string, content: string): 
   await Bun.write(`${task.dir}/${name}`, content)
 }
 
-async function writeMeta(dir: string, meta: Meta): Promise<void> {
+async function readMeta(dir: string): Promise<Meta> {
+  return MetaSchema.parse(await Bun.file(`${dir}/meta.json`).json())
+}
+
+async function writeMeta(
+  dir: string,
+  meta: Meta,
+  opts: { preserveOnComplete?: boolean } = {}
+): Promise<void> {
+  const nextMeta =
+    opts.preserveOnComplete !== false && (await Bun.file(`${dir}/meta.json`).exists())
+      ? { ...meta, onComplete: (await readMeta(dir)).onComplete }
+      : meta
   const finalPath = `${dir}/meta.json`
   const tmpPath = `${dir}/.meta.${process.pid}.${Date.now()}.tmp`
-  await Bun.write(tmpPath, `${JSON.stringify(meta, null, 2)}\n`)
+  await Bun.write(tmpPath, `${JSON.stringify(nextMeta, null, 2)}\n`)
   await rename(tmpPath, finalPath)
 }

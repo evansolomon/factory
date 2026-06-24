@@ -1,6 +1,7 @@
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { mainWorktreeRoot, repoRoot } from './git.ts'
+import { OnCompleteSchema } from './on-complete.ts'
 
 // An agent is a CLI, optionally pinned to a model. Accepts a bare "codex"/
 // "claude" or { cli, model } in config; normalized to Agent everywhere else.
@@ -127,10 +128,7 @@ const ConfigSchema = z.object({
   //   { "skill": "name" }  → run that skill
   //   { "policy": "text" } → follow a free-text delivery policy
   //   null (default)       → nothing; you push manually
-  onComplete: z
-    .union([z.object({ skill: z.string() }), z.object({ policy: z.string() })])
-    .nullable()
-    .default(null),
+  onComplete: OnCompleteSchema.nullable().default(null),
   // Lifecycle hooks: event name → shell commands run when factory reaches that
   // event (see hooks.ts). Lets the surrounding environment react — tmux, desktop
   // notifications, dashboards — without factory knowing about it. Concatenated

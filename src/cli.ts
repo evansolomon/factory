@@ -29,6 +29,7 @@ import { emit, type Hooks } from './hooks.ts'
 import { parseInputArgs, resolveMessage } from './input.ts'
 import { readCandidates, readLessons } from './lessons.ts'
 import { log } from './log.ts'
+import { onCompleteLabel, resolveOnComplete, taskOnCompleteLabel } from './on-complete.ts'
 import { startPromptWorker } from './prompt.ts'
 import { sharpen } from './sharpen.ts'
 import {
@@ -36,6 +37,7 @@ import {
   appendAnswer,
   appendFeedback,
   findTask,
+  isStranded,
   latestTask,
   loadTasks,
   markFeedbackConsumed,
@@ -46,6 +48,7 @@ import {
   readPlan,
   saveMeta,
   setStatus,
+  setTaskOnComplete,
   type Task,
 } from './task.ts'
 import { upgradeFactory } from './upgrade.ts'
@@ -130,6 +133,14 @@ COMMANDS
   factory report              Telemetry across all the repo's tasks: first-pass yield,
                            escalation/blocked rate, cost, where the tokens go.
   factory lessons             Curated lessons (LESSONS.md) + raw candidates.
+  factory config set [--task <id>] on-complete "<instructions>"
+                           Set task-local delivery instructions for the active task.
+  factory config get [--task <id>] on-complete
+                           Show the active task's override and effective delivery.
+  factory config unset [--task <id>] on-complete
+                           Disable delivery for the active task.
+  factory config inherit [--task <id>] on-complete
+                           Clear the task-local override and use config.onComplete.
   factory config [edit [--global|--worktree|--repo-parent|--dir <dir>]]
                            Show effective config + where it's set; edit opens the
                            global config by default; flags target another layer.
@@ -191,6 +202,8 @@ CONFIG (.factory.json — cascades up the dir tree, closest wins)
   onComplete  deliver each done task via a full-permission agent. {"skill":
             "name"} runs a skill; {"policy":"text"} follows a policy (open MR/PR,
             iterate CI, reply to review). null (default) = don't ship.
+            A running task can override it with:
+            factory config set on-complete "Make a PR, monitor CI, don't merge"
   ask       {"agent": "claude"} configures the AI used by 'factory ask'. This is
             separate from agents.reviewer; ask is context-building over saved task
             state, not a review pipeline role.
@@ -279,6 +292,173 @@ async function maybeSharpen(
 }
 
 type AlertState = 'blocked' | 'needs-input' | 'done'
+type TaskConfigKey = 'on-complete'
+type ParseTaskFlagResult =
+  | { ok: true; args: string[]; taskQuery: string | null }
+  | { ok: false; message: string }
+
+const TASK_CONFIG_KEYS: TaskConfigKey[] = ['on-complete']
+
+function invalidTaskConfigKey(key: string | null): string {
+  return key
+    ? `invalid config key: ${key}\nvalid keys: ${TASK_CONFIG_KEYS.join(', ')}`
+    : `invalid config key\nvalid keys: ${TASK_CONFIG_KEYS.join(', ')}`
+}
+
+function parseTaskFlag(args: string[]): ParseTaskFlagResult {
+  const cleaned: string[] = []
+  let taskQuery: string | null = null
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === undefined) {
+      continue
+    }
+    if (arg !== '--task') {
+      cleaned.push(arg)
+      continue
+    }
+    const next = args[i + 1]
+    if (!next || next.startsWith('--')) {
+      return { ok: false, message: 'usage: factory config set --task <id> on-complete "..."' }
+    }
+    if (taskQuery) {
+      return { ok: false, message: 'usage: factory config set --task <id> on-complete "..."' }
+    }
+    taskQuery = next
+    i++
+  }
+  return { ok: true, args: cleaned, taskQuery }
+}
+
+async function inferTaskConfigTarget(ctx: WorkContext, taskQuery: string | null): Promise<Task> {
+  if (taskQuery) {
+    const task = await findTask(ctx, taskQuery)
+    if (!task) {
+      throw new Error(`no task matching ${taskQuery}`)
+    }
+    return task
+  }
+
+  const tasks = (await loadTasks(ctx)).filter((task) => task.meta.status !== 'done')
+  if (tasks.length === 0) {
+    throw new Error('no active task in this factory')
+  }
+
+  const live = tasks.filter((task) => isStranded(task.meta.status))
+  const liveTask = live[0]
+  if (live.length === 1 && liveTask) {
+    return liveTask
+  }
+  const task = tasks[0]
+  if (tasks.length === 1 && task) {
+    return task
+  }
+
+  const choices = tasks.map((task) => `${task.id} (${task.meta.status})`).join(', ')
+  throw new Error(`multiple active tasks; retry with --task <id>\nactive tasks: ${choices}`)
+}
+
+async function setTaskConfig(ctx: WorkContext, args: string[]): Promise<number> {
+  const parsed = parseTaskFlag(args)
+  if (!parsed.ok) {
+    log.fail(parsed.message)
+    return 1
+  }
+  const [key, ...valueParts] = parsed.args
+  if (!key) {
+    log.fail(invalidTaskConfigKey(null))
+    return 1
+  }
+  if (key !== 'on-complete') {
+    log.fail(invalidTaskConfigKey(key))
+    return 1
+  }
+  const policy = valueParts.join(' ').trim()
+  if (!policy) {
+    log.fail('invalid on-complete value\nusage: factory config set on-complete "<instructions>"')
+    return 1
+  }
+  try {
+    const task = await inferTaskConfigTarget(ctx, parsed.taskQuery)
+    await setTaskOnComplete(task, { mode: 'policy', policy })
+    log.ok(`${task.id}: on-complete set`)
+    return 0
+  } catch (err) {
+    log.fail(err instanceof Error ? err.message : String(err))
+    return 1
+  }
+}
+
+async function getTaskConfig(ctx: WorkContext, args: string[]): Promise<number> {
+  const parsed = parseTaskFlag(args)
+  if (!parsed.ok) {
+    log.fail(parsed.message)
+    return 1
+  }
+  const [key, ...extra] = parsed.args
+  if (!key) {
+    log.fail(invalidTaskConfigKey(null))
+    return 1
+  }
+  if (key !== 'on-complete') {
+    log.fail(invalidTaskConfigKey(key))
+    return 1
+  }
+  if (extra.length > 0) {
+    log.fail('invalid on-complete value\nusage: factory config get on-complete')
+    return 1
+  }
+  try {
+    const task = await inferTaskConfigTarget(ctx, parsed.taskQuery)
+    const effective = resolveOnComplete(task.meta.onComplete, ctx.config.onComplete)
+    log.log(`task: ${task.id}`)
+    log.log(`override: ${taskOnCompleteLabel(task.meta.onComplete)}`)
+    log.log(`effective: ${onCompleteLabel(effective)}`)
+    return 0
+  } catch (err) {
+    log.fail(err instanceof Error ? err.message : String(err))
+    return 1
+  }
+}
+
+async function updateTaskConfigMode(
+  ctx: WorkContext,
+  args: string[],
+  mode: 'disabled' | 'inherit',
+  verb: 'unset' | 'inherit'
+): Promise<number> {
+  const parsed = parseTaskFlag(args)
+  if (!parsed.ok) {
+    log.fail(parsed.message)
+    return 1
+  }
+  const [key, ...extra] = parsed.args
+  if (!key) {
+    log.fail(invalidTaskConfigKey(null))
+    return 1
+  }
+  if (key !== 'on-complete') {
+    log.fail(invalidTaskConfigKey(key))
+    return 1
+  }
+  if (extra.length > 0) {
+    log.fail(`invalid on-complete value\nusage: factory config ${verb} on-complete`)
+    return 1
+  }
+  try {
+    const task = await inferTaskConfigTarget(ctx, parsed.taskQuery)
+    if (mode === 'disabled') {
+      await setTaskOnComplete(task, { mode: 'disabled' })
+    } else {
+      await setTaskOnComplete(task, { mode: 'inherit' })
+    }
+    log.ok(`${task.id}: on-complete ${verb === 'unset' ? 'disabled' : 'inherited'}`)
+    return 0
+  } catch (err) {
+    log.fail(err instanceof Error ? err.message : String(err))
+    return 1
+  }
+}
 
 // The queue's most-important state for attention and the idle label:
 // blocked > needs-input > all-done > nothing.
@@ -815,6 +995,18 @@ export async function main(opts: MainOptions = {}): Promise<number> {
 
   if (cmd === 'config') {
     const ctx = await loadContext(process.cwd())
+    if (rest[0] === 'set') {
+      return setTaskConfig(ctx, rest.slice(1))
+    }
+    if (rest[0] === 'get') {
+      return getTaskConfig(ctx, rest.slice(1))
+    }
+    if (rest[0] === 'unset') {
+      return updateTaskConfigMode(ctx, rest.slice(1), 'disabled', 'unset')
+    }
+    if (rest[0] === 'inherit') {
+      return updateTaskConfigMode(ctx, rest.slice(1), 'inherit', 'inherit')
+    }
     if (rest[0] === 'edit') {
       const dirFlag = rest.indexOf('--dir')
       const explicitDir = dirFlag === -1 ? null : rest[dirFlag + 1]
