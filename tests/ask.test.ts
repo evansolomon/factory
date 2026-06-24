@@ -292,6 +292,23 @@ describe('runAskSession', () => {
     expect(code).toBe(1)
   })
 
+  test('Ctrl-C exits cleanly with visible feedback', async () => {
+    const lines: string[] = []
+
+    const code = await runAskSession({
+      agent: 'claude',
+      taskId: null,
+      initialQuestion: '',
+      readLine: async () => null,
+      write: (text) => lines.push(text),
+      writeError: () => {},
+      turn: async () => ({ kind: 'answer', answer: 'unused', selectedTaskIds: [] }),
+    })
+
+    expect(code).toBe(0)
+    expect(lines).toContain('  interrupted')
+  })
+
   test('turn failure reports an error, skips transcript append, and re-prompts', async () => {
     const errors: string[] = []
     const transcriptLengths: number[] = []

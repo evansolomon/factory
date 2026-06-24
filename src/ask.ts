@@ -359,8 +359,21 @@ export async function answerAskQuestion(opts: {
   }
 }
 
-function ask(rl: Interface, question: string): Promise<string> {
-  return new Promise((resolve) => rl.question(question, resolve))
+function ask(rl: Interface, question: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (answer: string | null): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      rl.off('SIGINT', onInterrupt)
+      resolve(answer)
+    }
+    const onInterrupt = (): void => finish(null)
+    rl.once('SIGINT', onInterrupt)
+    rl.question(question, finish)
+  })
 }
 
 function errorMessage(err: unknown): string {
@@ -381,7 +394,7 @@ export async function runAskSession(opts: {
   agent: string
   taskId: string | null
   initialQuestion: string
-  readLine: () => Promise<string>
+  readLine: () => Promise<string | null>
   write: (text: string) => void
   writeError: (text: string) => void
   turn: (
@@ -397,7 +410,7 @@ export async function runAskSession(opts: {
   const renderAnswer = opts.renderAnswer ?? ((text: string) => text)
 
   opts.write(`ask — ${opts.agent}${opts.taskId ? ` · task ${opts.taskId}` : ''}`)
-  opts.write('ask a question · Enter or /done to exit · /edit long reply · /cancel abort')
+  opts.write('ask a question · Enter, /done, or Ctrl-C to exit · /edit long reply · /cancel abort')
 
   const submit = async (question: string): Promise<number | null> => {
     opts.write('  …thinking')
@@ -426,7 +439,13 @@ export async function runAskSession(opts: {
   }
 
   while (true) {
-    const input = (await opts.readLine()).trim()
+    const line = await opts.readLine()
+    if (line === null) {
+      opts.write('  interrupted')
+      return 0
+    }
+
+    const input = line.trim()
     if (input === '' || input === '/done') {
       return 0
     }
