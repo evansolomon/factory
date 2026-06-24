@@ -330,6 +330,10 @@ export function decideComplexity(
   return triageEnabled ? { source: 'triage' } : { source: 'none' }
 }
 
+export function implementationAttemptCount(failures: Failure[]): number {
+  return failures.filter((failure) => failure.remediation === 'code-fix').length
+}
+
 // Persist one telemetry record for this pass. Best-effort: recordRun never throws,
 // so a telemetry failure can't break the task.
 function recordTask(
@@ -414,12 +418,83 @@ async function postmortem(
 // Auto-resume policy for TRANSIENT gate failures (verify, ship): rather than
 // hard-block, set the task aside with a growing backoff so the run loop retries it
 // — up to AUTO_CAP times — letting an env/CI flake recover with no human action.
-// Once the cap is spent it escalates to a real block (the attention signal). Code-
-// judgment gates (review, security) never come here — they block immediately.
+// Once the cap is spent, the convergence judge decides whether to keep retrying,
+// ask for input, or stop as terminal.
 export const AUTO_CAP = 5
 const BACKOFF_MS = [120_000, 300_000, 900_000, 1_800_000, 3_600_000] // 2m, 5m, 15m, 30m, 60m
 function backoffMs(n: number): number {
   return BACKOFF_MS[Math.min(n, BACKOFF_MS.length - 1)] ?? 3_600_000
+}
+
+function retryLater(task: Task, meter: Meter, reason: string): TaskOutcome {
+  logTotal(meter)
+  const retryAt = new Date(Date.now() + backoffMs(task.meta.autoRetries)).toISOString()
+  return { ok: false, kind: 'retrying', reason, retryAt, autoRetries: task.meta.autoRetries + 1 }
+}
+
+async function needsInput(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  stats: RunStats,
+  questions: string
+): Promise<TaskOutcome> {
+  await writeArtifact(task, 'questions.md', questions)
+  await appendCandidate(ctx, `needs-input · ${task.id} · ${firstLine(questions)}`)
+  logTotal(meter)
+  recordTask(ctx, task, meter, 'needs-input', stats)
+  return { ok: false, kind: 'needs-input', questions }
+}
+
+type FailureAction =
+  | { kind: 'continue' }
+  | { kind: 'retry'; reason: string }
+  | { kind: 'needs-input'; questions: string }
+  | { kind: 'terminal' }
+
+async function judgeFailure(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  intent: string,
+  failures: Failure[],
+  latestFailure: string,
+  safetyFuse: string | null
+): Promise<{ action: FailureAction; summary: string }> {
+  const priorSummaries = failures.map((f) => `${f.gate}: ${f.summary}`)
+  const failureForJudge = safetyFuse
+    ? `Safety fuse reached: ${safetyFuse}\n\n${latestFailure}`
+    : latestFailure
+  const judgment = await agentStep(
+    meter,
+    'converge',
+    agentLabel(ctx.agents.reviewer),
+    runAgent(ctx.agents.reviewer, {
+      root: ctx.root,
+      prompt: convergePrompt(intent, priorSummaries, failureForJudge),
+      access: 'read',
+      outFile: `${task.dir}/converge.md`,
+    })
+  )
+  const summary =
+    /SUMMARY:\s*(.+)/i.exec(judgment)?.[1]?.trim() || firstLine(latestFailure).slice(0, 200)
+  const verdict = parseConvergenceVerdict(judgment)
+  switch (verdict) {
+    case 'CONTINUE_CODE_FIX':
+      return { action: { kind: 'continue' }, summary }
+    case 'RETRY_LATER':
+      return { action: { kind: 'retry', reason: summary }, summary }
+    case 'ASK_HUMAN':
+      return {
+        action: {
+          kind: 'needs-input',
+          questions: `Factory needs human input before it can continue:\n\n${summary}`,
+        },
+        summary,
+      }
+    default:
+      return { action: { kind: 'terminal' }, summary }
+  }
 }
 
 async function setAside(
@@ -428,29 +503,50 @@ async function setAside(
   meter: Meter,
   stats: RunStats,
   reason: string,
-  detail?: string
+  detail: string | undefined,
+  intent: string
 ): Promise<TaskOutcome> {
   if (task.meta.autoRetries >= AUTO_CAP) {
-    return await blocked(
+    const failures = await readFailures(task)
+    const judged = await judgeFailure(
       ctx,
       task,
       meter,
-      stats,
-      `${reason} (gave up after ${AUTO_CAP} auto-retries)`,
-      detail
+      intent,
+      failures,
+      detail ?? reason,
+      `transient auto-retry limit ${AUTO_CAP} reached`
     )
+    switch (judged.action.kind) {
+      case 'retry':
+      case 'continue':
+        return retryLater(
+          task,
+          meter,
+          judged.action.kind === 'retry' ? judged.action.reason : reason
+        )
+      case 'needs-input':
+        return needsInput(ctx, task, meter, stats, judged.action.questions)
+      case 'terminal':
+        return await blocked(
+          ctx,
+          task,
+          meter,
+          stats,
+          `${reason} (terminal after ${AUTO_CAP} auto-retries)`,
+          detail
+        )
+    }
   }
-  logTotal(meter)
-  const retryAt = new Date(Date.now() + backoffMs(task.meta.autoRetries)).toISOString()
-  return { ok: false, kind: 'retrying', reason, retryAt, autoRetries: task.meta.autoRetries + 1 }
+  return retryLater(task, meter, reason)
 }
 
-// After a gate failure, decide whether to keep fixing. Replaces a blind retry
-// count: a convergence judge reads the whole failure history and says CONTINUE
-// (genuinely new problem — progress) or STUCK (same root cause recurring /
-// oscillating). The failure is logged either way (so the history spans resumes and
-// feeds the next fixer). `attempt` is 0-based; `hardCap` is the runaway backstop —
-// at/over it we stop without judging (also covers the no-re-implement resume pass).
+// After a gate failure, decide what to do next. Replaces a blind retry count:
+// the convergence judge reads the whole failure history and chooses code-fix,
+// retry-later, ask-human, or terminal. The failure is logged either way (so the
+// history spans resumes and feeds the next fixer). `attempt` is 0-based;
+// `hardCap` is only the runaway backstop — normal termination should come from
+// the convergence judge.
 async function assessFailure(
   ctx: WorkContext,
   task: Task,
@@ -461,32 +557,39 @@ async function assessFailure(
   hardCap: number,
   gate: string,
   detail: string
-): Promise<'continue' | 'stop'> {
-  if (attempt + 1 >= hardCap) {
-    const entry: Failure = { attempt, gate, summary: firstLine(detail).slice(0, 200), detail }
+): Promise<FailureAction> {
+  if (hardCap === 0) {
+    const entry: Failure = {
+      attempt,
+      gate,
+      summary: firstLine(detail).slice(0, 200),
+      detail,
+      remediation: 'code-fix',
+    }
     failures.push(entry)
     await appendFailure(task, entry)
-    return 'stop'
+    return { kind: 'terminal' }
   }
-  const priorSummaries = failures.map((f) => `${f.gate}: ${f.summary}`)
-  const judgment = await agentStep(
+  const judged = await judgeFailure(
+    ctx,
+    task,
     meter,
-    'converge',
-    agentLabel(ctx.agents.reviewer),
-    runAgent(ctx.agents.reviewer, {
-      root: ctx.root,
-      prompt: convergePrompt(intent, priorSummaries, detail),
-      access: 'read',
-      outFile: `${task.dir}/converge.md`,
-    })
+    intent,
+    failures,
+    detail,
+    attempt + 1 >= hardCap ? `implementation-attempt limit ${hardCap} reached` : null
   )
-  const summary = /SUMMARY:\s*(.+)/i.exec(judgment)?.[1]?.trim() || firstLine(detail).slice(0, 200)
-  const verdict = parseConvergenceVerdict(judgment)
-  const stuck = verdict !== 'CONTINUE'
-  const entry: Failure = { attempt, gate, summary, detail }
+  const summary = judged.summary
+  const entry: Failure = {
+    attempt,
+    gate,
+    summary,
+    detail,
+    remediation: judged.action.kind === 'retry' ? 'backoff' : 'code-fix',
+  }
   failures.push(entry)
   await appendFailure(task, entry)
-  return stuck ? 'stop' : 'continue'
+  return judged.action
 }
 
 // How many rounds of automated ENVIRONMENT remediation a single verify gate will
@@ -1041,16 +1144,17 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   // On resume with an existing diff, re-enter at the gates: run them against the
   // work already in the worktree, and only implement (a fix pass) if one fails.
   let skipImplement = resuming && (await hasChanges(ctx.root))
-  // A note-less resume is a transient retry: re-run the gates on the existing diff
-  // but DON'T re-implement (a verify env-flake mustn't churn code) — so jump to the
-  // hard cap, letting any failure escalate at once (verify→backoff retry,
-  // review-panel→block). A note means the human wants a change, so keep iterating.
+  // A note-less auto-retry is a transient retry: re-run the gates on the existing
+  // diff but DON'T re-implement first (a verify env-flake mustn't churn code). If
+  // those gates now surface a real code/review failure, let the normal convergence
+  // judge decide whether it is fixable instead of treating the backoff as spent
+  // implementation budget.
   if (skipImplement && resumeKind === 'auto-retry' && !resumeNote && !feedbackContext) {
-    attempt = hardCap
+    attempt = implementationAttemptCount(failures)
   }
   if (skipImplement && (resumeNote || feedbackContext)) {
     skipImplement = false
-    attempt = Math.max(1, failures.length)
+    attempt = Math.max(1, implementationAttemptCount(failures))
   }
   while (true) {
     stats.retries = attempt
@@ -1223,16 +1327,22 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         'review',
         detail
       )
-      if (action === 'continue') {
+      if (action.kind === 'continue') {
         attempt++
         continue
+      }
+      if (action.kind === 'retry') {
+        return retryLater(task, meter, action.reason)
+      }
+      if (action.kind === 'needs-input') {
+        return needsInput(ctx, task, meter, stats, action.questions)
       }
       return blocked(
         ctx,
         task,
         meter,
         stats,
-        `review blocked after ${attempt + 1} attempts`,
+        `review blocked after ${attempt + 1} implementation attempts`,
         consolidated
       )
     }
@@ -1255,16 +1365,22 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           'verify',
           v.detail
         )
-        if (action === 'continue') {
+        if (action.kind === 'continue') {
           attempt++
           continue
         }
-        return setAside(
+        if (action.kind === 'retry') {
+          return retryLater(task, meter, action.reason)
+        }
+        if (action.kind === 'needs-input') {
+          return needsInput(ctx, task, meter, stats, action.questions)
+        }
+        return blocked(
           ctx,
           task,
           meter,
           stats,
-          `verify failed after ${attempt + 1} attempts`,
+          `verify failed after ${attempt + 1} implementation attempts`,
           v.detail
         )
       }
@@ -1272,16 +1388,47 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         // Flake or an environment problem remediation couldn't fix: don't re-implement
         // code over it. Record the failure to history (so it's visible and feeds the
         // next pass) and hand to the backoff auto-retry — env issues like a service
-        // that isn't up yet often clear on their own; truly stuck ones block at the cap.
+        // that isn't up yet often clear on their own. At the cap, the convergence
+        // judge chooses whether to fix code, retry later, ask, or stop.
         const entry: Failure = {
           attempt,
           gate: 'verify',
           summary: firstLine(v.detail).slice(0, 200),
           detail: v.detail,
+          remediation: 'backoff',
         }
         failures.push(entry)
         await appendFailure(task, entry)
-        return setAside(ctx, task, meter, stats, v.reason, v.detail)
+        if (task.meta.autoRetries >= AUTO_CAP) {
+          const judged = await judgeFailure(
+            ctx,
+            task,
+            meter,
+            intent,
+            failures.slice(0, -1),
+            v.detail,
+            `transient auto-retry limit ${AUTO_CAP} reached`
+          )
+          switch (judged.action.kind) {
+            case 'continue':
+              attempt++
+              continue
+            case 'retry':
+              return retryLater(task, meter, judged.action.reason)
+            case 'needs-input':
+              return needsInput(ctx, task, meter, stats, judged.action.questions)
+            case 'terminal':
+              return blocked(
+                ctx,
+                task,
+                meter,
+                stats,
+                `${v.reason} (terminal after ${AUTO_CAP} auto-retries)`,
+                v.detail
+              )
+          }
+        }
+        return retryLater(task, meter, v.reason)
       }
       // Passed verify — first try iff no prior code-fix attempts (an environment
       // remediation isn't a code fix, so it doesn't disqualify first-try).
@@ -1391,7 +1538,7 @@ async function shipAndFinish(
     )
     const ship = parseShip(shipOut)
     if (!ship.ok) {
-      return setAside(ctx, task, meter, stats, `ship failed: ${ship.reason}`, shipOut)
+      return setAside(ctx, task, meter, stats, `ship failed: ${ship.reason}`, shipOut, intent)
     }
   }
 

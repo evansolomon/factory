@@ -438,7 +438,7 @@ export function fixPrompt(
   const tried = history.length
     ? `\n\n## Already attempted (these fixes did NOT work — do not repeat them)\n${history.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
     : ''
-  return `A previous attempt at the task below did not pass its gate. Fix the working tree so it satisfies the plan and passes verification. Address the root cause — do not weaken, skip, or delete tests or hard-code values to pass; if the failure means the plan is wrong, say so. Change only what's needed; don't touch unrelated code. Do NOT commit.${tried ? '\n\nThe approaches below were already tried and failed — diagnose why, and take a genuinely different path rather than re-applying a variation of them.' : ''}
+  return `A previous attempt at the task below did not pass its gate. Fix the working tree so it satisfies the plan and passes verification. Address the root cause — do not weaken, skip, or delete tests or hard-code values to pass; if the failure means the plan is wrong, say so. Change only what's needed; don't touch unrelated code. Do NOT commit.${tried ? '\n\nThe approaches below were already tried and failed — first identify why they failed, then take a materially different path rather than re-applying a variation of them.' : ''}
 
 ## Task
 ${intent}
@@ -498,11 +498,10 @@ SUMMARY: <one sentence: the root cause and, if you fixed it, what you changed>
 VERDICT: ENV-FIXED | ENV-BLOCKED | CODE | FLAKE`
 }
 
-// The convergence judge: after each failed fix attempt, decides whether the loop
-// is making progress (each failure is genuinely new ground) or going in circles
-// (the same root cause recurring / oscillating). Replaces a blind retry count —
-// keep iterating while novel, stop when stuck. Also summarizes the latest failure
-// for the history log the next judgment reads.
+// The convergence judge: after a failed gate or safety-fuse hit, decides the next
+// autonomous action from the failure history. Replaces blind counters with a
+// semantic call: keep fixing, retry later, ask a human, or stop as terminal. Also
+// summarizes the latest failure for the history log the next judgment reads.
 export function convergePrompt(
   intent: string,
   priorSummaries: string[],
@@ -511,12 +510,14 @@ export function convergePrompt(
   const history = priorSummaries.length
     ? priorSummaries.map((s, i) => `${i + 1}. ${s}`).join('\n')
     : '(none — this is the first failure)'
-  return `An autonomous fix loop is working a task; after each failed attempt it asks you whether to keep iterating. Decide on PROGRESS, not a count. You see every prior failure (summarized) and the latest failure in full.
+  return `An autonomous fix loop is working a task; after a failed gate it asks you what to do next. Decide from the root cause, not from a counter. You see every prior failure (summarized) and the latest failure in full.
 
-- CONTINUE — the loop is converging: this latest failure is genuinely NEW ground (a different root cause) and the earlier problems appear resolved. Fixing one thing surfacing the next real problem is healthy progress.
-- STUCK — it is NOT converging: the same root cause keeps recurring, an earlier-"fixed" problem has returned, or it's oscillating among problems already seen. Surface novelty (a new error message for the same underlying cause) is still STUCK.
+- CONTINUE_CODE_FIX — keep editing code: the failure is a concrete code/test/review defect the implementer can plausibly fix from the available context. Use this for genuinely new failures, and also for repeated failures when a materially different strategy is still available.
+- RETRY_LATER — do not edit code now: the failure is transient or external (flaky infra, locked service, rate limit, CI/test environment instability) and a later retry may pass.
+- ASK_HUMAN — the task is blocked on a missing product decision, credential, secret, external admin setting, or other information only a human can provide. Ask the smallest specific question that would unblock progress.
+- TERMINAL — autonomous work should stop: the same root cause has recurred after materially different strategies, the change is impossible under the task constraints, or continuing would likely damage unrelated code.
 
-A wrong CONTINUE wastes a loop; a wrong STUCK abandons a task that was nearly done. Weigh both — but if the same underlying problem has now appeared twice, lean STUCK.
+Bias toward autonomy: a wrong TERMINAL abandons a task that may be nearly done. Use TERMINAL only when you can explain why neither code changes nor retrying later can help. When the same root cause recurs, prefer CONTINUE_CODE_FIX if the next fixer can try a clearly different strategy; otherwise choose ASK_HUMAN or TERMINAL.
 
 ## Task
 ${intent}
@@ -528,8 +529,8 @@ ${history}
 ${latestFailure}
 
 Output exactly two lines:
-SUMMARY: <one sentence naming the latest failure's root cause, for the history log>
-VERDICT: CONTINUE | STUCK`
+SUMMARY: <one sentence naming the latest failure's root cause; for ASK_HUMAN, make this the exact question to ask>
+VERDICT: CONTINUE_CODE_FIX | RETRY_LATER | ASK_HUMAN | TERMINAL`
 }
 
 // Postmortem on a task the fix loop gave up on: a fast triage briefing for the

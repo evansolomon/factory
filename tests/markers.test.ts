@@ -32,9 +32,16 @@ describe('marker parsing', () => {
   })
 
   test('does not accept non-final convergence verdicts', () => {
-    expect(parseConvergenceVerdict('VERDICT: CONTINUE\n\nsame root cause')).toBeNull()
-    expect(parseConvergenceVerdict('same root cause\n\nVERDICT: STUCK')).toBe('STUCK')
-    expect(parseConvergenceVerdict('`VERDICT: CONTINUE`')).toBeNull()
+    expect(parseConvergenceVerdict('VERDICT: CONTINUE_CODE_FIX\n\nsame root cause')).toBeNull()
+    expect(parseConvergenceVerdict('SUMMARY: fixable\nVERDICT: CONTINUE_CODE_FIX')).toBe(
+      'CONTINUE_CODE_FIX'
+    )
+    expect(parseConvergenceVerdict('same root cause\n\nVERDICT: TERMINAL')).toBe('TERMINAL')
+    expect(parseConvergenceVerdict('VERDICT: RETRY_LATER')).toBe('RETRY_LATER')
+    expect(parseConvergenceVerdict('VERDICT: ASK_HUMAN')).toBe('ASK_HUMAN')
+    expect(parseConvergenceVerdict('VERDICT: CONTINUE')).toBeNull()
+    expect(parseConvergenceVerdict('VERDICT: STUCK')).toBeNull()
+    expect(parseConvergenceVerdict('`VERDICT: CONTINUE_CODE_FIX`')).toBeNull()
   })
 
   test('parses ship only from the final line', () => {

@@ -47,8 +47,10 @@ its own agents must follow when the repo is the target.
 - **Marker-line contract.** Read-only stages output *only* markdown (saved verbatim
   as the artifact). Stages the conductor parses must keep their exact marker lines:
   `DECISION: PROCEED|ASK`, `COMPLEXITY: TRIVIAL|COMPLEX`, `USER-FACING: YES|NO`,
-  `VERDICT: PASS|FAIL`, `VERDICT: CONTINUE|STUCK`, `SHIP: OK|FAILED`,
-  `SPEC READY`, `SHARPEN: PASS|REVISE`, and `CATEGORY:` / `LESSON:` / `SUMMARY:`.
+  `VERDICT: PASS|FAIL`,
+  `VERDICT: CONTINUE_CODE_FIX|RETRY_LATER|ASK_HUMAN|TERMINAL`,
+  `SHIP: OK|FAILED`, `SPEC READY`, `SHARPEN: PASS|REVISE`, and
+  `CATEGORY:` / `LESSON:` / `SUMMARY:`.
   If you change a marker, change **both** the prompt (`prompts.ts`) and its parser
   (`conductor.ts` or the owning parser).
 - **codex and claude are peers, shelled out headless.** Do **not** add a

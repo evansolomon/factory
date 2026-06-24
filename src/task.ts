@@ -378,16 +378,21 @@ export async function readPlan(task: Task): Promise<string | null> {
   return readArtifact(task, 'plan.md')
 }
 
-// One failed fix-loop attempt: which gate rejected it, a one-line root-cause
-// summary (for loop detection), and the full text (for the next fixer). Persisted
-// to failures.jsonl so the history spans the whole task — including resumes — and
-// the convergence judge can tell genuine progress from going in circles.
+// One failed gate: which gate rejected it, a one-line root-cause summary (for loop
+// detection), and the full text (for the next fixer). Persisted to failures.jsonl
+// so the history spans the whole task — including resumes — and the convergence
+// judge can tell genuine progress from going in circles.
+const FailureRemediationSchema = z.enum(['code-fix', 'backoff'])
 const FailureSchema = z.object({
   attempt: z.number().int(),
   gate: z.string(),
   summary: z.string(),
   detail: z.string(),
+  // Backoff failures are transient verify/env/ship records. They are useful
+  // history, but they must not consume the implementation fix budget.
+  remediation: FailureRemediationSchema.default('code-fix'),
 })
+export type FailureRemediation = z.infer<typeof FailureRemediationSchema>
 export type Failure = z.infer<typeof FailureSchema>
 
 export async function readFailures(task: Task): Promise<Failure[]> {

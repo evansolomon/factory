@@ -44,10 +44,27 @@ export function parseReviewVerdict(text: string): 'PASS' | 'FAIL' | null {
   return value === 'PASS' || value === 'FAIL' ? value : null
 }
 
-export function parseConvergenceVerdict(text: string): 'CONTINUE' | 'STUCK' | null {
-  const match = /^VERDICT:\s*(CONTINUE|STUCK)\s*$/i.exec(finalNonemptyLine(text))
+export type ConvergenceVerdict =
+  | 'CONTINUE_CODE_FIX'
+  | 'RETRY_LATER'
+  | 'ASK_HUMAN'
+  | 'TERMINAL'
+  | null
+
+export function parseConvergenceVerdict(text: string): ConvergenceVerdict {
+  const match = /^VERDICT:\s*(CONTINUE_CODE_FIX|RETRY_LATER|ASK_HUMAN|TERMINAL)\s*$/i.exec(
+    finalNonemptyLine(text)
+  )
   const value = match?.[1]?.toUpperCase()
-  return value === 'CONTINUE' || value === 'STUCK' ? value : null
+  if (
+    value === 'CONTINUE_CODE_FIX' ||
+    value === 'RETRY_LATER' ||
+    value === 'ASK_HUMAN' ||
+    value === 'TERMINAL'
+  ) {
+    return value
+  }
+  return null
 }
 
 export function parseRemedy(text: string): RemedyVerdict {
