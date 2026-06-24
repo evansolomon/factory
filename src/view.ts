@@ -171,10 +171,12 @@ function liveMeterSummary(meter: LiveMeter | null): string {
   if (!meter) {
     return ''
   }
+  const startedAt = Date.parse(meter.startedAt)
+  const elapsed = Number.isFinite(startedAt) ? durMs(Math.max(0, Date.now() - startedAt)) : '?'
   const input = tokens(meter.inputTokens)
   const output = tokens(meter.outputTokens)
   const total = tokens(meter.inputTokens + meter.outputTokens)
-  return ` · tokens ${input} in → ${output} out (${total} total)`
+  return ` · runtime ${elapsed} · tokens ${input} in → ${output} out (${total} total)`
 }
 
 // The catch-up dashboard: everything happening in this worktree, derived purely
