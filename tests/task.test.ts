@@ -11,6 +11,7 @@ import {
   nextRunnable,
   pendingFeedbackCount,
   readArtifact,
+  readFailures,
   readFeedback,
   readPendingFeedback,
   refreshFeedbackState,
@@ -188,6 +189,22 @@ describe('task state transitions', () => {
     expect(task?.meta.feedbackCount).toBe(0)
     expect(task?.meta.feedbackConsumed).toBe(0)
     expect(task?.meta.feedbackSourceTaskId).toBeNull()
+  })
+
+  test('legacy failure records count as code-fix failures', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Legacy failure', null)
+    const legacyFailure = {
+      attempt: 0,
+      gate: 'review',
+      summary: 'old failure',
+      detail: 'old detail',
+    }
+    await Bun.write(`${task.dir}/failures.jsonl`, `${JSON.stringify(legacyFailure)}\n`)
+
+    const failures = await readFailures(task)
+
+    expect(failures[0]?.remediation).toBe('code-fix')
   })
 
   test('persists declared trivial task complexity', async () => {

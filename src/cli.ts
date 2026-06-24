@@ -780,9 +780,12 @@ export async function main(opts: MainOptions = {}): Promise<number> {
           reason: outcome.reason,
           retryAt: outcome.retryAt,
         })
-        log.warn(
-          `${task.id}: ${outcome.reason} — auto-retry ${outcome.autoRetries}/${AUTO_CAP} at ${new Date(outcome.retryAt).toLocaleTimeString()}`
-        )
+        const retryCount =
+          outcome.autoRetries <= AUTO_CAP
+            ? `${outcome.autoRetries}/${AUTO_CAP}`
+            : `${outcome.autoRetries} (past cap; judge approved)`
+        const retryTime = new Date(outcome.retryAt).toLocaleTimeString()
+        log.warn(`${task.id}: ${outcome.reason} — auto-retry ${retryCount} at ${retryTime}`)
       } else {
         await setStatus(task, 'blocked', outcome.reason)
         await captureEvalCase(ctx, task, 'blocked', outcome.reason)
