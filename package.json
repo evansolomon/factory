@@ -1,6 +1,6 @@
 {
   "name": "@evansolomon/factory",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "A self-improving coding loop: queue tasks in a git worktree and have a cross-model agent ensemble plan, implement, review, verify, and commit each one.",
   "license": "MIT",
   "author": "Evan Solomon",
