@@ -141,8 +141,10 @@ COMMANDS
                              with a step (e.g. implement, review, plan.codex), show
                              that step's line-by-line agent activity. A lone step
                              name applies to the latest task (factory show review).
-  factory report              Telemetry across all the repo's tasks: first-pass yield,
-                           escalation/blocked rate, cost, where the tokens go.
+  factory report [task-id] [--all]
+                             Telemetry for one task (defaults to the latest here):
+                             cost, cycle time, where the tokens go. --all rolls up
+                             across the repo: first-pass yield, escalation/blocked rate.
   factory lessons             Curated lessons (LESSONS.md) + raw candidates.
   factory config [edit [--global|--worktree|--repo-parent|--dir <dir>]]
                            Show effective config + where it's set; edit opens the
@@ -996,8 +998,23 @@ export async function main(opts: MainOptions = {}): Promise<number> {
   }
 
   if (cmd === 'report') {
-    const ctx = await loadRepoContext(process.cwd())
-    printReport(ctx)
+    const ctx = await loadContext(process.cwd())
+    // Default to the current task (like `show`); `--all` for the repo roll-up.
+    if (rest.includes('--all')) {
+      printReport(ctx)
+      return 0
+    }
+    const query = rest.find((a) => !a.startsWith('-'))
+    const task = query ? await findTask(ctx, query) : await latestTask(ctx)
+    if (!task) {
+      if (query) {
+        log.fail(`no task matching "${query}"`)
+        return 1
+      }
+      log.info('no tasks in this worktree — use `factory report --all` for the repo roll-up')
+      return 0
+    }
+    printReport(ctx, task.id)
     return 0
   }
 
