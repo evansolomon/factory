@@ -14,6 +14,7 @@ import {
   writeAutoUpgradeState,
 } from '../src/auto-upgrade.ts'
 import { main } from '../src/cli.ts'
+import { AUTO_UPGRADE_COMMAND_NAMES, COMMANDS } from '../src/commands.ts'
 import { autoUpgradeStateFile } from '../src/config.ts'
 import { log } from '../src/log.ts'
 import type { FetchImpl } from '../src/upgrade.ts'
@@ -61,8 +62,8 @@ async function fileExists(path: string): Promise<boolean> {
 }
 
 describe('auto-upgrade eligibility', () => {
-  test('uses an explicit normal-command allow-list', () => {
-    for (const command of [
+  test('uses the normal-command allow-list from command metadata', () => {
+    const expected = [
       'add',
       'backlog',
       'run',
@@ -80,12 +81,32 @@ describe('auto-upgrade eligibility', () => {
       'show',
       'lessons',
       'report',
-    ]) {
+    ]
+
+    expect(AUTO_UPGRADE_COMMAND_NAMES).toEqual(expected)
+
+    for (const command of expected) {
       expect(isAutoUpgradeCommand(command)).toBe(true)
     }
 
-    for (const command of ['', 'help', '-h', '--help', 'version', '--version', 'upgrade', 'wat']) {
+    for (const command of [
+      '',
+      'help',
+      '-h',
+      '--help',
+      'version',
+      '--version',
+      'upgrade',
+      'completion',
+      'wat',
+    ]) {
       expect(isAutoUpgradeCommand(command)).toBe(false)
+    }
+  })
+
+  test('command metadata auto-upgrade flags match isAutoUpgradeCommand', () => {
+    for (const command of COMMANDS) {
+      expect(isAutoUpgradeCommand(command.name)).toBe(command.autoUpgrade)
     }
   })
 
@@ -417,6 +438,13 @@ describe('cli auto-upgrade placement', () => {
     expect(await main({ argv: ['version'], autoUpgrade })).toBe(0)
     expect(await main({ argv: ['--version'], autoUpgrade })).toBe(0)
     expect(await main({ argv: ['upgrade'], autoUpgrade, upgrade: async () => 7 })).toBe(7)
+    expect(
+      await main({
+        argv: ['completion', 'zsh'],
+        autoUpgrade,
+        completion: () => 0,
+      })
+    ).toBe(0)
     expect(autoCalls).toBe(0)
   })
 

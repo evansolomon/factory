@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createInterface } from 'node:readline'
 import { z } from 'zod'
+import { AUTO_UPGRADE_COMMAND_NAMES } from './commands.ts'
 import { autoUpgradeStateFile } from './config.ts'
 import { log } from './log.ts'
 import {
@@ -24,26 +25,7 @@ export type AutoUpgradeState = z.infer<typeof AutoUpgradeStateSchema>
 
 export type AutoUpgradeResult = { kind: 'continue' } | { kind: 'exit'; code: number }
 
-// Keep this allow-list in sync with the normal command dispatch in cli.ts.
-const AUTO_UPGRADE_COMMANDS = new Set([
-  'add',
-  'backlog',
-  'run',
-  'answer',
-  'feedback',
-  'retry',
-  'resume',
-  'correct',
-  'status',
-  'ask',
-  'session',
-  'codex',
-  'claude',
-  'config',
-  'show',
-  'lessons',
-  'report',
-])
+const AUTO_UPGRADE_COMMANDS = new Set(AUTO_UPGRADE_COMMAND_NAMES)
 
 export function isAutoUpgradeCommand(command: string): boolean {
   return AUTO_UPGRADE_COMMANDS.has(command)
