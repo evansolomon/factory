@@ -1,6 +1,7 @@
 import { createInterface, type Interface } from 'node:readline'
 import { type AgentResult, type AgentRun, agentLabel, runAgent } from './agents.ts'
 import type { Agent, WorkContext } from './config.ts'
+import { deliveryLabel } from './delivery.ts'
 import { composeInEditor } from './editor.ts'
 import { log } from './log.ts'
 import { renderAgentMarkdown } from './sharpen-render.ts'
@@ -138,6 +139,7 @@ async function taskArtifacts(task: Task): Promise<string[]> {
     'agent-session.summary.md',
     'human-feedback.md',
     'human-feedback.analysis.md',
+    'delivery.md',
     'plan.final.md',
     'consolidated.md',
     'postmortem.md',
@@ -159,14 +161,6 @@ async function taskArtifacts(task: Task): Promise<string[]> {
   return out
 }
 
-function onCompleteLabel(ctx: WorkContext): string {
-  const onComplete = ctx.config.onComplete
-  if (!onComplete) {
-    return 'disabled'
-  }
-  return 'skill' in onComplete ? `skill:${onComplete.skill}` : `policy:${onComplete.policy}`
-}
-
 function taskLine(task: Task): string {
   const meta = task.meta
   const parts = [
@@ -174,6 +168,7 @@ function taskLine(task: Task): string {
     `status=${meta.status}`,
     `updatedAt=${meta.updatedAt ?? '(unset)'}`,
     `verify=${meta.verify ?? '(none)'}`,
+    `delivery=${deliveryLabel(meta.delivery)}`,
   ]
   if (meta.note) {
     parts.push(`note=${meta.note}`)
@@ -234,7 +229,7 @@ Factory context:
 - worktree: ${ctx.root}
 - stateDir: ${ctx.stateDir}
 - tasksDir: ${ctx.tasksDir}
-- default onComplete: ${onCompleteLabel(ctx)}
+- delivery: task-local, selected before implementation
 
 Task index, ordered by likely relevance:
 ${taskIndex}
@@ -296,6 +291,7 @@ async function selectDetailedTasks(
         task.meta.status === 'shipping' ||
         task.meta.status === 'retrying' ||
         task.meta.status === 'done' ||
+        (await hasArtifact(task, 'delivery.md')) ||
         (await hasArtifact(task, 'ship.md')) ||
         (await hasArtifact(task, 'proof.md'))
       ) {

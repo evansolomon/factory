@@ -4,6 +4,7 @@ import { dirname } from 'node:path'
 import { z } from 'zod'
 import { agentLabel } from './agents.ts'
 import { configSources, globalConfigFile, type RepoContext, type WorkContext } from './config.ts'
+import { deliveryLabel } from './delivery.ts'
 import { currentBranch } from './git.ts'
 import { log } from './log.ts'
 import { type Report, readReport } from './metrics.ts'
@@ -23,12 +24,6 @@ import {
 export async function printConfig(ctx: WorkContext): Promise<void> {
   const c = ctx.config
   const field = (name: string, val: string) => log.log(`  ${name.padEnd(11)} ${val}`)
-  const oc = c.onComplete
-  const ocLabel = !oc
-    ? '(not set — committed, not shipped)'
-    : 'skill' in oc
-      ? `skill: ${oc.skill}`
-      : `policy: ${oc.policy}`
   const a = ctx.agents
 
   log.log(`factory config — effective for ${ctx.root}`)
@@ -42,7 +37,6 @@ export async function printConfig(ctx: WorkContext): Promise<void> {
   field('plansDir', c.plansDir ?? '(disabled)')
   field('captureEvals', String(c.captureEvals))
   field('postmortem', String(c.postmortem))
-  field('onComplete', ocLabel)
   field('ask', agentLabel(ctx.askAgent))
   log.log('')
   field('planners', a.planners.map(agentLabel).join(', '))
@@ -135,6 +129,7 @@ export const SHOW_ARTIFACTS = [
   ['human-feedback.analysis.md', '## Feedback analysis (last pass)'],
   ['questions.md', '## Open questions'],
   ['answers.md', '## Answers'],
+  ['delivery.md', '## Delivery selection'],
   ['plan.final.md', '## Final plan'],
   ['risk.plan.md', '## Plan risk'],
   ['review.md', '## Review (last attempt)'],
@@ -383,7 +378,9 @@ export async function printShow(ctx: WorkContext, query?: string, step?: string)
     ? `  ·  ↩ feedback on ${m.feedbackSourceTaskId}`
     : ''
   log.log(
-    `verify: ${m.verify ?? '(none)'}${complexity}${feedbackSummary}${feedbackSource}  ·  sharpen: ${m.sharpen}  ·  created ${age(
+    `verify: ${m.verify ?? '(none)'}  ·  delivery: ${deliveryLabel(
+      m.delivery
+    )}${complexity}${feedbackSummary}${feedbackSource}  ·  sharpen: ${m.sharpen}  ·  created ${age(
       m.createdAt
     )} ago  ·  updated ${age(m.updatedAt)} ago`
   )

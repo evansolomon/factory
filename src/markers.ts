@@ -15,6 +15,17 @@ function finalNonemptyLine(text: string): string {
 
 export type TriageResult = { trivial: boolean; userFacing: boolean }
 export type ShipResult = { ok: true } | { ok: false; reason: string }
+type DeliveryConfidence = 'low' | 'medium' | 'high' | null
+type ParsedDeliveryMeta = {
+  confidence: DeliveryConfidence
+  reason: string | null
+}
+export type DeliverySelection = {
+  delivery:
+    | ({ mode: 'none'; source: 'selected' | 'fallback' } & ParsedDeliveryMeta)
+    | ({ mode: 'skill'; skill: string; source: 'selected' } & ParsedDeliveryMeta)
+    | ({ mode: 'policy'; policy: string; source: 'selected' } & ParsedDeliveryMeta)
+}
 export type ReconcileDecision = 'PROCEED' | 'ASK' | null
 // The verify-gate doctor's classification of a failure (see remediatePrompt):
 // ENV-FIXED — environment problem the doctor repaired (re-run verify);
@@ -83,6 +94,69 @@ export function parseShip(text: string): ShipResult {
   }
   const failed = /^SHIP:\s*FAILED\s*(.*)$/i.exec(line)
   return { ok: false, reason: failed?.[1]?.trim() || 'ship did not report success' }
+}
+
+function markerValue(text: string, name: string): string | null {
+  const match = new RegExp(`^${name}:\\s*(.+)$`, 'im').exec(text)
+  return match?.[1]?.trim() ?? null
+}
+
+export function parseDeliverySelection(text: string, availableSkills: string[]): DeliverySelection {
+  const confidenceText = markerValue(text, 'CONFIDENCE')?.toLowerCase()
+  const confidence =
+    confidenceText === 'low' || confidenceText === 'medium' || confidenceText === 'high'
+      ? confidenceText
+      : null
+  const reason = markerValue(text, 'REASON')
+  const raw = markerValue(text, 'DELIVERY')
+  if (!raw) {
+    return {
+      delivery: {
+        mode: 'none',
+        source: 'fallback',
+        confidence: 'low',
+        reason: 'delivery selector did not report a valid DELIVERY marker',
+      },
+    }
+  }
+
+  if (/^none$/i.test(raw)) {
+    return {
+      delivery: { mode: 'none', source: 'selected', confidence, reason },
+    }
+  }
+
+  const skill = /^skill\s+([a-z0-9._-]+)$/i.exec(raw)?.[1]
+  const canonicalSkill = skill
+    ? availableSkills.find((available) => available.toLowerCase() === skill.toLowerCase())
+    : null
+  if (canonicalSkill) {
+    return {
+      delivery: {
+        mode: 'skill',
+        skill: canonicalSkill,
+        source: 'selected',
+        confidence,
+        reason,
+      },
+    }
+  }
+
+  const policy = /^policy\s+(.+)$/i.exec(raw)?.[1]?.trim()
+  if (policy) {
+    return {
+      delivery: { mode: 'policy', policy, source: 'selected', confidence, reason },
+    }
+  }
+
+  return {
+    delivery: {
+      mode: 'none',
+      source: 'fallback',
+      confidence: 'low',
+      reason: `delivery selector returned unsupported delivery: ${raw}`,
+    },
+  }
 }
 
 export function parseReconcileDecision(text: string): ReconcileDecision {

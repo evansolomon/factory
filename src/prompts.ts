@@ -1,7 +1,7 @@
 // Stage prompts for the per-task ensemble. Read-only stages must output only
 // markdown (it's saved verbatim as the artifact). Stages parsed by the conductor
 // or sharpen loop must keep their exact marker lines
-// (DECISION/COMPLEXITY/VERDICT/SHIP/SPEC READY/SHARPEN).
+// (DECISION/COMPLEXITY/DELIVERY/VERDICT/SHIP/SPEC READY/SHARPEN).
 
 // Prior human answers, threaded into every pre-implementation stage so a resumed
 // run doesn't re-ask what's already been settled.
@@ -345,7 +345,65 @@ COMPLEXITY: TRIVIAL|COMPLEX
 USER-FACING: YES|NO`
 }
 
-// The onComplete step: a full-permission agent delivers the committed branch,
+export function deliverySelectPrompt(input: {
+  intent: string
+  verify: string | null
+  finalPlan: string
+  skills: Array<{ name: string; description: string | null }>
+  history: string
+}): string {
+  const skills =
+    input.skills.length > 0
+      ? input.skills
+          .map((skill) => `- ${skill.name}: ${skill.description ?? '(no description)'}`)
+          .join('\n')
+      : '(none)'
+
+  return `Choose what factory should do after this task is implemented, reviewed, verified, and committed.
+
+This is a delivery decision, not an implementation plan. You have read access to
+the repo. Inspect repo docs, AGENTS.md, available skills, and recent history if
+useful. Prefer repository-specific evidence over generic guesses.
+
+Delivery choices:
+- none: stop after the local verified commit and write the completion handoff.
+- skill <name>: run one available delivery skill after commit.
+- policy <text>: follow a one-off free-text delivery policy after commit. Use this
+  only when no available skill matches the user's requested delivery.
+
+Rules:
+- If the user explicitly requested a delivery style in the task, honor it when it
+  maps cleanly to these choices.
+- Treat phrases like "PR and auto merge", "open a PR and merge after CI", and
+  "ship it" as likely matches for a ship-like skill when one is available.
+- Treat phrases like "open a PR but don't merge" as likely matches for a PR-only
+  skill when one is available.
+- Use prior repo history as a default only when the current task is similar.
+- If unsure, choose none. Never invent external side effects.
+- Do not edit files.
+
+Output exactly these markers, with DELIVERY first:
+DELIVERY: NONE | SKILL <available-skill-name> | POLICY <one-line policy>
+CONFIDENCE: low|medium|high
+REASON: <one concise sentence>
+
+## Available delivery skills
+${skills}
+
+## Recent delivery history for this repo
+${input.history}
+
+## Verify
+${input.verify ?? 'none'}
+
+## Task
+${input.intent}
+
+## Final plan
+${input.finalPlan}`
+}
+
+// The delivery step: a full-permission agent delivers the committed branch,
 // either by running a named skill or following a free-text policy. Ends with a
 // machine-parseable verdict.
 export function shipPrompt(

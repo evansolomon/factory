@@ -1,6 +1,13 @@
 import { mkdir } from 'node:fs/promises'
 import { type AgentResult, agentLabel, runAgent } from './agents.ts'
 import type { Agent, WorkContext } from './config.ts'
+import {
+  appendDeliveryHistory,
+  deliveryAction,
+  formatDeliveryHistory,
+  listDeliverySkills,
+  readDeliveryHistory,
+} from './delivery.ts'
 import { run } from './exec.ts'
 import { commitAll, commitDiff, currentBranch, hasChanges, headSha, worktreeDiff } from './git.ts'
 import { emit } from './hooks.ts'
@@ -8,6 +15,7 @@ import { appendCandidate, readLessons } from './lessons.ts'
 import { log } from './log.ts'
 import {
   parseConvergenceVerdict,
+  parseDeliverySelection,
   parseReconcileDecision,
   parseRemedy,
   parseReviewVerdict,
@@ -15,11 +23,11 @@ import {
   parseTriage,
 } from './markers.ts'
 import { recordRun, type StageStat } from './metrics.ts'
-import { resolveOnComplete } from './on-complete.ts'
 import {
   consolidatePrompt,
   convergePrompt,
   critiquePrompt,
+  deliverySelectPrompt,
   deploySafetyPrompt,
   feedbackAnalysisPrompt,
   feedbackPrompt,
@@ -69,6 +77,7 @@ import {
   refreshMeta,
   saveMeta,
   setStatus,
+  setTaskDelivery,
   type Task,
   type TaskComplexity,
   writeArtifact,
@@ -966,11 +975,50 @@ async function runSharpenStage(
   return reviewSharpenSpec(ctx, task, meter, turns, candidate)
 }
 
-// Run a single task. A trivial task (per triage) takes the fast path — straight
-// to implement — while a complex one goes through the full planning ensemble.
+async function selectTaskDelivery(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  intent: string,
+  verify: string | null,
+  finalPlan: string
+): Promise<void> {
+  await refreshMeta(task)
+  if (task.meta.delivery.mode !== 'pending') {
+    return
+  }
+
+  await progress(ctx, task, 'delivery-select', 'delivery — choosing completion action')
+  const skills = await listDeliverySkills(ctx.root)
+  const history = formatDeliveryHistory(await readDeliveryHistory(ctx))
+  const output = await agentStep(
+    meter,
+    'delivery-select',
+    agentLabel(ctx.agents.reviewer),
+    runAgent(ctx.agents.reviewer, {
+      root: ctx.root,
+      prompt: deliverySelectPrompt({
+        intent,
+        verify,
+        finalPlan,
+        skills,
+        history,
+      }),
+      access: 'read',
+      outFile: `${task.dir}/delivery.md`,
+    })
+  )
+  const selection = parseDeliverySelection(
+    output,
+    skills.map((skill) => skill.name)
+  )
+  await setTaskDelivery(task, selection.delivery)
+  log.info(`${task.id}: delivery — ${selection.delivery.mode}`)
+}
+
 // Run a single task. A trivial task (per triage or declared metadata) takes the fast
 // path — straight to implement — while a complex one goes through the full planning ensemble.
-// Both are then reviewed, verified, committed, and (if configured) shipped.
+// Both are then reviewed, verified, committed, and delivered according to task state.
 export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome> {
   let intent = await readIntent(task)
   let verify = task.meta.verify
@@ -1121,6 +1169,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // Persist the selected plan as a task artifact so a resume can reuse it.
     await writeArtifact(task, 'plan.md', finalPlan)
   }
+
+  await selectTaskDelivery(ctx, task, meter, intent, verify, finalPlan)
 
   const feedbackContext = await analyzeFeedbackIfPending(ctx, task, meter, intent, finalPlan)
 
@@ -1467,10 +1517,10 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   return shipAndFinish(ctx, task, intent, meter, stats)
 }
 
-// 8. onComplete — opt-in, outward-facing delivery via the delivery agent (run a
-// skill or follow a policy). Split out so a resume whose work already committed can
-// re-run just this step. A ship failure is transient (CI/network), so it feeds the
-// same backoff auto-retry as verify rather than hard-blocking.
+// 8. Delivery — outward-facing delivery via the delivery agent (run a skill or
+// follow a policy). Split out so a resume whose work already committed can re-run
+// just this step. A ship failure is transient (CI/network), so it feeds the same
+// backoff auto-retry as verify rather than hard-blocking.
 const FEEDBACK_INPUT_LIMIT = 12_000
 
 function clipFeedbackInput(text: string | null, max: number = FEEDBACK_INPUT_LIMIT): string | null {
@@ -1522,10 +1572,18 @@ async function shipAndFinish(
   stats: RunStats
 ): Promise<TaskOutcome> {
   await refreshMeta(task)
-  const onComplete = resolveOnComplete(task.meta.onComplete, ctx.config.onComplete)
-  if (onComplete) {
+  if (task.meta.delivery.mode === 'pending') {
+    await setTaskDelivery(task, {
+      mode: 'none',
+      source: 'fallback',
+      confidence: 'low',
+      reason: 'delivery was still pending after commit; defaulted to none',
+    })
+  }
+  const action = deliveryAction(task.meta.delivery)
+  if (action) {
     await setStatus(task, 'shipping')
-    await progress(ctx, task, 'ship', 'onComplete — delivering')
+    await progress(ctx, task, 'ship', 'delivery — delivering')
     const branch = await currentBranch(ctx.root)
     const shipOut = await agentStep(
       meter,
@@ -1533,18 +1591,28 @@ async function shipAndFinish(
       agentLabel(ctx.agents.delivery),
       runAgent(ctx.agents.delivery, {
         root: ctx.root,
-        prompt: shipPrompt(intent, branch, onComplete),
+        prompt: shipPrompt(intent, branch, action),
         access: 'full',
         outFile: `${task.dir}/ship.md`,
       })
     )
     const ship = parseShip(shipOut)
     if (!ship.ok) {
+      try {
+        await appendDeliveryHistory(ctx, task, 'failed')
+      } catch (err) {
+        log.warn(`delivery history: ${err instanceof Error ? err.message : String(err)}`)
+      }
       return setAside(ctx, task, meter, stats, `ship failed: ${ship.reason}`, shipOut, intent)
     }
   }
 
   await writeCompletionFeedback(ctx, task, intent, meter)
+  try {
+    await appendDeliveryHistory(ctx, task, 'done')
+  } catch (err) {
+    log.warn(`delivery history: ${err instanceof Error ? err.message : String(err)}`)
+  }
   logTotal(meter)
   recordTask(ctx, task, meter, 'done', stats)
   return { ok: true }

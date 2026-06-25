@@ -19,7 +19,6 @@ const config: Config = {
   captureEvals: false,
   postmortem: false,
   remediate: true,
-  onComplete: null,
   hooks: {},
   agents: {
     planners: ['codex', 'claude'],

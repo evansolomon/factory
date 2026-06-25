@@ -17,7 +17,7 @@ import {
   refreshFeedbackState,
   saveMeta,
   setStatus,
-  setTaskOnComplete,
+  setTaskDelivery,
   type Task,
   writeArtifact,
 } from '../src/task.ts'
@@ -31,7 +31,6 @@ const config: Config = {
   captureEvals: false,
   postmortem: false,
   remediate: true,
-  onComplete: null,
   hooks: {},
   agents: {
     planners: ['codex', 'claude'],
@@ -185,7 +184,7 @@ describe('task state transitions', () => {
     expect(task?.meta.resumeKind).toBeNull()
     expect(task?.meta.autoRetries).toBe(0)
     expect(task?.meta.complexity).toBeNull()
-    expect(task?.meta.onComplete).toEqual({ mode: 'inherit' })
+    expect(task?.meta.delivery).toEqual({ mode: 'pending' })
     expect(task?.meta.feedbackCount).toBe(0)
     expect(task?.meta.feedbackConsumed).toBe(0)
     expect(task?.meta.feedbackSourceTaskId).toBeNull()
@@ -315,7 +314,7 @@ describe('task state transitions', () => {
     expect(task?.meta.feedbackSourceTaskId).toBe('source-task')
   })
 
-  test('task onComplete override survives status writes from a stale task object', async () => {
+  test('task delivery choice survives status writes from a stale task object', async () => {
     const ctx = await workContext()
     const stale = await addTask(ctx, 'Make PR only', null)
     const latest = (await loadTasks(ctx)).find((t) => t.id === stale.id)
@@ -323,14 +322,23 @@ describe('task state transitions', () => {
       throw new Error('expected task to reload')
     }
 
-    await setTaskOnComplete(latest, { mode: 'policy', policy: 'Make a PR and do not merge' })
+    await setTaskDelivery(latest, {
+      mode: 'policy',
+      policy: 'Make a PR and do not merge',
+      source: 'manual',
+      confidence: 'high',
+      reason: 'Manual policy.',
+    })
     await setStatus(stale, 'reviewing')
 
     const task = (await loadTasks(ctx)).find((t) => t.id === stale.id)
     expect(task?.meta.status).toBe('reviewing')
-    expect(task?.meta.onComplete).toEqual({
+    expect(task?.meta.delivery).toEqual({
       mode: 'policy',
       policy: 'Make a PR and do not merge',
+      source: 'manual',
+      confidence: 'high',
+      reason: 'Manual policy.',
     })
   })
 })

@@ -202,10 +202,7 @@ factory retry [task-id] [-m "<note>" | --edit]     # pick a blocked task back up
 factory feedback [task-id] [-m "<feedback>" | --edit]  # critique existing progress, generalized on next pass
 factory correct [task-id] [-m "<note>" | --edit]   # record your manual fix of a blocked task as a lesson
 factory backlog [add|rm] ...                       # experimental repo-level backlog
-factory config set on-complete "<instructions>"     # task-local delivery override
-factory config get on-complete                     # show task override + effective delivery
-factory config unset on-complete                    # disable delivery for the active task
-factory config inherit on-complete                  # clear task override; use config default
+factory delivery [--task <id>] [none|'$skill'|/skill|"<policy...>"]  # inspect/override delivery
 factory status                                     # catch-up dashboard
 factory ask [task-id] ["<question...>"]            # interactive Q&A over saved task state
 factory ask --print [task-id] "<question...>"      # one-shot/scriptable saved-state answer
@@ -255,8 +252,9 @@ factory upgrade                                     # install the latest GitHub 
   follow-ups; `factory ask <task-id>` opens a session scoped to that task. Each
   turn rebuilds a compact context packet from `meta.json`, the task index, and
   relevant artifacts such as `questions.md`, `failures.jsonl`, `postmortem.md`,
-  `feedback.md`, `agent-session.summary.md`, `proof.md`, `ship.md`, and
-  `verify.log`, then asks the configured `ask.agent` to answer only from that packet.
+  `feedback.md`, `agent-session.summary.md`, `delivery.md`, `proof.md`,
+  `ship.md`, and `verify.log`, then asks the configured `ask.agent` to answer
+  only from that packet.
   The live session transcript is kept
   only in process memory and is used for conversational references; saved task
   state and artifacts remain the factual evidence. Empty input or `/done` exits,
@@ -385,7 +383,7 @@ Beneath the whole tree sits one **global base**, `~/.factory/config.json` (or
 `$FACTORY_HOME/config.json` when `FACTORY_HOME` is set) — the **lowest priority**
 layer, applied to every repo regardless of where it lives, and overridden by any
 `.factory.json` in the cascade. Use it for machine-wide defaults (agents,
-`onComplete`, `retries`) so you don't repeat them per repo.
+`retries`) so you don't repeat them per repo.
 
 Fields:
 
@@ -429,31 +427,26 @@ Fields:
   same auto-fix loop. Text-grounded only — no rendering/screenshots.
 - **`plansDir`** — where the clean final plan per task is written, one file per
   task, no meta (default `.coding-agent-plans/`, committed as docs; `null` off).
-- **`onComplete`** — deliver each completed task via a **full-permission agent**.
-  `{ "skill": "name" }` runs that skill; `{ "policy": "text" }` follows a
-  free-text policy (opens MR/PR, iterates CI, replies to review). `null`
-  (default) = don't ship. Outward-facing, so opt-in; runs only after all gates
-  pass. Delivery failure is treated like a transient gate failure: the task is set
-  aside for auto-retry and only blocks after the auto-retry cap is spent. Examples —
+- **Delivery** is task-local, not static config. Before implementation, factory
+  chooses whether a completed task should stop after the local commit, run a named
+  delivery skill, or follow a one-off policy. The selector reads the task spec,
+  repo docs, available `.skills/*/SKILL.md` descriptions, and recent repo delivery
+  history; if unsure, it chooses `none`. Explicit directives like `$ship` or
+  `/ship` in `factory add` win and are stripped from the task text. Plain wording
+  like "open a PR and auto merge" can resolve to a matching skill when one exists.
+
+  Inspect or override a task with `factory delivery`: `factory delivery`, `factory
+  delivery none`, `factory delivery '$ship'`, or `factory delivery "open a PR and
+  do not merge"`. Delivery failure is treated like a transient gate failure: the task
+  is set aside for auto-retry and only blocks after the auto-retry cap is spent.
 
 Successful pipeline-completed tasks also get a local `feedback.md` handoff after
-optional delivery. This read-only feedback is always attempted, even when
-`onComplete` is disabled, and it summarizes the work plus concrete next
-verification steps. It is best-effort: a feedback failure logs a warning but never
-blocks `done`, telemetry, hooks, eval capture, or delivery behavior. `factory run`
-prints a bounded rendering of the handoff with `detail: factory show <task-id>`;
-`factory show <task-id>` displays the saved artifact.
-  `{"skill": "ship"}`, or
-  `{"policy": "open a GitLab MR, no reviewers, iterate CI to green, never merge"}`.
-
-  A task can override the configured default without editing `.factory.json`:
-  `factory config set on-complete "Make a GitHub PR, monitor CI, don't merge"`.
-  Run it from the worktree whose active task you want to change; if multiple
-  active tasks are ambiguous, pass `--task <id>`. `factory config get
-  on-complete` shows the selected task's override plus the effective delivery
-  value. `factory config unset on-complete` disables delivery for that task, and
-  `factory config inherit on-complete` clears the override so the cascaded config
-  applies again.
+optional delivery. This read-only feedback is always attempted, even when delivery
+is `none`, and it summarizes the work plus concrete next verification steps. It is
+best-effort: a feedback failure logs a warning but never blocks `done`, telemetry,
+hooks, eval capture, or delivery behavior. `factory run` prints a bounded rendering
+of the handoff with `detail: factory show <task-id>`; `factory show <task-id>`
+displays the saved artifact.
 - **`ask`** — which AI answers `factory ask` questions. This is separate from
   `agents.reviewer` because asking is about assembling the right saved context, not
   participating in the task pipeline. Shape:
@@ -467,7 +460,7 @@ prints a bounded rendering of the handoff with `detail: factory show <task-id>`;
   - `reviewer` — the fresh adversarial diff review, red-team security gate, risk
     assessment, and deploy-safety review
     (best a *different* model from the implementer, to avoid self-bias).
-  - `delivery` — runs `onComplete`.
+  - `delivery` — runs task-local delivery and completion handoffs.
 
   Each value is `"codex"` / `"claude"` or
   `{ "cli": "codex"|"claude", "model"?: "…", "provider"?: "…" }`.
@@ -598,7 +591,8 @@ or jump-target behavior you want.
   agent-session.md       # manifest for a realtime interactive agent tweak session
   agent-session.summary.md # optional summary from that interactive session
   postmortem.md          # blocked-task diagnosis, when enabled
-  ship.md                # delivery output, when onComplete is configured
+  delivery.md            # selector output for the task-local delivery decision
+  ship.md                # delivery output, when the task chooses a skill/policy
   *.activity.jsonl       # raw agent event streams beside agent-written artifacts
 ```
 
@@ -800,7 +794,7 @@ dollar figure, so there's no consistent number across both models.)
   `(done)` when the queue finishes.
 - ✅ **Meta loop:** `LESSONS.md` read into planning + `factory lessons`; SQLite
   telemetry via `factory report`.
-- ✅ **Ship:** opt-in `onComplete` delivery, validated against a real remote.
+- ✅ **Delivery:** task-local delivery selection, explicit skills, and history-backed defaults.
 
 ## Files
 
