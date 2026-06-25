@@ -3,7 +3,7 @@ import { readdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { agentLabel } from './agents.ts'
-import { configSources, globalConfigFile, type RepoContext, type WorkContext } from './config.ts'
+import { configSources, globalConfigFile, type WorkContext } from './config.ts'
 import { deliveryLabel } from './delivery.ts'
 import { currentBranch } from './git.ts'
 import { log } from './log.ts'
@@ -445,14 +445,15 @@ function durMs(ms: number | null): string {
   return h < 24 ? `${h}h${m % 60}m` : `${Math.floor(h / 24)}d`
 }
 
-export function formatReport(report: Report): string[] {
+export function formatReport(report: Report, taskId?: string): string[] {
   const lines: string[] = []
   const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
   const field = (name: string, val: string, note = '') =>
     lines.push(`  ${name.padEnd(16)} ${val}${note ? `   ${note}` : ''}`)
   const totalTokens = report.inputTokensTotal + report.outputTokensTotal
 
-  lines.push(`factory report — ${plural(report.tasks, 'task')} · ${plural(report.runs, 'run')}`)
+  const scope = taskId ? `task ${taskId}` : plural(report.tasks, 'task')
+  lines.push(`factory report — ${scope} · ${plural(report.runs, 'run')}`)
   lines.push('')
   field(
     'first-pass yield',
@@ -516,24 +517,28 @@ export function formatReport(report: Report): string[] {
 // The telemetry roll-up across all the repo's tasks (the "manage by numbers"
 // view). Reads the repo-level metrics db; degrades gracefully if it's missing or
 // unreadable — never the thing that fails.
-export function printReport(ctx: RepoContext): void {
+export function printReport(ctx: { metricsPath: string }, taskId?: string): void {
   if (!existsSync(ctx.metricsPath)) {
     log.info('no telemetry yet — run some tasks first')
     return
   }
   let report: Report | null
   try {
-    report = readReport(ctx.metricsPath)
+    report = readReport(ctx.metricsPath, taskId)
   } catch (err) {
     log.warn(`telemetry: could not read metrics — ${err instanceof Error ? err.message : err}`)
     log.info('the db rebuilds itself on the next task run')
     return
   }
   if (!report) {
-    log.info('no telemetry yet — run some tasks first')
+    log.info(
+      taskId
+        ? `no telemetry for ${taskId} yet — it hasn't completed a run`
+        : 'no telemetry yet — run some tasks first'
+    )
     return
   }
-  for (const line of formatReport(report)) {
+  for (const line of formatReport(report, taskId)) {
     log.log(line)
   }
 }

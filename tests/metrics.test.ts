@@ -117,4 +117,74 @@ describe('metrics report aggregation', () => {
       { stage: 'verify', inputTokens: 0, outputTokens: 0, totalTokens: 0, ms: 4_000 },
     ])
   })
+
+  test('scopes the report to a single task', async () => {
+    const path = await metricsPath()
+    recordRun(
+      path,
+      run({
+        task: 'task-a',
+        outcome: 'needs-input',
+        triage: 'complex',
+        retries: 0,
+        inTokens: 100,
+        outTokens: 50,
+        stages: [{ stage: 'plan', agent: 'codex', inTok: 100, outTok: 50, ms: 1_000 }],
+      })
+    )
+    recordRun(
+      path,
+      run({
+        task: 'task-a',
+        outcome: 'done',
+        triage: 'complex',
+        retries: 1,
+        inTokens: 1_000,
+        outTokens: 200,
+        stages: [{ stage: 'implement', agent: 'codex', inTok: 800, outTok: 150, ms: 4_000 }],
+      })
+    )
+    recordRun(
+      path,
+      run({
+        task: 'task-b',
+        outcome: 'done',
+        triage: 'complex',
+        retries: 0,
+        inTokens: 9_999,
+        outTokens: 9_999,
+        stages: [{ stage: 'plan', agent: 'claude', inTok: 9_999, outTok: 9_999, ms: 9_000 }],
+      })
+    )
+
+    const report = readReport(path, 'task-a')
+    if (!report) {
+      throw new Error('expected report')
+    }
+    // task-b's runs, tokens, and stages are excluded entirely.
+    expect(report.tasks).toBe(1)
+    expect(report.runs).toBe(2)
+    expect(report.inputTokensTotal).toBe(1_100)
+    expect(report.outputTokensTotal).toBe(250)
+    expect(report.retrySuccess).toBe(1)
+    expect(report.stages.map((s) => s.stage).sort()).toEqual(['implement', 'plan'])
+    expect(report.stages.find((s) => s.stage === 'plan')?.totalTokens).toBe(150)
+  })
+
+  test('returns null for a task with no telemetry', async () => {
+    const path = await metricsPath()
+    recordRun(
+      path,
+      run({
+        task: 'task-a',
+        outcome: 'done',
+        triage: null,
+        retries: 0,
+        inTokens: 10,
+        outTokens: 10,
+        stages: [],
+      })
+    )
+    expect(readReport(path, 'missing')).toBeNull()
+  })
 })

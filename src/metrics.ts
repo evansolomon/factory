@@ -195,56 +195,71 @@ function ratio(num: number, denom: number): number | null {
 // Read-side aggregation. Returns null if there's no db / no data yet. Unlike the
 // write path it does NOT reset on error (a report failing is recoverable and we
 // don't want a glitchy read to nuke real data) — it lets the caller handle it.
-export function readReport(path: string): Report | null {
+//
+// With `taskId`, every aggregate is scoped to that one task's runs (a task can
+// have several runs if it escalated and resumed); without it, the report rolls up
+// the whole repo. Each query carries the same single `?` filter so one bound
+// param works for both shapes.
+export function readReport(path: string, taskId?: string): Report | null {
   const db = new Database(path, { readonly: true })
   try {
-    const count = (sql: string): number => db.query<{ c: number }, []>(sql).get()?.c ?? 0
+    const p: string[] = taskId ? [taskId] : []
+    const and = taskId ? ' AND task = ?' : ''
+    const where = taskId ? ' WHERE task = ?' : ''
+    const count = (sql: string): number => db.query<{ c: number }, string[]>(sql).get(...p)?.c ?? 0
 
-    const runs = count('SELECT COUNT(*) c FROM runs')
+    const runs = count(`SELECT COUNT(*) c FROM runs${where}`)
     if (runs === 0) {
       return null
     }
 
-    const tasks = count('SELECT COUNT(DISTINCT task) c FROM runs')
+    const tasks = count(`SELECT COUNT(DISTINCT task) c FROM runs${where}`)
     const outcomes = db
-      .query<{ outcome: string; count: number }, []>(
-        'SELECT outcome, COUNT(*) count FROM runs GROUP BY outcome ORDER BY count DESC'
+      .query<{ outcome: string; count: number }, string[]>(
+        `SELECT outcome, COUNT(*) count FROM runs${where} GROUP BY outcome ORDER BY count DESC`
       )
-      .all()
-    const implementRuns = count("SELECT COUNT(*) c FROM runs WHERE outcome IN ('done','blocked')")
-    const firstPassDone = count("SELECT COUNT(*) c FROM runs WHERE outcome='done' AND retries=0")
-    const escalations = count("SELECT COUNT(*) c FROM runs WHERE outcome='needs-input'")
-    const escalatedTasks = count(
-      "SELECT COUNT(DISTINCT task) c FROM runs WHERE outcome='needs-input'"
+      .all(...p)
+    const implementRuns = count(
+      `SELECT COUNT(*) c FROM runs WHERE outcome IN ('done','blocked')${and}`
     )
-    const blockedRuns = count("SELECT COUNT(*) c FROM runs WHERE outcome='blocked'")
-    const retryRuns = count('SELECT COUNT(*) c FROM runs WHERE retries>0')
-    const retryDone = count("SELECT COUNT(*) c FROM runs WHERE retries>0 AND outcome='done'")
-    const inputTokensTotal = count('SELECT COALESCE(SUM(in_tokens),0) c FROM runs')
-    const outputTokensTotal = count('SELECT COALESCE(SUM(out_tokens),0) c FROM runs')
+    const firstPassDone = count(
+      `SELECT COUNT(*) c FROM runs WHERE outcome='done' AND retries=0${and}`
+    )
+    const escalations = count(`SELECT COUNT(*) c FROM runs WHERE outcome='needs-input'${and}`)
+    const escalatedTasks = count(
+      `SELECT COUNT(DISTINCT task) c FROM runs WHERE outcome='needs-input'${and}`
+    )
+    const blockedRuns = count(`SELECT COUNT(*) c FROM runs WHERE outcome='blocked'${and}`)
+    const retryRuns = count(`SELECT COUNT(*) c FROM runs WHERE retries>0${and}`)
+    const retryDone = count(`SELECT COUNT(*) c FROM runs WHERE retries>0 AND outcome='done'${and}`)
+    const inputTokensTotal = count(`SELECT COALESCE(SUM(in_tokens),0) c FROM runs${where}`)
+    const outputTokensTotal = count(`SELECT COALESCE(SUM(out_tokens),0) c FROM runs${where}`)
 
     const perTask = db
-      .query<{ t: number }, []>('SELECT SUM(in_tokens+out_tokens) t FROM runs GROUP BY task')
-      .all()
+      .query<{ t: number }, string[]>(
+        `SELECT SUM(in_tokens+out_tokens) t FROM runs${where} GROUP BY task`
+      )
+      .all(...p)
       .map((r) => r.t)
+    // Stages have no task column, so a scoped report joins back to runs to filter.
     const stages = db
-      .query<ReportStage, []>(
+      .query<ReportStage, string[]>(
         `SELECT
            stage,
-           COALESCE(SUM(in_tokens), 0) inputTokens,
-           COALESCE(SUM(out_tokens), 0) outputTokens,
-           COALESCE(SUM(in_tokens + out_tokens), 0) totalTokens,
-           COALESCE(SUM(ms), 0) ms
-         FROM stages
+           COALESCE(SUM(stages.in_tokens), 0) inputTokens,
+           COALESCE(SUM(stages.out_tokens), 0) outputTokens,
+           COALESCE(SUM(stages.in_tokens + stages.out_tokens), 0) totalTokens,
+           COALESCE(SUM(stages.ms), 0) ms
+         FROM stages${taskId ? ' JOIN runs ON runs.id = stages.run_id WHERE runs.task = ?' : ''}
          GROUP BY stage
          ORDER BY totalTokens DESC, stage ASC`
       )
-      .all()
+      .all(...p)
     const cycles = db
-      .query<{ created_at: string; ts: string }, []>(
-        "SELECT created_at, ts FROM runs WHERE outcome='done' AND created_at IS NOT NULL"
+      .query<{ created_at: string; ts: string }, string[]>(
+        `SELECT created_at, ts FROM runs WHERE outcome='done' AND created_at IS NOT NULL${and}`
       )
-      .all()
+      .all(...p)
       .map((r) => new Date(r.ts).getTime() - new Date(r.created_at).getTime())
       .filter((ms) => Number.isFinite(ms) && ms >= 0)
 
