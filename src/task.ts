@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { z } from 'zod'
 import type { WorkContext } from './config.ts'
-import { type TaskOnComplete, TaskOnCompleteSchema } from './on-complete.ts'
+import { type TaskDelivery, TaskDeliverySchema } from './delivery.ts'
 
 // A task is a directory under <dir>/tasks/<id>/ containing:
 //   task.md   — human-owned intent (free-form markdown; what sharpening enriches)
@@ -97,9 +97,9 @@ const MetaSchema = z.object({
   autoRetries: z.number().int().default(0),
   // Explicit complexity declared by `factory add`; null means runtime triage decides.
   complexity: TaskComplexitySchema.nullable().default(null),
-  // Task-local delivery override. "inherit" uses config.onComplete; other modes let
-  // a running factory change just this task without editing config files.
-  onComplete: TaskOnCompleteSchema,
+  // Task-local delivery decision. Pending tasks choose delivery before implementation
+  // using repo context, available skills, history, and the task spec.
+  delivery: TaskDeliverySchema.default({ mode: 'pending' }),
   // Human feedback recorded after progress exists. Counted separately from answers
   // so the conductor can consume feedback only after a verified commit.
   feedbackCount: z.number().int().nonnegative().default(0),
@@ -154,6 +154,7 @@ export type AddTaskOptions = {
   status?: Status
   sharpen?: SharpenState
   complexity?: TaskComplexity | null
+  delivery?: TaskDelivery
   feedbackSourceTaskId?: string | null
 }
 
@@ -212,7 +213,7 @@ export async function addTask(
     retryAt: null,
     autoRetries: 0,
     complexity: options.complexity ?? null,
-    onComplete: { mode: 'inherit' },
+    delivery: options.delivery ?? { mode: 'pending' },
     feedbackCount: 0,
     feedbackConsumed: 0,
     feedbackSourceTaskId: options.feedbackSourceTaskId ?? null,
@@ -350,12 +351,12 @@ export async function refreshMeta(task: Task): Promise<void> {
   task.meta = await readMeta(task.dir)
 }
 
-export async function setTaskOnComplete(task: Task, onComplete: TaskOnComplete): Promise<void> {
+export async function setTaskDelivery(task: Task, delivery: TaskDelivery): Promise<void> {
   const latest = await readMeta(task.dir)
-  latest.onComplete = onComplete
+  latest.delivery = delivery
   latest.updatedAt = new Date().toISOString()
   task.meta = latest
-  await writeMeta(task.dir, latest, { preserveOnComplete: false })
+  await writeMeta(task.dir, latest, { preserveDelivery: false })
 }
 
 export async function findTask(ctx: WorkContext, query: string): Promise<Task | null> {
@@ -513,11 +514,11 @@ async function readMeta(dir: string): Promise<Meta> {
 async function writeMeta(
   dir: string,
   meta: Meta,
-  opts: { preserveOnComplete?: boolean } = {}
+  opts: { preserveDelivery?: boolean } = {}
 ): Promise<void> {
   const nextMeta =
-    opts.preserveOnComplete !== false && (await Bun.file(`${dir}/meta.json`).exists())
-      ? { ...meta, onComplete: (await readMeta(dir)).onComplete }
+    opts.preserveDelivery !== false && (await Bun.file(`${dir}/meta.json`).exists())
+      ? { ...meta, delivery: (await readMeta(dir)).delivery }
       : meta
   const finalPath = `${dir}/meta.json`
   const tmpPath = `${dir}/.meta.${process.pid}.${Date.now()}.tmp`

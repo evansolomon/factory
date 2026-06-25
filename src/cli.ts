@@ -15,6 +15,13 @@ import {
   loadRepoContext,
   type WorkContext,
 } from './config.ts'
+import {
+  type DeliverySkill,
+  deliveryLabel,
+  extractDeliveryDirective,
+  listDeliverySkills,
+  type TaskDelivery,
+} from './delivery.ts'
 import { composeInEditor, openEditor } from './editor.ts'
 import { captureCorrection, captureEvalCase } from './evals.ts'
 import {
@@ -29,7 +36,6 @@ import { emit, type Hooks } from './hooks.ts'
 import { parseInputArgs, resolveMessage } from './input.ts'
 import { readCandidates, readLessons } from './lessons.ts'
 import { log } from './log.ts'
-import { onCompleteLabel, resolveOnComplete, taskOnCompleteLabel } from './on-complete.ts'
 import { startPromptWorker } from './prompt.ts'
 import { sharpen } from './sharpen.ts'
 import {
@@ -48,7 +54,7 @@ import {
   readPlan,
   saveMeta,
   setStatus,
-  setTaskOnComplete,
+  setTaskDelivery,
   type Task,
 } from './task.ts'
 import { upgradeFactory } from './upgrade.ts'
@@ -74,7 +80,9 @@ COMMANDS
       stdin (multi-line specs). --verify is for newly queued tasks only.
       For new tasks, the running loop triages and sharpens non-trivial pending
       intents. --raw skips sharpening; --trivial / --complexity also use the
-      declared runtime complexity instead of triage.
+      declared runtime complexity instead of triage. A directive like $ship or
+      /ship maps to a repo skill when present; plain delivery wording is resolved
+      by the run loop before implementation.
 
   factory run [--once | --drain] [--no-prompt]
       Work the queue. Default: stay running and pick up tasks as they're added
@@ -126,6 +134,9 @@ COMMANDS
                            Open an interactive agent session seeded with saved
                            task artifacts. Defaults to codex + latest done task.
                            Shortcuts: factory codex [task-id], factory claude [task-id].
+  factory delivery [--task <id>] [none | '$skill' | /skill | <policy...>]
+                           Show or set the task-local completion action. Omit the
+                           value to inspect it; use none to stop after local commit.
   factory show [task-id] [step]  Drill into one task (defaults to the latest here);
                              with a step (e.g. implement, review, plan.codex), show
                              that step's line-by-line agent activity. A lone step
@@ -133,14 +144,6 @@ COMMANDS
   factory report              Telemetry across all the repo's tasks: first-pass yield,
                            escalation/blocked rate, cost, where the tokens go.
   factory lessons             Curated lessons (LESSONS.md) + raw candidates.
-  factory config set [--task <id>] on-complete "<instructions>"
-                           Set task-local delivery instructions for the active task.
-  factory config get [--task <id>] on-complete
-                           Show the active task's override and effective delivery.
-  factory config unset [--task <id>] on-complete
-                           Disable delivery for the active task.
-  factory config inherit [--task <id>] on-complete
-                           Clear the task-local override and use config.onComplete.
   factory config [edit [--global|--worktree|--repo-parent|--dir <dir>]]
                            Show effective config + where it's set; edit opens the
                            global config by default; flags target another layer.
@@ -152,7 +155,7 @@ COMMANDS
 HOW A TASK FLOWS
   ready → plan (codex + claude) → cross-critique → reconcile
         → [pause & ask you, if ambiguous] → implement → review → verify
-        → commit → [ship, if configured]
+        → commit → [deliver, if selected]
   A failed gate auto-fixes and retries (config.retries) in-run before escalating.
   A transient verify/ship failure is then auto-resumed on a backoff; a review or
   review-panel block (or an exhausted retry budget) escalates: it shows in 'factory
@@ -199,11 +202,6 @@ CONFIG (.factory.json — cascades up the dir tree, closest wins)
             reference diff), so a regression set accrues from use. default true.
   postmortem  on a block, diagnose the root cause (writes postmortem.md) and
             distill a generalizable lesson candidate. default true.
-  onComplete  deliver each done task via a full-permission agent. {"skill":
-            "name"} runs a skill; {"policy":"text"} follows a policy (open MR/PR,
-            iterate CI, reply to review). null (default) = don't ship.
-            A running task can override it with:
-            factory config set on-complete "Make a PR, monitor CI, don't merge"
   ask       {"agent": "claude"} configures the AI used by 'factory ask'. This is
             separate from agents.reviewer; ask is context-building over saved task
             state, not a review pipeline role.
@@ -261,6 +259,7 @@ function queuedSuffix(opts: {
   verify: string | null
   complexity: ParsedAddOptions['complexity']
   sharpenPending: boolean
+  delivery: TaskDelivery
 }): string {
   const parts = []
   if (opts.complexity) {
@@ -271,6 +270,9 @@ function queuedSuffix(opts: {
   }
   if (opts.sharpenPending) {
     parts.push('sharpen pending')
+  }
+  if (opts.delivery.mode !== 'pending') {
+    parts.push(`delivery: ${deliveryLabel(opts.delivery)}`)
   }
   return parts.length > 0 ? ` (${parts.join(', ')})` : ''
 }
@@ -292,20 +294,11 @@ async function maybeSharpen(
 }
 
 type AlertState = 'blocked' | 'needs-input' | 'done'
-type TaskConfigKey = 'on-complete'
-type ParseTaskFlagResult =
+type ParseTaskTargetResult =
   | { ok: true; args: string[]; taskQuery: string | null }
   | { ok: false; message: string }
 
-const TASK_CONFIG_KEYS: TaskConfigKey[] = ['on-complete']
-
-function invalidTaskConfigKey(key: string | null): string {
-  return key
-    ? `invalid config key: ${key}\nvalid keys: ${TASK_CONFIG_KEYS.join(', ')}`
-    : `invalid config key\nvalid keys: ${TASK_CONFIG_KEYS.join(', ')}`
-}
-
-function parseTaskFlag(args: string[]): ParseTaskFlagResult {
+function parseTaskTarget(args: string[], usage: string): ParseTaskTargetResult {
   const cleaned: string[] = []
   let taskQuery: string | null = null
   for (let i = 0; i < args.length; i++) {
@@ -319,10 +312,10 @@ function parseTaskFlag(args: string[]): ParseTaskFlagResult {
     }
     const next = args[i + 1]
     if (!next || next.startsWith('--')) {
-      return { ok: false, message: 'usage: factory config set --task <id> on-complete "..."' }
+      return { ok: false, message: usage }
     }
     if (taskQuery) {
-      return { ok: false, message: 'usage: factory config set --task <id> on-complete "..."' }
+      return { ok: false, message: usage }
     }
     taskQuery = next
     i++
@@ -330,7 +323,7 @@ function parseTaskFlag(args: string[]): ParseTaskFlagResult {
   return { ok: true, args: cleaned, taskQuery }
 }
 
-async function inferTaskConfigTarget(ctx: WorkContext, taskQuery: string | null): Promise<Task> {
+async function inferTaskTarget(ctx: WorkContext, taskQuery: string | null): Promise<Task> {
   if (taskQuery) {
     const task = await findTask(ctx, taskQuery)
     if (!task) {
@@ -358,101 +351,49 @@ async function inferTaskConfigTarget(ctx: WorkContext, taskQuery: string | null)
   throw new Error(`multiple active tasks; retry with --task <id>\nactive tasks: ${choices}`)
 }
 
-async function setTaskConfig(ctx: WorkContext, args: string[]): Promise<number> {
-  const parsed = parseTaskFlag(args)
-  if (!parsed.ok) {
-    log.fail(parsed.message)
-    return 1
-  }
-  const [key, ...valueParts] = parsed.args
-  if (!key) {
-    log.fail(invalidTaskConfigKey(null))
-    return 1
-  }
-  if (key !== 'on-complete') {
-    log.fail(invalidTaskConfigKey(key))
-    return 1
-  }
-  const policy = valueParts.join(' ').trim()
-  if (!policy) {
-    log.fail('invalid on-complete value\nusage: factory config set on-complete "<instructions>"')
-    return 1
-  }
-  try {
-    const task = await inferTaskConfigTarget(ctx, parsed.taskQuery)
-    await setTaskOnComplete(task, { mode: 'policy', policy })
-    log.ok(`${task.id}: on-complete set`)
-    return 0
-  } catch (err) {
-    log.fail(err instanceof Error ? err.message : String(err))
-    return 1
-  }
-}
-
-async function getTaskConfig(ctx: WorkContext, args: string[]): Promise<number> {
-  const parsed = parseTaskFlag(args)
-  if (!parsed.ok) {
-    log.fail(parsed.message)
-    return 1
-  }
-  const [key, ...extra] = parsed.args
-  if (!key) {
-    log.fail(invalidTaskConfigKey(null))
-    return 1
-  }
-  if (key !== 'on-complete') {
-    log.fail(invalidTaskConfigKey(key))
-    return 1
-  }
-  if (extra.length > 0) {
-    log.fail('invalid on-complete value\nusage: factory config get on-complete')
-    return 1
-  }
-  try {
-    const task = await inferTaskConfigTarget(ctx, parsed.taskQuery)
-    const effective = resolveOnComplete(task.meta.onComplete, ctx.config.onComplete)
-    log.log(`task: ${task.id}`)
-    log.log(`override: ${taskOnCompleteLabel(task.meta.onComplete)}`)
-    log.log(`effective: ${onCompleteLabel(effective)}`)
-    return 0
-  } catch (err) {
-    log.fail(err instanceof Error ? err.message : String(err))
-    return 1
-  }
-}
-
-async function updateTaskConfigMode(
-  ctx: WorkContext,
-  args: string[],
-  mode: 'disabled' | 'inherit',
-  verb: 'unset' | 'inherit'
-): Promise<number> {
-  const parsed = parseTaskFlag(args)
-  if (!parsed.ok) {
-    log.fail(parsed.message)
-    return 1
-  }
-  const [key, ...extra] = parsed.args
-  if (!key) {
-    log.fail(invalidTaskConfigKey(null))
-    return 1
-  }
-  if (key !== 'on-complete') {
-    log.fail(invalidTaskConfigKey(key))
-    return 1
-  }
-  if (extra.length > 0) {
-    log.fail(`invalid on-complete value\nusage: factory config ${verb} on-complete`)
-    return 1
-  }
-  try {
-    const task = await inferTaskConfigTarget(ctx, parsed.taskQuery)
-    if (mode === 'disabled') {
-      await setTaskOnComplete(task, { mode: 'disabled' })
-    } else {
-      await setTaskOnComplete(task, { mode: 'inherit' })
+function manualDelivery(value: string, skills: DeliverySkill[]): TaskDelivery {
+  const lower = value.toLowerCase()
+  if (lower === 'none' || lower === 'disabled' || lower === 'off') {
+    return {
+      mode: 'none',
+      source: 'manual',
+      confidence: 'high',
+      reason: 'User manually disabled delivery.',
     }
-    log.ok(`${task.id}: on-complete ${verb === 'unset' ? 'disabled' : 'inherited'}`)
+  }
+  const explicit = extractDeliveryDirective(value, skills).delivery
+  if (explicit?.mode === 'skill') {
+    return { ...explicit, source: 'manual', reason: `User manually requested ${value}.` }
+  }
+  return {
+    mode: 'policy',
+    policy: value,
+    source: 'manual',
+    confidence: 'high',
+    reason: 'User manually set a delivery policy.',
+  }
+}
+
+async function taskDelivery(ctx: WorkContext, args: string[]): Promise<number> {
+  const usage = "usage: factory delivery [--task <id>] [none | '$skill' | /skill | <policy...>]"
+  const parsed = parseTaskTarget(args, usage)
+  if (!parsed.ok) {
+    log.fail(parsed.message)
+    return 1
+  }
+  try {
+    const task = await inferTaskTarget(ctx, parsed.taskQuery)
+    const value = parsed.args.join(' ').trim()
+    if (value) {
+      await setTaskDelivery(task, manualDelivery(value, await listDeliverySkills(ctx.root)))
+      log.ok(`${task.id}: delivery set to ${deliveryLabel(task.meta.delivery)}`)
+      return 0
+    }
+    log.log(`task: ${task.id}`)
+    log.log(`delivery: ${deliveryLabel(task.meta.delivery)}`)
+    if (task.meta.delivery.mode !== 'pending' && task.meta.delivery.reason) {
+      log.log(`reason: ${task.meta.delivery.reason}`)
+    }
     return 0
   } catch (err) {
     log.fail(err instanceof Error ? err.message : String(err))
@@ -520,14 +461,17 @@ async function queueNewTask(
   // intents. --raw, a declared complexity, or piped input all skip that sharpen
   // pre-stage — and a declared complexity also skips runtime triage.
   const skipSharpen = options.raw || options.complexity !== null || !process.stdin.isTTY
-  const task = await addTask(ctx, base.intent, base.verify, {
+  const directed = extractDeliveryDirective(base.intent, await listDeliverySkills(ctx.root))
+  const task = await addTask(ctx, directed.intent, base.verify, {
     sharpen: skipSharpen ? 'skipped' : 'pending',
     complexity: options.complexity,
+    delivery: directed.delivery ?? { mode: 'pending' },
   })
   const suffix = queuedSuffix({
     verify: base.verify,
     complexity: task.meta.complexity,
     sharpenPending: task.meta.sharpen === 'pending',
+    delivery: task.meta.delivery,
   })
   log.ok(`queued ${task.id}${suffix}`)
 }
@@ -991,6 +935,11 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     return openAgentSession(ctx, rest, { commandName: 'session' })
   }
 
+  if (cmd === 'delivery') {
+    const ctx = await loadContext(process.cwd())
+    return taskDelivery(ctx, rest)
+  }
+
   if (cmd === 'codex' || cmd === 'claude') {
     const ctx = await loadContext(process.cwd())
     return openAgentSession(ctx, rest, { defaultAgent: cmd, commandName: cmd })
@@ -998,17 +947,9 @@ export async function main(opts: MainOptions = {}): Promise<number> {
 
   if (cmd === 'config') {
     const ctx = await loadContext(process.cwd())
-    if (rest[0] === 'set') {
-      return setTaskConfig(ctx, rest.slice(1))
-    }
-    if (rest[0] === 'get') {
-      return getTaskConfig(ctx, rest.slice(1))
-    }
-    if (rest[0] === 'unset') {
-      return updateTaskConfigMode(ctx, rest.slice(1), 'disabled', 'unset')
-    }
-    if (rest[0] === 'inherit') {
-      return updateTaskConfigMode(ctx, rest.slice(1), 'inherit', 'inherit')
+    if (['set', 'get', 'unset', 'inherit'].includes(rest[0] ?? '')) {
+      log.fail('task delivery moved out of config; use: factory delivery [--task <id>] ...')
+      return 1
     }
     if (rest[0] === 'edit') {
       const dirFlag = rest.indexOf('--dir')

@@ -14,6 +14,7 @@ const ARTIFACT_ORDER = [
   'meta.json',
   'feedback.md',
   'human-feedback.md',
+  'delivery.md',
   'plan.md',
   'plan.final.md',
   'risk.plan.md',

@@ -47,6 +47,7 @@ its own agents must follow when the repo is the target.
 - **Marker-line contract.** Read-only stages output *only* markdown (saved verbatim
   as the artifact). Stages the conductor parses must keep their exact marker lines:
   `DECISION: PROCEED|ASK`, `COMPLEXITY: TRIVIAL|COMPLEX`, `USER-FACING: YES|NO`,
+  `DELIVERY: NONE|SKILL|POLICY`,
   `VERDICT: PASS|FAIL`,
   `VERDICT: CONTINUE_CODE_FIX|RETRY_LATER|ASK_HUMAN|TERMINAL`,
   `SHIP: OK|FAILED`, `SPEC READY`, `SHARPEN: PASS|REVISE`, and

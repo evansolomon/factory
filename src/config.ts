@@ -1,7 +1,6 @@
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { mainWorktreeRoot, repoRoot } from './git.ts'
-import { OnCompleteSchema } from './on-complete.ts'
 
 // An agent is a CLI, optionally pinned to a model. Accepts a bare "codex"/
 // "claude" or { cli, model } in config; normalized to Agent everywhere else.
@@ -46,7 +45,8 @@ function normAgent(spec: AgentSpec): Agent {
 
 // Which agents play which role. planners is the ensemble (≥2 → cross-critique);
 // implementer also runs triage/reconcile/select; reviewer does the adversarial
-// review; delivery runs onComplete. Each defaults independently when omitted.
+// review; delivery runs task-local delivery. Each defaults independently when
+// omitted.
 const AgentsSchema = z.object({
   planners: z.array(AgentSpecSchema).default((): AgentSpec[] => ['codex', 'claude']),
   implementer: AgentSpecSchema.default('codex'),
@@ -124,11 +124,6 @@ const ConfigSchema = z.object({
   // self-unblocks instead of burning the fix budget re-implementing code that was
   // never the problem. false = a verify failure always routes to the code-fix loop.
   remediate: z.boolean().default(true),
-  // What to do when a task completes (opt-in; a full-permission agent runs it).
-  //   { "skill": "name" }  → run that skill
-  //   { "policy": "text" } → follow a free-text delivery policy
-  //   null (default)       → nothing; you push manually
-  onComplete: OnCompleteSchema.nullable().default(null),
   // Lifecycle hooks: event name → shell commands run when factory reaches that
   // event (see hooks.ts). Lets the surrounding environment react — tmux, desktop
   // notifications, dashboards — without factory knowing about it. Concatenated
@@ -252,6 +247,11 @@ export async function loadConfig(root: string): Promise<Config> {
     }
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       throw new ConfigError(`invalid config\n\n  ${path}: expected a JSON object`)
+    }
+    if ('onComplete' in raw) {
+      throw new ConfigError(
+        `invalid config\n\n  ${path}: onComplete was removed; use task-local factory delivery`
+      )
     }
 
     let hooks: Record<string, string[]> | null = null
