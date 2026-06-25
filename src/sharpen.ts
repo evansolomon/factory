@@ -126,6 +126,12 @@ export function formatQuestions(preamble: string, questions: Question[]): string
   return [preamble.trim(), ...lines].filter(Boolean).join('\n\n')
 }
 
+export function formatQuestionAnswer(question: Question, answer: string): string {
+  return [`Q: ${question.q}`, question.rec ? `Recommended: ${question.rec}` : '', `A: ${answer}`]
+    .filter(Boolean)
+    .join('\n')
+}
+
 export function parseFormattedQuestions(text: string): { preamble: string; questions: Question[] } {
   const preamble: string[] = []
   const questions: Question[] = []
@@ -196,10 +202,10 @@ async function readQuestionAnswers(
       return { kind: 'finish' }
     }
     if (input === '/skip') {
-      answered.push(`Q: ${q}\nA: (skipped)`)
+      answered.push(formatQuestionAnswer({ q, rec }, '(skipped)'))
       continue
     }
-    answered.push(`Q: ${q}\nA: ${input || rec || '(no preference)'}`)
+    answered.push(formatQuestionAnswer({ q, rec }, input || rec || '(no preference)'))
   }
   return { kind: 'answers', text: answered.join('\n\n') }
 }
@@ -384,7 +390,9 @@ async function finalizeReviewed(
       role: 'human',
       text:
         'Use the spec reviewer recommended answers for these unresolved decisions:\n\n' +
-        review.questions.map((q) => `Q: ${q.q}\nA: ${q.rec || '(no preference)'}`).join('\n\n'),
+        review.questions
+          .map((q) => formatQuestionAnswer(q, q.rec || '(no preference)'))
+          .join('\n\n'),
     })
     return await finalize(opts, turns, tally)
   }

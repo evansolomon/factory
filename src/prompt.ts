@@ -13,7 +13,7 @@ import { createInterface, type Interface } from 'node:readline'
 import type { WorkContext } from './config.ts'
 import { composeInEditor } from './editor.ts'
 import { log, setActivePrompt } from './log.ts'
-import { parseFormattedQuestions, type Question } from './sharpen.ts'
+import { formatQuestionAnswer, parseFormattedQuestions, type Question } from './sharpen.ts'
 import { BOLD, RESET, renderAgentMarkdown, styleSharpenMarkdownLine } from './sharpen-render.ts'
 import { appendAnswer, loadTasks, setStatus, type Task } from './task.ts'
 
@@ -156,7 +156,7 @@ async function readQuestionAnswers(
     if (reply.kind === 'defer') {
       return reply
     }
-    answered.push(`Q: ${q}\nA: ${reply.text}`)
+    answered.push(formatQuestionAnswer({ q, rec }, reply.text))
   }
   return { kind: 'answer', text: answered.join('\n\n') }
 }
