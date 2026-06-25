@@ -52,6 +52,30 @@ suppresses further automatic checks for 7 days and continues the original
 command. Accepting runs the same in-place upgrade flow as `factory upgrade`,
 then exits; rerun the original command under the new binary.
 
+### Shell completion (zsh)
+
+The installer does not edit `.zshrc` or other shell startup files. To enable zsh
+completion for the current shell after `compinit` has run:
+
+```bash
+source <(factory completion zsh)
+```
+
+For a persistent user-owned install:
+
+```bash
+mkdir -p ~/.zsh/completions
+factory completion zsh > ~/.zsh/completions/_factory
+```
+
+Then add the completions directory before `compinit` in `.zshrc`:
+
+```zsh
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit
+compinit
+```
+
 You can also run from a clone:
 
 ```bash
@@ -213,6 +237,7 @@ factory lessons                                    # curated lessons + raw candi
 factory config [edit ...]                           # show/edit effective config defaults
 factory version | --version                         # print the current CLI version
 factory upgrade                                     # install the latest GitHub Release
+factory completion zsh                              # print the zsh completion script
 ```
 
 - **`factory run`** is **long-lived by default**: when the queue drains it polls

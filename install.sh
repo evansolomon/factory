@@ -49,3 +49,4 @@ mkdir -p "${install_dir}"
 mv "${tmp}" "${install_dir}/factory"
 
 echo "installed factory to ${install_dir}/factory"
+echo "enable zsh tab completion (optional): factory completion zsh  # see README"

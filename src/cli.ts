@@ -6,6 +6,7 @@ import { openAgentSession } from './agent-session.ts'
 import { askFactory } from './ask.ts'
 import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
 import { addBacklog, loadBacklog, removeBacklog } from './backlog.ts'
+import { runCompletion } from './completion.ts'
 import { AUTO_CAP, runTask, type TaskOutcome } from './conductor.ts'
 import {
   type Agent,
@@ -153,6 +154,7 @@ COMMANDS
   factory upgrade                Update factory to the latest GitHub release.
                                Installed builds also check weekly and prompt
                                before interactive commands; FACTORY_DISABLE_AUTO_UPGRADE=1 opts out.
+  factory completion zsh         Print the zsh completion script (see README to enable).
 
 HOW A TASK FLOWS
   ready → plan (codex + claude) → cross-critique → reconcile
@@ -226,6 +228,7 @@ type MainOptions = {
   argv?: string[]
   autoUpgrade?: (opts: { command: string }) => Promise<AutoUpgradeResult>
   upgrade?: () => Promise<number>
+  completion?: (args: string[]) => number
 }
 
 function parseAdd(args: string[]): { intent: string; verify: string | null } {
@@ -493,6 +496,10 @@ export async function main(opts: MainOptions = {}): Promise<number> {
 
   if (cmd === 'upgrade') {
     return await (opts.upgrade ?? upgradeFactory)()
+  }
+
+  if (cmd === 'completion') {
+    return (opts.completion ?? runCompletion)(rest)
   }
 
   const autoUpgrade = await (opts.autoUpgrade ?? maybeAutoUpgrade)({ command: cmd })
