@@ -1,9 +1,8 @@
 # factory
 
-A self-improving, looping coding agent. You queue tasks; `factory` drains them
-autonomously — planning with a **codex + claude ensemble**, implementing,
-adversarially reviewing, verifying, and committing — and pauses to ask you a
-question only when it genuinely can't proceed.
+A self-improving, looping coding agent. You run one workstream in a git worktree;
+`factory` turns the current task into a plan, implementation, review, verification,
+and commit — and pauses to ask you a question only when it genuinely can't proceed.
 
 Built to run one instance per git worktree (a "fleet"), each in its own tmux
 window. Factory emits lifecycle and attention hooks; your environment decides
@@ -104,10 +103,17 @@ run `bun run fix` to autofix.
 
 ## Mental model
 
-Your job is to **feed vetted tasks faster than `factory` drains them** — shovel
-coal into a running engine. `factory`'s job is everything after: turn each task
-into a good plan, build it, prove it, commit it. The one place it pulls you back
-in is when a task is genuinely ambiguous — it asks, you answer, it keeps going.
+Your job is to **keep each factory pointed at the right next piece of work**.
+`factory`'s job is everything after: turn the current task into a good plan, build
+it, prove it, commit it. The one place it pulls you back in is when that task is
+genuinely ambiguous — it asks, you answer, it keeps going.
+
+The durable state still uses task directories. Treat those as task records:
+artifact boundaries for plans, answers, retries, feedback, proof, and history.
+In normal fleet usage, each worktree is a single-lane workstream and usually has
+one active task. Multiple queued task records remain supported for set-aside
+answers, retries, linked follow-ups, and deliberate batching, but they are no
+longer the primary mental model.
 
 There is **one phase, not two.** Refinement isn't a separate planning session;
 it's `factory` pausing mid-cycle to ask. "Good enough, proceed" is the default —
@@ -212,8 +218,9 @@ decisions only you can make. The bar is deliberately tunable in the prompt; if i
 asks too much or too little, that's the prompt to adjust (and a `LESSONS.md`
 candidate — see Meta).
 
-A `needs-input` task is **set aside, not blocking** — `factory` keeps going on other
-ready tasks (never idle). You answer async; the running instance picks it back up.
+A `needs-input` task is **set aside, not blocking**. If you deliberately queued
+other ready work in this worktree, `factory` can keep going; otherwise it waits
+for your answer and picks the task back up.
 
 ## Usage
 
@@ -221,7 +228,7 @@ ready tasks (never idle). You answer async; the running instance picks it back u
 
 ```bash
 factory add [--raw] [--trivial | --complexity trivial|complex] "<intent...>" [--verify "<cmd...>"]   # tell this workstream something
-factory run [--once|--drain]                       # process tasks
+factory run [--once|--drain]                       # process the workstream
 factory retry [task-id] [-m "<note>" | --edit]     # pick a blocked task back up where it left off
 factory feedback [task-id] [-m "<feedback>" | --edit]  # critique existing progress, generalized on next pass
 factory correct [task-id] [-m "<note>" | --edit]   # record your manual fix of a blocked task as a lesson
@@ -241,7 +248,7 @@ factory upgrade                                     # install the latest GitHub 
 factory completion zsh                              # print the zsh completion script
 ```
 
-- **`factory run`** is **long-lived by default**: when the queue drains it polls
+- **`factory run`** is **long-lived by default**: when the stream is idle it polls
   (every 5s) instead of exiting, so tasks added later (`factory add`), unblocked
   later (`factory retry`), **due for an auto-retry**, or **stranded
   mid-stage by a killed loop** (Ctrl-C/crash) get picked up automatically — so
@@ -257,7 +264,9 @@ factory completion zsh                              # print the zsh completion s
   `--raw` skips sharpening only — it does not declare runtime complexity.
 - **`factory add`** is state-aware. It answers a `needs-input` task, records
   feedback on active progress, queues a linked follow-up for completed work, retries
-  blocked/retrying work, or creates a new task when there is no current work.
+  blocked/retrying work, or creates a new task when there is no current work. If
+  you queue a second fresh task in the same worktree, factory warns but allows it;
+  one active task per worktree keeps provenance easiest to reason about.
 - **`factory retry`** (for **blocked**) **reuses** the saved plan + the diff
   already in the worktree and re-enters at the stage that failed — no re-planning.
   Omit the id for the latest blocked/retrying task (or one stranded mid-stage by a
@@ -372,7 +381,7 @@ factory is environment-agnostic: it emits lifecycle [hooks](#hooks) and writes i
 state to files. *How* you spawn loops and surface their state is yours to wire —
 here's the pattern that works well (tmux).
 
-**One loop per worktree.** Run each task stream in its own git worktree, each as a
+**One loop per worktree.** Run each workstream in its own git worktree, each as a
 long-lived `factory run` in its own tmux window — a "fleet." Spawn them however you
 already create worktrees; the only requirement is the window ends up running
 `factory run`. Nice touch: open `$EDITOR` for the first task as the window opens
@@ -645,7 +654,9 @@ dirty worktree and it does not try to split preexisting hunks from agent-created
 hunks before committing. At task start it writes `baseline.patch`; when the
 worktree was already dirty, review prompts include that baseline so reviewers can
 see what existed before this run. For the cleanest provenance, run one task per
-worktree and start from a clean tree.
+worktree and start from a clean tree. The plural task directories are still the
+right durable model: they preserve history, set-aside questions, retries,
+follow-ups, and crash recovery without making the active workstream ambiguous.
 
 ## Meta loop and learned lessons
 

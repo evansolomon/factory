@@ -76,9 +76,10 @@ import { printConfig, printReport, printShow, printStatus } from './view.ts'
 
 const HELP = `factory — a self-improving coding loop.
 
-Queue tasks in a git worktree; work plans, implements, reviews, verifies, and
-commits each one autonomously — pausing to ask you only when a task is genuinely
-ambiguous. Run one instance per worktree (a fleet) and triage via tmux.
+Run a single-lane workstream in a git worktree. You tell the factory what to do;
+it plans, implements, reviews, verifies, and commits autonomously — pausing to ask
+you only when the current task is genuinely ambiguous. Run one instance per
+worktree (a fleet) and triage via tmux.
 
 COMMANDS
   factory backlog [add|rm] …    Experimental repo-level backlog of vetted intents.
@@ -98,17 +99,17 @@ COMMANDS
       by the run loop before implementation.
 
   factory run [--once | --drain] [--no-prompt]
-      Work the queue. Default: stay running and pick up tasks as they're added
+      Work the stream. Default: stay running and pick up tasks as they're added
       (factory add), unblocked (factory retry), due for an auto-retry, or
       stranded mid-stage by a previously killed loop (Ctrl-C/crash) — shovel coal
       into the engine. So restarting after a Ctrl-C just resumes the interrupted
       task. A transient gate failure (verify/ship) is set aside and AUTO-RESUMED on
       a backoff (up to a cap) before it truly blocks, so env/CI flakes recover with
       no action from you. In watch mode on a terminal it also prompts you inline for
-      needs-input answers (no need to switch terminals); the loop keeps working
-      other tasks while a prompt is open.
+      needs-input answers (no need to switch terminals); set-aside work can still
+      be resumed later.
         --once       do one ready task, then exit (good for trying it out)
-        --drain      work until the queue is empty, then exit
+        --drain      work until the stream is idle, then exit
         --no-prompt  don't prompt inline; needs-input waits for factory add
 
   factory retry [task-id] [-m <note> | --edit]
@@ -190,12 +191,11 @@ TYPICAL USE
       factory add "Add retry to the upload client" --verify "bun test upload"
       factory run --once
 
-  Run a continuous loop and feed it (the usual fleet mode):
+  Run a continuous workstream and feed it (the usual fleet mode):
       factory run                    # in a worktree; leave it running, then walk away
-      factory add "Another task..."  # from anywhere; the running loop picks it up
+      factory add "..."              # answer, feedback, follow-up, or new work
       factory ask "has ship ran?"    # ask, then keep the session open for follow-ups
       factory session --agent claude # realtime tweak session for the latest done task
-      factory add "..."              # answer, feedback, or follow-up for current work
       factory retry                  # pick a blocked task back up where it left off
 
   Run one loop per git worktree (each in its own tmux window) for a fleet; wire a
@@ -682,11 +682,13 @@ function addOptionsRequireNewTask(options: ParsedAddOptions): string | null {
 async function queueNewTask(
   ctx: WorkContext,
   base: { intent: string; verify: string | null },
-  options: ParsedAddOptions
+  options: ParsedAddOptions,
+  existingFreshTaskIds: string[] = []
 ): Promise<void> {
-  // factory add only enqueues new work; the run loop sharpens non-trivial pending
-  // intents. --raw, a declared complexity, or piped input all skip that sharpen
-  // pre-stage — and a declared complexity also skips runtime triage.
+  // factory add only enqueues a new task record when there is no current work; the
+  // run loop sharpens non-trivial pending intents. --raw, a declared complexity, or
+  // piped input all skip that sharpen pre-stage — and a declared complexity also
+  // skips runtime triage.
   const skipSharpen = options.raw || options.complexity !== null || !process.stdin.isTTY
   const directed = extractDeliveryDirective(base.intent, await listDeliverySkills(ctx.root))
   const task = await addTask(ctx, directed.intent, base.verify, {
@@ -701,6 +703,15 @@ async function queueNewTask(
     delivery: task.meta.delivery,
   })
   log.ok(`queued ${task.id}${suffix}`)
+  if (existingFreshTaskIds.length > 0) {
+    const count = existingFreshTaskIds.length
+    const plural = count === 1 ? '' : 's'
+    log.warn(
+      `this factory already has ${count} fresh queued task${plural}: ` +
+        existingFreshTaskIds.join(', ')
+    )
+    log.info('one task per worktree keeps the workstream and commit provenance clean')
+  }
 }
 
 export async function main(opts: MainOptions = {}): Promise<number> {
@@ -742,9 +753,16 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     }
     const ctx = await loadContext(process.cwd())
     const tasks = await loadTasks(ctx)
-    const route = selectAddRoute(await addRouteTasks(tasks), await hasChanges(ctx.root))
+    const routeTasks = await addRouteTasks(tasks)
+    const route = selectAddRoute(routeTasks, await hasChanges(ctx.root))
     if (route.kind === 'new-task') {
-      await queueNewTask(ctx, base, parsed.options)
+      const existingFreshTaskIds = routeTasks
+        .filter(
+          (task) =>
+            task.status === 'ready' && !task.hasPlan && !task.hasCommit && !task.pendingFeedback
+        )
+        .map((task) => task.id)
+      await queueNewTask(ctx, base, parsed.options, existingFreshTaskIds)
       return 0
     }
     const newTaskOnlyError = addOptionsRequireNewTask(parsed.options)
@@ -863,10 +881,9 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     )
 
     // In the long-lived watch mode, when someone is at the terminal, prompt for
-    // needs-input answers inline. The worker runs concurrently — the loop keeps
-    // working other tasks while a prompt is open. Bounded runs (--once/--drain) and
-    // non-TTY/piped runs keep the set-aside + state-aware `factory add` behavior;
-    // opt out with --no-prompt.
+    // needs-input answers inline. Bounded runs (--once/--drain) and non-TTY/piped
+    // runs keep the set-aside + state-aware `factory add` behavior; opt out with
+    // --no-prompt.
     const interactive = !once && !drain && process.stdin.isTTY && !rest.includes('--no-prompt')
     if (interactive) {
       startPromptWorker(ctx)

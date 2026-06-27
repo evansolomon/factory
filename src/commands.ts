@@ -152,11 +152,11 @@ export const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: 'run',
-    description: 'Work the queue',
+    description: 'Work the stream',
     autoUpgrade: true,
     options: [
       { name: '--once', description: 'Do one ready task, then exit' },
-      { name: '--drain', description: 'Work until the queue is empty, then exit' },
+      { name: '--drain', description: 'Work until the stream is idle, then exit' },
       { name: '--no-prompt', description: 'Do not prompt inline for answers' },
     ],
   },
