@@ -76,7 +76,10 @@ function itemPath(id: string): string {
 }
 
 function sortNewest(records: GuidanceRecord[]): GuidanceRecord[] {
-  return [...records].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  return [...records].sort((a, b) => {
+    const updatedOrder = b.updatedAt.localeCompare(a.updatedAt)
+    return updatedOrder === 0 ? a.id.localeCompare(b.id) : updatedOrder
+  })
 }
 
 function errorCode(err: unknown): string | null {
