@@ -16,6 +16,7 @@ import {
   loadRepoContext,
   type WorkContext,
 } from './config.ts'
+import { openDeck } from './deck.ts'
 import {
   type DeliverySkill,
   deliveryLabel,
@@ -146,6 +147,10 @@ COMMANDS
                            Open an interactive agent session seeded with saved
                            task artifacts. Defaults to codex + latest done task.
                            Shortcuts: factory codex [task-id], factory claude [task-id].
+  factory deck [task-id] [--url]
+                         Open the visual one-page brief for a done task.
+                         Defaults to the latest done task; --url prints the
+                         file URL instead.
   factory delivery [--task <id>] [none | '$skill' | /skill | <policy...>]
                            Show or set the task-local completion action. Omit the
                            value to inspect it; use none to stop after local commit.
@@ -931,6 +936,9 @@ export async function main(opts: MainOptions = {}): Promise<number> {
             log.log(line)
           }
         }
+        if (await readArtifact(task, 'brief.html')) {
+          log.log(`brief: factory deck ${task.id}`)
+        }
       } else if (outcome.kind === 'needs-input') {
         await setStatus(task, 'needs-input', 'awaiting answer — see questions.md')
         await emit(ctx.root, ctx.config.hooks, 'task.needs_input', { task: task.id })
@@ -1159,6 +1167,11 @@ export async function main(opts: MainOptions = {}): Promise<number> {
   if (cmd === 'session') {
     const ctx = await loadContext(process.cwd())
     return openAgentSession(ctx, rest, { commandName: 'session' })
+  }
+
+  if (cmd === 'deck') {
+    const ctx = await loadContext(process.cwd())
+    return openDeck(ctx, rest)
   }
 
   if (cmd === 'delivery') {

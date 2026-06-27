@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { type AgentResult, agentLabel, runAgent } from './agents.ts'
 import type { Agent, WorkContext } from './config.ts'
+import { buildDeckHtml } from './deck.ts'
 import {
   appendDeliveryHistory,
   deliveryAction,
@@ -34,6 +35,7 @@ import {
   consolidatePrompt,
   convergePrompt,
   critiquePrompt,
+  deckPrompt,
   deliverySelectPrompt,
   deploySafetyPrompt,
   feedbackAnalysisPrompt,
@@ -1652,6 +1654,44 @@ async function writeCompletionFeedback(ctx: WorkContext, task: Task, intent: str
   }
 }
 
+async function writeCompletionDeck(ctx: WorkContext, task: Task, intent: string, meter: Meter) {
+  try {
+    await progress(ctx, task, 'deck', 'building brief')
+    const diff = task.meta.commit ? await commitDiff(ctx.root, task.meta.commit) : null
+    const html = await buildDeckHtml(async () =>
+      agentStep(
+        meter,
+        'deck',
+        agentLabel(ctx.agents.delivery),
+        runAgent(ctx.agents.delivery, {
+          root: ctx.root,
+          prompt: deckPrompt({
+            taskId: task.id,
+            intent: clipFeedbackInput(intent) ?? '',
+            finalPlan: clipFeedbackInput(await readPlan(task)),
+            verify: task.meta.verify,
+            diff: clipFeedbackInput(diff),
+            proof: clipFeedbackInput(await readArtifact(task, 'proof.md')),
+            verifyLog: clipFeedbackInput(await readArtifact(task, 'verify.log')),
+            ship: clipFeedbackInput(await readArtifact(task, 'ship.md')),
+            feedback: clipFeedbackInput(await readArtifact(task, 'feedback.md')),
+          }),
+          access: 'read',
+        }),
+        'brief'
+      )
+    )
+    if (!html) {
+      log.warn(`${task.id}: deck unavailable (task still done) - no valid HTML produced`)
+      return
+    }
+    await writeArtifact(task, 'brief.html', html)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    log.warn(`${task.id}: deck unavailable (task still done) - ${message}`)
+  }
+}
+
 async function shipAndFinish(
   ctx: WorkContext,
   task: Task,
@@ -1706,6 +1746,7 @@ async function shipAndFinish(
   }
 
   await writeCompletionFeedback(ctx, task, intent, meter)
+  await writeCompletionDeck(ctx, task, intent, meter)
   try {
     await appendDeliveryHistory(ctx, task, 'done')
   } catch (err) {

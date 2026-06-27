@@ -74,6 +74,8 @@ describe('buildAgentSessionHandoff', () => {
     const task = await addTask(ctx, 'Tweak the completed UI', 'bun test')
     task.meta.status = 'done'
     task.meta.commit = 'abc1234'
+    await writeArtifact(task, 'feedback.md', '## Summary\nDone.')
+    await writeArtifact(task, 'brief.html', '<!doctype html>\n<html></html>')
     await writeArtifact(task, 'plan.md', 'Use the existing component.')
     await writeArtifact(task, 'verify.log', '$ bun test\npassed')
     await writeArtifact(task, 'implement.activity.jsonl', '{"type":"turn.completed"}')
@@ -94,6 +96,8 @@ describe('buildAgentSessionHandoff', () => {
     expect(handoff.content).toContain('- agent: claude')
     expect(handoff.content).toContain('- commit: abc1234')
     expect(handoff.content).toContain(`- task.md: ${task.dir}/task.md`)
+    expect(handoff.content).toContain(`- feedback.md: ${task.dir}/feedback.md`)
+    expect(handoff.content).toContain(`- brief.html: ${task.dir}/brief.html`)
     expect(handoff.content).toContain(`- plan.md: ${task.dir}/plan.md`)
     expect(handoff.content).toContain(`- verify.log: ${task.dir}/verify.log`)
     expect(handoff.content).toContain(
@@ -101,6 +105,10 @@ describe('buildAgentSessionHandoff', () => {
     )
     expect(handoff.content).not.toContain('agent-session.summary.md:')
     expect(handoff.content).not.toContain('ship.md:')
+    expect(handoff.content.indexOf('feedback.md:')).toBeLessThan(
+      handoff.content.indexOf('brief.html:')
+    )
+    expect(handoff.content.indexOf('brief.html:')).toBeLessThan(handoff.content.indexOf('plan.md:'))
     expect(await Bun.file(handoff.artifact).text()).toBe(handoff.content)
   })
 })

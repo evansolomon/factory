@@ -401,6 +401,11 @@ export async function printShow(ctx: WorkContext, query?: string, step?: string)
     }
   }
 
+  if (await fileText(task, 'brief.html')) {
+    log.log('')
+    log.log(`brief available: factory deck ${m.id}`)
+  }
+
   if (m.status === 'done' && m.commit) {
     log.log('')
     log.log(`## Committed as ${m.commit}`)
