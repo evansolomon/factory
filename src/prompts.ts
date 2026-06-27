@@ -440,6 +440,10 @@ export type FeedbackPromptInput = {
   ship: string | null
 }
 
+export type DeckPromptInput = FeedbackPromptInput & {
+  feedback: string | null
+}
+
 function optionalFeedbackBlock(label: string, text: string | null): string {
   return text ? `\n\n## ${label}\n${text}` : ''
 }
@@ -479,6 +483,51 @@ ${input.intent}${verifyLine}${optionalFeedbackBlock('Final plan', input.finalPla
   'Verify log',
   input.verifyLog
 )}${optionalFeedbackBlock('Delivery output', input.ship)}`
+}
+
+export function deckPrompt(input: DeckPromptInput): string {
+  const verifyLine = input.verify
+    ? `\n\nThe exact verification command that already passed is: \`${input.verify}\`. Put that command in the header and verification section.`
+    : '\n\nNo verification command is recorded for this task. Say that plainly if it matters.'
+
+  return `Create a visual one-page HTML brief for a successfully completed factory task.
+
+Output one complete HTML document only.
+
+Hard output requirements:
+- Start with exactly \`<!doctype html>\`.
+- Do not wrap the document in markdown fences.
+- Inline CSS is allowed.
+- Do not load external CSS or JavaScript, except optional Mermaid 11 from jsDelivr when a diagram makes the work easier to understand.
+- The page must be self-contained enough to open from a local \`file://\` URL.
+
+Content requirements:
+- Use a stable top header with the task id, a one-line intent/result, and the exact verification command when known.
+- Make the page visually scannable and color-coded.
+- Include concise sections for what changed, how to verify, risks to inspect, and useful artifacts or commands.
+- Use Mermaid only when it clarifies the actual completed work.
+- Ground every claim in the task intent, final plan, committed diff, proof, verify output, delivery output, or feedback handoff.
+
+Safety and fidelity rules:
+- Do not paste raw diffs, raw logs, secrets, or large blobs.
+- Do not invent URLs, UI paths, commands, deployment status, or manual checks.
+- Do not make ungrounded deployment claims.
+- Do not include marker lines or parser contracts.
+
+## Task id
+${input.taskId}
+
+## Task intent
+${input.intent}${verifyLine}${optionalFeedbackBlock('Final plan', input.finalPlan)}${optionalFeedbackBlock(
+  'Committed diff',
+  input.diff
+)}${optionalFeedbackBlock('Proof artifact', input.proof)}${optionalFeedbackBlock(
+  'Verify log',
+  input.verifyLog
+)}${optionalFeedbackBlock('Delivery output', input.ship)}${optionalFeedbackBlock(
+  'Feedback handoff',
+  input.feedback
+)}`
 }
 
 // Used on a retry after a gate (review or verify) failed: feed the failure and

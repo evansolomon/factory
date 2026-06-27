@@ -7,7 +7,7 @@ import {
   latestFeedbackTarget,
   renderTerminalFeedback,
 } from '../src/feedback.ts'
-import { feedbackPrompt } from '../src/prompts.ts'
+import { deckPrompt, feedbackPrompt } from '../src/prompts.ts'
 import type { Task } from '../src/task.ts'
 import { SHOW_ARTIFACTS } from '../src/view.ts'
 
@@ -66,6 +66,50 @@ describe('feedbackPrompt', () => {
   })
 })
 
+describe('deckPrompt', () => {
+  test('states the HTML document contract and guardrails', () => {
+    const prompt = deckPrompt({
+      taskId: 'brief-task',
+      intent: 'Build a completion brief',
+      finalPlan: 'Generate brief.html beside feedback.md.',
+      verify: 'bun run test',
+      diff: 'diff --git a/src/deck.ts b/src/deck.ts',
+      proof: '`bun run test` passed',
+      verifyLog: '$ bun run test\nok',
+      ship: 'SHIP: OK',
+      feedback: '## Summary\nBuilt the deck command.',
+    })
+
+    expect(prompt).toContain('Output one complete HTML document only.')
+    expect(prompt).toContain('Start with exactly `<!doctype html>`.')
+    expect(prompt).toContain('Do not wrap the document in markdown fences.')
+    expect(prompt).toContain('optional Mermaid 11 from jsDelivr')
+    expect(prompt).toContain('Do not paste raw diffs, raw logs, secrets, or large blobs.')
+    expect(prompt).toContain('stable top header with the task id')
+    expect(prompt).toContain(
+      'The exact verification command that already passed is: `bun run test`'
+    )
+    expect(prompt).toContain('## Feedback handoff')
+    expect(prompt).toContain('Built the deck command.')
+  })
+
+  test('omits the optional feedback block when absent', () => {
+    const prompt = deckPrompt({
+      taskId: 'no-feedback',
+      intent: 'Build a completion brief',
+      finalPlan: null,
+      verify: null,
+      diff: null,
+      proof: null,
+      verifyLog: null,
+      ship: null,
+      feedback: null,
+    })
+
+    expect(prompt).not.toContain('## Feedback handoff')
+  })
+})
+
 describe('renderTerminalFeedback', () => {
   test('preserves a normal handoff and appends the show pointer', () => {
     const lines = renderTerminalFeedback(
@@ -110,6 +154,7 @@ describe('SHOW_ARTIFACTS', () => {
     const names = SHOW_ARTIFACTS.map(([name]) => name)
 
     expect(names.indexOf('feedback.md')).toBeLessThan(names.indexOf('plan.final.md'))
+    expect(names).not.toContain('brief.html')
   })
 })
 

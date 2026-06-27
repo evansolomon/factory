@@ -79,6 +79,7 @@ describe('auto-upgrade eligibility', () => {
       'claude',
       'config',
       'show',
+      'deck',
       'lessons',
       'report',
     ]
@@ -425,6 +426,21 @@ describe('auto-upgrade release check and prompt', () => {
 })
 
 describe('cli auto-upgrade placement', () => {
+  test('help lists the deck command', async () => {
+    const lines: string[] = []
+    const original = log.log
+    log.log = (message: string) => {
+      lines.push(message)
+    }
+    try {
+      expect(await main({ argv: ['help'] })).toBe(0)
+    } finally {
+      log.log = original
+    }
+
+    expect(lines.join('\n')).toContain('factory deck [task-id] [--url]')
+  })
+
   test('help, no command, version, and explicit upgrade return before auto-upgrade', async () => {
     let autoCalls = 0
     const autoUpgrade = async (): Promise<AutoUpgradeResult> => {

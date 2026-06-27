@@ -231,6 +231,7 @@ factory status                                     # catch-up dashboard
 factory ask [task-id] ["<question...>"]            # interactive Q&A over saved task state
 factory ask --print [task-id] "<question...>"      # one-shot/scriptable saved-state answer
 factory session [--agent codex|claude] [task-id]   # realtime agent tweak session from task artifacts
+factory deck [task-id] [--url]                      # open the visual one-page brief for a done task
 factory show [task-id] [step]                       # drill into one task / a step's activity
 factory report                                     # telemetry roll-up (manage by numbers)
 factory lessons                                    # curated lessons + raw candidates
@@ -294,9 +295,13 @@ factory completion zsh                              # print the zsh completion s
   `agent-session.summary.md` before exiting. This is an escape hatch for
   human-in-the-loop editing; it does not change task status or route work back
   through the autonomous loop.
+- **`factory deck [task-id] [--url]`** opens the visual `brief.html` generated for
+  a successful `done` task. With no id it targets the latest `done` task in this
+  worktree. `--url` prints the local `file://` URL instead of opening a browser.
 - **`factory show`** displays the saved completion feedback near the top when a
   done task has `feedback.md`, followed by the plan, review, verify, delivery, and
-  activity artifacts.
+  activity artifacts. If `brief.html` exists, it prints the `factory deck` command
+  instead of rendering the HTML inline.
 
 ### Recovery & auto-resume
 
@@ -465,13 +470,14 @@ Fields:
   do not merge"`. Delivery failure is treated like a transient gate failure: the task
   is set aside for auto-retry and only blocks after the auto-retry cap is spent.
 
-Successful pipeline-completed tasks also get a local `feedback.md` handoff after
-optional delivery. This read-only feedback is always attempted, even when delivery
-is `none`, and it summarizes the work plus concrete next verification steps. It is
-best-effort: a feedback failure logs a warning but never blocks `done`, telemetry,
-hooks, eval capture, or delivery behavior. `factory run` prints a bounded rendering
-of the handoff with `detail: factory show <task-id>`; `factory show <task-id>`
-displays the saved artifact.
+Successful pipeline-completed tasks also get local completion artifacts after
+optional delivery: `feedback.md` for the concise markdown handoff, and best-effort
+`brief.html` for a visual one-page brief. Both are attempted even when delivery is
+`none`, and failures log warnings without blocking `done`, telemetry, hooks, eval
+capture, or delivery behavior. `factory run` prints a bounded rendering of the
+handoff with `detail: factory show <task-id>` and, when a brief exists,
+`brief: factory deck <task-id>`. `factory show <task-id>` displays the saved
+markdown artifacts and points to the brief.
 - **`ask`** — which AI answers `factory ask` questions. This is separate from
   `agents.reviewer` because asking is about assembling the right saved context, not
   participating in the task pipeline. Shape:
@@ -613,6 +619,7 @@ or jump-target behavior you want.
   remediate[.N].md       # verify-failure doctor: diagnosis + env repair, when it runs
   proof.md               # pass proof written before commit
   feedback.md            # completion handoff on success: summary + next verification steps
+  brief.html             # visual one-page completion brief on success, best-effort
   agent-session.md       # manifest for a realtime interactive agent tweak session
   agent-session.summary.md # optional summary from that interactive session
   postmortem.md          # blocked-task diagnosis, when enabled

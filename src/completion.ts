@@ -107,6 +107,7 @@ export function renderZshCompletionScript(): string {
   const backlogAdd = mustSubcommandSpec('backlog', 'add')
   const ask = mustCommandSpec('ask')
   const session = mustCommandSpec('session')
+  const deck = mustCommandSpec('deck')
   const config = mustCommandSpec('config')
   const configSet = mustSubcommandSpec('config', 'set')
   const configEdit = mustSubcommandSpec('config', 'edit')
@@ -131,6 +132,7 @@ export function renderZshCompletionScript(): string {
     renderChoiceArray('_factory_backlog_add_options', optionChoices(backlogAdd.options)),
     renderChoiceArray('_factory_ask_options', optionChoices(ask.options)),
     renderChoiceArray('_factory_session_options', optionChoices(session.options)),
+    renderChoiceArray('_factory_deck_options', optionChoices(deck.options)),
     renderChoiceArray('_factory_config_subcommands', subcommandChoices(config.subcommands)),
     renderChoiceArray('_factory_config_set_options', optionChoices(configSet.options)),
     renderChoiceArray('_factory_config_keys', TASK_CONFIG_KEY_CHOICES),
@@ -189,6 +191,9 @@ export function renderZshCompletionScript(): string {
     '          ;;',
     '        show)',
     "          _describe -t steps 'factory step' _factory_show_steps",
+    '          ;;',
+    '        deck)',
+    '          _factory_describe_current_options _factory_deck_options',
     '          ;;',
     '        completion)',
     "          _describe -t shells 'shell' _factory_completion_shells",

@@ -188,6 +188,17 @@ export const COMMANDS: readonly CommandSpec[] = [
     autoUpgrade: true,
     subcommands: SHOW_STEP_CHOICES,
   },
+  {
+    name: 'deck',
+    description: 'Open the visual one-page brief for a done task',
+    autoUpgrade: true,
+    options: [
+      {
+        name: '--url',
+        description: 'Print the deck file URL instead of opening a browser',
+      },
+    ],
+  },
   { name: 'report', description: 'Telemetry roll-up', autoUpgrade: true },
   { name: 'lessons', description: 'Curated lessons and raw candidates', autoUpgrade: true },
   { name: 'version', description: 'Print the current CLI version', autoUpgrade: false },
@@ -235,6 +246,7 @@ const AUTO_UPGRADE_COMMAND_ORDER = [
   'claude',
   'config',
   'show',
+  'deck',
   'lessons',
   'report',
 ] as const

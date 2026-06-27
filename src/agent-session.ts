@@ -13,6 +13,7 @@ const ARTIFACT_ORDER = [
   'task.md',
   'meta.json',
   'feedback.md',
+  'brief.html',
   'human-feedback.md',
   'delivery.md',
   'plan.md',
