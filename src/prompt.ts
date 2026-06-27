@@ -95,11 +95,13 @@ async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
     }
     if (reply.kind === 'defer') {
       deferred.add(task.id)
+      setActivePrompt(null)
       log.info(`  deferred — answer later with: factory add "…"`)
       return
     }
     await appendAnswer(task, reply.text)
     await setStatus(task, 'ready')
+    setActivePrompt(null)
     log.ok(`${task.id}: answered, back in queue`)
   } finally {
     setActivePrompt(null)
