@@ -64,12 +64,18 @@ async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
   const parsed = questionsText ? parseFormattedQuestions(questionsText) : null
   log.log('')
   log.warn(`${task.id} needs input:`)
+  const skipDefers = isDeliveryConfirmationPrompt(task, Boolean(parsed?.questions.length))
   if (parsed?.questions.length) {
     if (parsed.preamble) {
       log.log(renderAgentMarkdown(parsed.preamble))
     }
-    log.info('  Enter accepts a recommendation · /skip a question · /edit for a long reply')
-    log.info('  /defer to answer later with `factory add`')
+    if (skipDefers) {
+      log.info('  Enter accepts a recommendation · /edit for a long reply')
+      log.info('  /skip or /defer to answer later with `factory add`')
+    } else {
+      log.info('  Enter accepts a recommendation · /skip a question · /edit for a long reply')
+      log.info('  /defer to answer later with `factory add`')
+    }
   } else if (questionsText) {
     log.log(questionsText)
     log.info('  type your answer · /edit for a long reply · /skip to defer to `factory add`')
@@ -89,6 +95,7 @@ async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
         setLabel: (next) => {
           label = next
         },
+        skipDefers,
       })
     } else {
       reply = await readAnswer(rl, label, pinPrompt)
@@ -110,6 +117,10 @@ async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
 }
 
 type Answer = { kind: 'defer' } | { kind: 'answer'; text: string }
+
+export function isDeliveryConfirmationPrompt(task: Task, hasFormattedQuestions: boolean): boolean {
+  return hasFormattedQuestions && Boolean(task.meta.deliveryProposal)
+}
 
 // One answer: a line of text answers, /edit composes a long reply in $EDITOR,
 // /skip defers. An empty line re-prompts rather than recording a blank answer.
@@ -142,7 +153,7 @@ async function readQuestionAnswers(
   rl: Interface,
   taskId: string,
   questions: Question[],
-  prompt: { pinPrompt: () => void; setLabel: (label: string) => void }
+  prompt: { pinPrompt: () => void; setLabel: (label: string) => void; skipDefers: boolean }
 ): Promise<Answer> {
   const answered: string[] = []
   for (let qi = 0; qi < questions.length; qi++) {
@@ -154,7 +165,7 @@ async function readQuestionAnswers(
     const label = `answer ${taskId} (${qi + 1}/${questions.length})> `
     prompt.setLabel(label)
     prompt.pinPrompt()
-    const reply = await readQuestionAnswer(rl, label, rec, prompt.pinPrompt)
+    const reply = await readQuestionAnswer(rl, label, rec, prompt.pinPrompt, prompt.skipDefers)
     if (reply.kind === 'defer') {
       return reply
     }
@@ -167,7 +178,8 @@ async function readQuestionAnswer(
   rl: Interface,
   label: string,
   recommendation: string,
-  pinPrompt: () => void
+  pinPrompt: () => void,
+  skipDefers: boolean
 ): Promise<Answer> {
   while (true) {
     const input = (await ask(rl, label)).trim()
@@ -175,6 +187,9 @@ async function readQuestionAnswer(
       return { kind: 'defer' }
     }
     if (input === '/skip') {
+      if (skipDefers) {
+        return { kind: 'defer' }
+      }
       return { kind: 'answer', text: '(skipped)' }
     }
     if (input === '/edit') {

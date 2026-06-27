@@ -179,6 +179,7 @@ function task(id: string, updatedAt: string, overrides: Partial<Task['meta']> = 
       autoRetries: 0,
       complexity: null,
       delivery: { mode: 'pending' },
+      deliveryProposalAt: null,
       feedbackCount: 0,
       feedbackConsumed: 0,
       feedbackSourceTaskId: null,

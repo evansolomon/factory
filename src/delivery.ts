@@ -61,6 +61,75 @@ export function deliveryLabel(delivery: TaskDelivery): string {
   }
 }
 
+export function parseManualDelivery(value: string, skills: DeliverySkill[]): TaskDelivery {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    throw new Error('delivery value is required')
+  }
+
+  const lower = trimmed.toLowerCase()
+  if (lower === 'none' || lower === 'disabled' || lower === 'off') {
+    return {
+      mode: 'none',
+      source: 'manual',
+      confidence: 'high',
+      reason: 'User manually disabled delivery.',
+    }
+  }
+
+  const explicit = extractDeliveryDirective(trimmed, skills).delivery
+  if (explicit?.mode === 'skill') {
+    return { ...explicit, source: 'manual', reason: `User manually requested ${trimmed}.` }
+  }
+
+  return {
+    mode: 'policy',
+    policy: trimmed,
+    source: 'manual',
+    confidence: 'high',
+    reason: 'User manually set a delivery policy.',
+  }
+}
+
+export function deliveryNeedsConfirmation(delivery: TaskDelivery): boolean {
+  return (delivery.mode === 'skill' || delivery.mode === 'policy') && delivery.source === 'selected'
+}
+
+export function deliveryRecommendation(delivery: TaskDelivery): string | null {
+  switch (delivery.mode) {
+    case 'pending':
+      return null
+    case 'none':
+      return 'none'
+    case 'skill':
+      return `$${delivery.skill}`
+    case 'policy':
+      return delivery.policy
+  }
+}
+
+export function applyDeliveryConfirmation(input: {
+  proposed: TaskDelivery
+  answer: string | null
+  skills: DeliverySkill[]
+}): TaskDelivery | null {
+  const answer = input.answer?.trim()
+  if (!answer) {
+    return null
+  }
+
+  const lower = answer.toLowerCase()
+  if (lower === '(skipped)' || lower === '(no preference)') {
+    return null
+  }
+
+  if (answer === deliveryRecommendation(input.proposed)) {
+    return input.proposed
+  }
+
+  return parseManualDelivery(answer, input.skills)
+}
+
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
