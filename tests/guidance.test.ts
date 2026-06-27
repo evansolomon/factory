@@ -10,6 +10,7 @@ import {
   findGuidance,
   type GuidanceRecord,
   GuidanceRecordSchema,
+  GuidanceStageSchema,
   listGuidance,
   loadGuidance,
   renderGuidanceBlock,
@@ -110,6 +111,10 @@ async function writeRecord(home: string, value: GuidanceRecord): Promise<void> {
 }
 
 describe('guidance storage', () => {
+  test('stage schema accepts prototype', () => {
+    expect(GuidanceStageSchema.safeParse('prototype').success).toBe(true)
+  })
+
   test('missing guidance dir returns an empty list', async () => {
     await withFactoryHome(async () => {
       expect(await loadGuidance()).toEqual([])

@@ -47,6 +47,7 @@ import {
   planPrompt,
   planRiskPrompt,
   postmortemPrompt,
+  prototypePrompt,
   reconcilePrompt,
   remediatePrompt,
   researchPrompt,
@@ -62,6 +63,12 @@ import {
   uxPlanCritiquePrompt,
   uxReviewPrompt,
 } from './prompts.ts'
+import {
+  PROTOTYPE_RAW,
+  prototypeContext,
+  writePrototypeFallback,
+  writePrototypeOutput,
+} from './prototype.ts'
 import {
   formatQuestions,
   parseQuestions,
@@ -1071,6 +1078,56 @@ async function selectTaskDelivery(
   log.info(`${task.id}: delivery — ${selection.delivery.mode}`)
 }
 
+async function runPrototypeStage(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  intent: string,
+  finalPlan: string,
+  riskAssessment: string | null,
+  guidance: string | null
+): Promise<void> {
+  try {
+    await progress(ctx, task, 'prototype', 'prototype — checking whether an artifact helps')
+    const output = await agentStep(
+      meter,
+      'prototype',
+      agentLabel(ctx.agents.implementer),
+      runAgent(ctx.agents.implementer, {
+        root: ctx.root,
+        prompt: prototypePrompt(intent, finalPlan, riskAssessment, guidance),
+        access: 'read',
+        outFile: `${task.dir}/${PROTOTYPE_RAW}`,
+      })
+    )
+    const result = await writePrototypeOutput(task, output)
+    if (result.decision === 'created') {
+      log.info(`${task.id}: prototype available — ${result.artifact}`)
+      log.info(`${task.id}: prototype URL — ${result.url}`)
+    } else if (result.decision === 'fallback') {
+      log.warn(`${task.id}: prototype output malformed (${result.reason}); saved prototype.md`)
+    } else {
+      log.info(`${task.id}: prototype skipped — ${result.reason}`)
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    log.warn(`${task.id}: prototype unavailable — ${message}`)
+    try {
+      await writePrototypeFallback(
+        task,
+        `Prototype stage failed before producing a usable artifact.\n\n${message}`,
+        message
+      )
+    } catch (writeErr) {
+      log.warn(
+        `${task.id}: prototype fallback write failed — ${
+          writeErr instanceof Error ? writeErr.message : writeErr
+        }`
+      )
+    }
+  }
+}
+
 // Run a single task. A trivial task (per triage or declared metadata) takes the fast
 // path — straight to implement — while a complex one goes through the full planning ensemble.
 // Both are then reviewed, verified, committed, and delivered according to task state.
@@ -1108,6 +1165,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   let resumeNote: string | null = null
   let finalPlan: string
   let riskAssessment: string | null = null
+  let shouldPrototype = false
   if (resuming) {
     finalPlan = (await readPlan(task)) ?? intent
     riskAssessment = await readArtifact(task, 'risk.plan.md')
@@ -1201,6 +1259,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           outFile: `${task.dir}/risk.plan.md`,
         })
       )
+      shouldPrototype = true
     }
 
     // Write the clean final plan to the committed plans dir under a descriptive,
@@ -1232,9 +1291,22 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     await writeArtifact(task, 'plan.md', finalPlan)
   }
 
+  if (shouldPrototype) {
+    await runPrototypeStage(
+      ctx,
+      task,
+      meter,
+      intent,
+      finalPlan,
+      riskAssessment,
+      stageGuidance('prototype')
+    )
+  }
+
   await selectTaskDelivery(ctx, task, meter, intent, verify, finalPlan)
 
   const feedbackContext = await analyzeFeedbackIfPending(ctx, task, meter, intent, finalPlan)
+  const prototype = await prototypeContext(task)
 
   // A resume whose work already committed only has delivery left — skip the build.
   if (resuming && task.meta.commit) {
@@ -1308,7 +1380,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             userFacing,
             riskAssessment,
             stageGuidance('fix'),
-            feedbackContext?.analysis ?? null
+            feedbackContext?.analysis ?? null,
+            prototype
           )
         : implementPrompt(
             intent,
@@ -1317,7 +1390,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             userFacing,
             riskAssessment,
             stageGuidance('implement'),
-            feedbackContext?.analysis ?? null
+            feedbackContext?.analysis ?? null,
+            prototype
           )
       await agentStep(
         meter,

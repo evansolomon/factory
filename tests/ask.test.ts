@@ -11,6 +11,7 @@ import {
   runAskSession,
 } from '../src/ask.ts'
 import type { Agent, Config, RoleAgents, WorkContext } from '../src/config.ts'
+import { writePrototypeOutput } from '../src/prototype.ts'
 import { addTask } from '../src/task.ts'
 
 const config: Config = {
@@ -178,6 +179,38 @@ describe('answerAskQuestion', () => {
 
     expect(prompts[0]).toContain('Human: what about epsilon?')
     expect(prompts[0]).toContain(`### ${carried.id}/meta.json`)
+  })
+
+  test('selected artifact excerpts include compact prototype context', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Prototype context', null)
+    await writePrototypeOutput(
+      task,
+      [
+        'PROTOTYPE: YES',
+        'ARTIFACT: mock.html',
+        'REASON: clarify UI risk',
+        '--- BEGIN ARTIFACT ---',
+        '<html>large mock</html>',
+        '--- END ARTIFACT ---',
+      ].join('\n')
+    )
+    const prompts: string[] = []
+
+    await answerAskQuestion({
+      ctx,
+      taskId: task.id,
+      question: 'what prototype exists?',
+      runner: async (_agent, opts) => {
+        prompts.push(opts.prompt)
+        return { text: 'answer', usage: { inputTokens: 0, outputTokens: 0 } }
+      },
+    })
+
+    expect(prompts[0]).toContain(`### ${task.id}/prototype.md`)
+    expect(prompts[0]).toContain(`### ${task.id}/prototype context`)
+    expect(prompts[0]).toContain('Primary artifact: prototype-artifacts/mock.html')
+    expect(prompts[0]).not.toContain('large mock</html>')
   })
 
   test('scoped task disappearance fails instead of widening to all tasks', async () => {

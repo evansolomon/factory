@@ -8,6 +8,7 @@ import { deliveryLabel } from './delivery.ts'
 import { currentBranch } from './git.ts'
 import { log } from './log.ts'
 import { type Report, readReport } from './metrics.ts'
+import { prototypePrimaryArtifactUrl } from './prototype.ts'
 import {
   findTask,
   type LiveMeter,
@@ -133,6 +134,7 @@ export const SHOW_ARTIFACTS = [
   ['delivery.md', '## Delivery selection'],
   ['plan.final.md', '## Final plan'],
   ['risk.plan.md', '## Plan risk'],
+  ['prototype.md', '## Prototype'],
   ['review.md', '## Review (last attempt)'],
   ['risk.md', '## Merge risk (last attempt)'],
   ['deploy.md', '## Deploy safety (last attempt)'],
@@ -401,6 +403,12 @@ export async function printShow(ctx: WorkContext, query?: string, step?: string)
       log.log(heading)
       log.log(text)
     }
+  }
+
+  const prototypeUrl = await prototypePrimaryArtifactUrl(task)
+  if (prototypeUrl) {
+    log.log('')
+    log.log(`prototype artifact: ${prototypeUrl}`)
   }
 
   if (await fileText(task, 'brief.html')) {
