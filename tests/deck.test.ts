@@ -30,6 +30,7 @@ const config: Config = {
     implementer: 'codex',
     reviewer: 'claude',
     delivery: 'claude',
+    namer: { cli: 'codex', model: 'gpt-5-nano' },
   },
   ask: { agent: 'claude' },
 }
@@ -39,6 +40,7 @@ const agents: RoleAgents = {
   implementer: { cli: 'codex' },
   reviewer: { cli: 'claude' },
   delivery: { cli: 'claude' },
+  namer: { cli: 'codex', model: 'gpt-5-nano' },
 }
 
 async function workContext(): Promise<WorkContext> {

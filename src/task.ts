@@ -131,13 +131,17 @@ const LiveMeterSchema = z.object({
 })
 export type LiveMeter = z.infer<typeof LiveMeterSchema>
 
-function slugify(text: string): string {
-  const slug = text
+function sanitizedSlug(text: string): string {
+  return text
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 40)
     .replace(/-+$/g, '')
+}
+
+function slugify(text: string): string {
+  const slug = sanitizedSlug(text)
   return slug.length > 0 ? slug : 'task'
 }
 
@@ -156,6 +160,7 @@ export type AddTaskOptions = {
   complexity?: TaskComplexity | null
   delivery?: TaskDelivery
   feedbackSourceTaskId?: string | null
+  suggestedSlug?: string | null
 }
 
 async function listTaskDirs(tasksDir: string): Promise<string[]> {
@@ -180,7 +185,8 @@ export async function addTask(
   // Descriptive, number-free id; disambiguate same-named tasks with a -N suffix.
   // Claim the directory atomically so parallel `factory add`s cannot choose the
   // same id after racing through a list-then-create window.
-  const slug = slugify(firstLine(intent))
+  const suggestedSlug = sanitizedSlug(firstLine(options.suggestedSlug ?? ''))
+  const slug = suggestedSlug || slugify(firstLine(intent))
   let id = slug
   let dir = `${ctx.tasksDir}/${id}`
   for (let n = 2; ; n++) {

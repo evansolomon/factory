@@ -52,6 +52,9 @@ const AgentsSchema = z.object({
   implementer: AgentSpecSchema.default('codex'),
   reviewer: AgentSpecSchema.default('claude'),
   delivery: AgentSpecSchema.default('claude'),
+  // Cheap, low-latency model used only to turn a raw task intent into a short id.
+  // Best-effort callers fall back to the local slug heuristic if this is unavailable.
+  namer: AgentSpecSchema.default((): AgentSpec => ({ cli: 'codex', model: 'gpt-5-nano' })),
 })
 
 const AskSchema = z
@@ -65,6 +68,7 @@ type AgentsConfig = {
   implementer: AgentSpec
   reviewer: AgentSpec
   delivery: AgentSpec
+  namer: AgentSpec
 }
 
 export type RoleAgents = {
@@ -72,6 +76,7 @@ export type RoleAgents = {
   implementer: Agent
   reviewer: Agent
   delivery: Agent
+  namer: Agent
 }
 
 // Config lives in `.factory.json` files and CASCADES: resolution walks from
@@ -136,6 +141,7 @@ const ConfigSchema = z.object({
       implementer: 'codex',
       reviewer: 'claude',
       delivery: 'claude',
+      namer: { cli: 'codex', model: 'gpt-5-nano' },
     })
   ),
   // Conversational, read-only questions about factory's saved task state. Kept
@@ -307,6 +313,7 @@ function resolveAgents(config: Config): RoleAgents {
     implementer: normAgent(a.implementer),
     reviewer: normAgent(a.reviewer),
     delivery: normAgent(a.delivery),
+    namer: normAgent(a.namer),
   }
 }
 

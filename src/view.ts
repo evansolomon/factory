@@ -43,6 +43,7 @@ export async function printConfig(ctx: WorkContext): Promise<void> {
   field('implementer', agentLabel(a.implementer))
   field('reviewer', agentLabel(a.reviewer))
   field('delivery', agentLabel(a.delivery))
+  field('namer', agentLabel(a.namer))
   const hookEvents = Object.entries(c.hooks)
   if (hookEvents.length > 0) {
     log.log('')

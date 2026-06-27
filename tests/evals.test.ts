@@ -42,6 +42,7 @@ function testConfig(): Config {
       implementer: agent,
       reviewer: agent,
       delivery: agent,
+      namer: agent,
     },
     ask: { agent },
   }
@@ -59,6 +60,7 @@ function testContext(repoStateDir: string): WorkContext {
       implementer: agent,
       reviewer: agent,
       delivery: agent,
+      namer: agent,
     },
     askAgent: agent,
     repoStateDir,
