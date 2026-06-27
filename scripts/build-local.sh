@@ -29,7 +29,7 @@ process.env['FACTORY_BUILD_VERSION'] = ${build_version_json}
 const { runCli } = await import(${entrypoint_json})
 await runCli()
 EOF
-bun build entrypoint.ts --compile --outfile "${outfile}"
+bun build entrypoint.ts --compile --minify --outfile "${outfile}"
 chmod +x "${outfile}"
 
 echo "built factory ${build_version} to ${outfile}"
