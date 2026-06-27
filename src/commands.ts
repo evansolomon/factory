@@ -1,3 +1,4 @@
+import { GUIDANCE_STAGE_VALUES } from './guidance.ts'
 import { TaskComplexitySchema } from './task.ts'
 
 export type CompletionChoice = {
@@ -38,6 +39,42 @@ const messageOptions = [
   { name: '--message', description: 'Provide the message inline' },
   { name: '--message=', description: 'Provide the message inline' },
   { name: '--edit', description: 'Compose the message in $EDITOR' },
+] as const
+
+const guidanceScopeChoices = [
+  { name: 'global', description: 'Global learned lessons' },
+  { name: 'repo', description: 'Current repo learned lessons' },
+] as const
+
+const guidanceStageChoices = GUIDANCE_STAGE_VALUES.map((name) => ({
+  name,
+  description: `${name} stage`,
+}))
+
+const lessonsSubcommands = [
+  {
+    name: 'list',
+    description: 'List learned lessons',
+    options: [
+      { name: '--all', description: 'Include deleted learned lessons' },
+      { name: '--scope', description: 'Filter by scope', values: guidanceScopeChoices },
+      { name: '--stage', description: 'Filter by stage', values: guidanceStageChoices },
+    ],
+  },
+  { name: 'show', description: 'Show a learned lesson' },
+  { name: 'rm', description: 'Remove a learned lesson' },
+  {
+    name: 'edit',
+    description: 'Edit a learned lesson',
+    options: [
+      { name: '-m', description: 'Provide the lesson text inline' },
+      { name: '--message', description: 'Provide the lesson text inline' },
+      { name: '--message=', description: 'Provide the lesson text inline' },
+      { name: '--edit', description: 'Compose the lesson text in $EDITOR' },
+      { name: '--scope', description: 'Set the lesson scope', values: guidanceScopeChoices },
+      { name: '--stage', description: 'Set a lesson stage', values: guidanceStageChoices },
+    ],
+  },
 ] as const
 
 export const TASK_CONFIG_KEY_CHOICES = [
@@ -189,7 +226,12 @@ export const COMMANDS: readonly CommandSpec[] = [
     subcommands: SHOW_STEP_CHOICES,
   },
   { name: 'report', description: 'Telemetry roll-up', autoUpgrade: true },
-  { name: 'lessons', description: 'Curated lessons and raw candidates', autoUpgrade: true },
+  {
+    name: 'lessons',
+    description: 'Learned lessons, legacy lessons, and raw candidates',
+    autoUpgrade: true,
+    subcommands: lessonsSubcommands,
+  },
   { name: 'version', description: 'Print the current CLI version', autoUpgrade: false },
   {
     name: 'upgrade',

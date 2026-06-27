@@ -233,7 +233,7 @@ factory ask --print [task-id] "<question...>"      # one-shot/scriptable saved-s
 factory session [--agent codex|claude] [task-id]   # realtime agent tweak session from task artifacts
 factory show [task-id] [step]                       # drill into one task / a step's activity
 factory report                                     # telemetry roll-up (manage by numbers)
-factory lessons                                    # curated lessons + raw candidates
+factory lessons [list|show|rm|edit] ...           # inspect and manage learned lessons
 factory config [edit ...]                           # show/edit effective config defaults
 factory version | --version                         # print the current CLI version
 factory upgrade                                     # install the latest GitHub Release
@@ -630,7 +630,8 @@ from `factory add --trivial` or `--complexity trivial|complex` lives in
 exists only for model triage output. Repo-level state lives under the main
 worktree's state dir, shared across linked worktrees:
 `LESSONS.md`, `LESSONS.candidates.md`, `metrics.db`, `eval-candidates/`, and
-`backlog/`.
+`backlog/`. Structured learned lessons live in global factory state under
+`$FACTORY_HOME/guidance/items/*.json`.
 
 factory treats the **whole worktree** as the task surface. It does not refuse a
 dirty worktree and it does not try to split preexisting hunks from agent-created
@@ -639,15 +640,27 @@ worktree was already dirty, review prompts include that baseline so reviewers ca
 see what existed before this run. For the cleanest provenance, run one task per
 worktree and start from a clean tree.
 
-## Meta loop (LESSONS.md)
+## Meta loop and learned lessons
 
-The self-improving part. `LESSONS.md` (at the repo-level state root, keyed by the
-main worktree) is **human-curated** and read into the plan + critique stages
-**every run**, so past mistakes shape future plans. `LESSONS.candidates.md` is
-**machine-appended** raw signal — one line per `blocked` / `needs-input` outcome
-and manual correction — that you periodically distill into `LESSONS.md` (e.g. via
-the `/learn` skill) and prune. Keeping them separate keeps the curated file
-high-signal. `factory lessons` prints both.
+The self-improving part is now structured learned lessons plus the legacy repo
+lesson files. Structured records live under
+`$FACTORY_HOME/guidance/items/*.json`, one zod-validated JSON file per lesson.
+Each record includes an id, scope, stages, source signal, status, timestamps, and
+text. Global lessons apply everywhere; repo lessons apply only when the current
+repo state dir matches the record.
+
+Lessons are auto-applied to the stages they name: planning, critique/reconcile,
+implementation/fix, review experts, consolidation, remediation, and postmortem.
+Prompt blocks include the lesson id so bad guidance can be found and corrected.
+Use `factory lessons list`, `factory lessons show <id>`,
+`factory lessons rm <id>`, and `factory lessons edit <id>` to inspect, remove, or
+fix records. Removal is a soft delete.
+
+`LESSONS.md` remains legacy curated repo guidance at the repo-level state root,
+keyed by the main worktree, and is still read into planning and critique.
+`LESSONS.candidates.md` remains the raw human-curation queue for blocked runs,
+needs-input events, postmortems, and manual corrections. Eval replay/scoring and
+dynamic workflow DAGs are still out of scope.
 
 ## Intent sharpening (`factory run`)
 
@@ -817,8 +830,8 @@ dollar figure, so there's no consistent number across both models.)
 - ✅ **tmux integration (via hooks):** live-stage window name, semantic attention
   states for `needs-input`/`blocked`/`done`, in-place elapsed heartbeat, and
   `(done)` when the queue finishes.
-- ✅ **Meta loop:** `LESSONS.md` read into planning + `factory lessons`; SQLite
-  telemetry via `factory report`.
+- ✅ **Meta loop:** structured learned lessons auto-applied by stage, legacy
+  `LESSONS.md` compatibility, and SQLite telemetry via `factory report`.
 - ✅ **Delivery:** task-local delivery selection, explicit skills, and history-backed defaults.
 
 ## Files
@@ -831,7 +844,8 @@ dollar figure, so there's no consistent number across both models.)
 - `task.ts` — task dir format, status, answers
 - `ask.ts` — context packet + AI answer for `factory ask`
 - `view.ts` — `status` dashboard + `show` drill-down + `report` rendering
-- `lessons.ts` — LESSONS.md read + candidate capture (the meta loop)
+- `guidance.ts` — structured learned lesson storage, filtering, and rendering
+- `lessons.ts` — legacy LESSONS.md read + raw candidate capture
 - `metrics.ts` — SQLite telemetry store + `report` aggregation (defensive/disposable)
 - `evals.ts` — eval-candidate and correction capture
 - `hooks.ts` — lifecycle hook emission

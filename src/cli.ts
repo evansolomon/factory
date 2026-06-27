@@ -33,6 +33,17 @@ import {
   renderTerminalFeedback,
 } from './feedback.ts'
 import { hasChanges, NotARepoError } from './git.ts'
+import {
+  deleteGuidance,
+  editGuidance,
+  findGuidance,
+  GUIDANCE_STAGE_VALUES,
+  type GuidanceRecord,
+  type GuidanceStage,
+  GuidanceStageSchema,
+  listGuidance,
+  scopeForContext,
+} from './guidance.ts'
 import { emit, type Hooks } from './hooks.ts'
 import { parseInputArgs, resolveMessage } from './input.ts'
 import { readCandidates, readLessons } from './lessons.ts'
@@ -146,7 +157,8 @@ COMMANDS
                              Telemetry for one task (defaults to the latest here):
                              cost, cycle time, where the tokens go. --all rolls up
                              across the repo: first-pass yield, escalation/blocked rate.
-  factory lessons             Curated lessons (LESSONS.md) + raw candidates.
+  factory lessons [list|show|rm|edit] ...
+                             Learned lessons, legacy lessons, and raw candidates.
   factory config [edit [--global|--worktree|--repo-parent|--dir <dir>]]
                            Show effective config + where it's set; edit opens the
                            global config by default; flags target another layer.
@@ -376,6 +388,211 @@ function manualDelivery(value: string, skills: DeliverySkill[]): TaskDelivery {
     source: 'manual',
     confidence: 'high',
     reason: 'User manually set a delivery policy.',
+  }
+}
+
+function guidanceScopeText(record: GuidanceRecord): string {
+  if (record.scope.kind === 'global') {
+    return 'global'
+  }
+  return `repo ${record.scope.repoStateDir}`
+}
+
+function printGuidanceRecord(record: GuidanceRecord): void {
+  log.log(`${record.id} [${record.status}]`)
+  log.log(`scope: ${guidanceScopeText(record)}`)
+  log.log(`stages: ${record.stages.join(', ')}`)
+  log.log(`source: ${record.source.kind}${record.source.taskId ? ` ${record.source.taskId}` : ''}`)
+  if (record.source.detail) {
+    log.log(`detail: ${record.source.detail}`)
+  }
+  log.log(`created: ${record.createdAt}`)
+  log.log(`updated: ${record.updatedAt}`)
+  if (record.deletedAt) {
+    log.log(`deleted: ${record.deletedAt}`)
+  }
+  log.log('')
+  log.log(record.text)
+}
+
+function printGuidanceSummary(records: GuidanceRecord[]): void {
+  if (records.length === 0) {
+    log.log('no learned lessons yet - corrections become lessons automatically')
+    return
+  }
+  for (const record of records) {
+    const deleted = record.status === 'deleted' ? ' deleted' : ''
+    log.log(
+      `${record.id} [${record.scope.kind}${deleted}] ${record.stages.join(',')} - ${record.text}`
+    )
+  }
+}
+
+async function printLessonsList(
+  ctx: WorkContext,
+  opts: { includeDeleted?: boolean; scope?: 'global' | 'repo'; stage?: GuidanceStage }
+): Promise<void> {
+  printGuidanceSummary(await listGuidance(ctx, opts))
+  log.log('')
+  log.log('## Legacy LESSONS.md (read-only here; edit the file directly)')
+  log.log((await readLessons(ctx)) ?? '(none yet)')
+  log.log('')
+  log.log('## Raw candidates (read-only here; edit the file directly)')
+  log.log((await readCandidates(ctx)) ?? '(none yet)')
+}
+
+function parseGuidanceStage(value: string | undefined, usage: string): GuidanceStage {
+  const parsed = GuidanceStageSchema.safeParse(value)
+  if (!parsed.success) {
+    throw new Error(`${usage}\nvalid stages: ${GUIDANCE_STAGE_VALUES.join(', ')}`)
+  }
+  return parsed.data
+}
+
+function parseGuidanceScope(value: string | undefined, usage: string): 'global' | 'repo' {
+  if (value === 'global' || value === 'repo') {
+    return value
+  }
+  throw new Error(`${usage}\nvalid scopes: global, repo`)
+}
+
+function ambiguousGuidanceMessage(query: string, records: GuidanceRecord[]): string {
+  return `ambiguous lesson id "${query}"\n  matches: ${records.map((record) => record.id).join(', ')}`
+}
+
+async function lessonsCommand(ctx: WorkContext, args: string[]): Promise<number> {
+  const sub = args[0] && ['list', 'show', 'rm', 'edit'].includes(args[0]) ? args[0] : 'list'
+  const rest = sub === 'list' && args[0] !== 'list' ? args : args.slice(1)
+
+  try {
+    if (sub === 'list') {
+      const usage = 'usage: factory lessons list [--all] [--scope global|repo] [--stage <stage>]'
+      let includeDeleted = false
+      let scope: 'global' | 'repo' | undefined
+      let stage: GuidanceStage | undefined
+      for (let i = 0; i < rest.length; i++) {
+        const arg = rest[i] ?? ''
+        if (arg === '--all') {
+          includeDeleted = true
+        } else if (arg === '--scope') {
+          scope = parseGuidanceScope(rest[i + 1], usage)
+          i++
+        } else if (arg.startsWith('--scope=')) {
+          scope = parseGuidanceScope(arg.slice('--scope='.length), usage)
+        } else if (arg === '--stage') {
+          stage = parseGuidanceStage(rest[i + 1], usage)
+          i++
+        } else if (arg.startsWith('--stage=')) {
+          stage = parseGuidanceStage(arg.slice('--stage='.length), usage)
+        } else {
+          throw new Error(usage)
+        }
+      }
+      await printLessonsList(ctx, { includeDeleted, scope, stage })
+      return 0
+    }
+
+    if (sub === 'show') {
+      const id = rest[0]
+      if (!id || rest.length !== 1) {
+        log.fail('usage: factory lessons show <id>')
+        return 1
+      }
+      const found = await findGuidance(ctx, id, { includeDeleted: true })
+      if (!found) {
+        log.fail(`no learned lesson matching "${id}"`)
+        return 1
+      }
+      if ('ambiguous' in found) {
+        log.fail(ambiguousGuidanceMessage(id, found.ambiguous))
+        return 1
+      }
+      printGuidanceRecord(found.record)
+      return 0
+    }
+
+    if (sub === 'rm') {
+      const id = rest[0]
+      if (!id || rest.length !== 1) {
+        log.fail('usage: factory lessons rm <id>')
+        return 1
+      }
+      const result = await deleteGuidance(ctx, id)
+      if (!result) {
+        log.fail(`no learned lesson matching "${id}"`)
+        return 1
+      }
+      if ('ambiguous' in result) {
+        log.fail(ambiguousGuidanceMessage(id, result.ambiguous))
+        return 1
+      }
+      log.ok(`lessons -${result.deleted.id} (removed)`)
+      return 0
+    }
+
+    const usage =
+      'usage: factory lessons edit <id> [-m "<text>" | --message "<text>" | --scope global|repo | --stage <stage>... | --edit]'
+    const id = rest[0]
+    if (!id) {
+      log.fail(usage)
+      return 1
+    }
+    let message: string | null = null
+    let edit = false
+    let scope: 'global' | 'repo' | null = null
+    const stages: GuidanceStage[] = []
+    for (let i = 1; i < rest.length; i++) {
+      const arg = rest[i] ?? ''
+      if (arg === '-m' || arg === '--message') {
+        const next = rest[i + 1]
+        if (next === undefined) {
+          throw new Error(usage)
+        }
+        message = next
+        i++
+      } else if (arg.startsWith('--message=')) {
+        message = arg.slice('--message='.length)
+      } else if (arg === '--edit') {
+        edit = true
+      } else if (arg === '--scope') {
+        scope = parseGuidanceScope(rest[i + 1], usage)
+        i++
+      } else if (arg.startsWith('--scope=')) {
+        scope = parseGuidanceScope(arg.slice('--scope='.length), usage)
+      } else if (arg === '--stage') {
+        stages.push(parseGuidanceStage(rest[i + 1], usage))
+        i++
+      } else if (arg.startsWith('--stage=')) {
+        stages.push(parseGuidanceStage(arg.slice('--stage='.length), usage))
+      } else {
+        throw new Error(usage)
+      }
+    }
+    const text =
+      message !== null || edit ? await resolveMessage({ message, edit }, 'required') : null
+    const patch = {
+      text: text ?? undefined,
+      stages: stages.length > 0 ? stages : undefined,
+      scope: scope ? scopeForContext(ctx, scope) : undefined,
+    }
+    if (!patch.text && !patch.stages && !patch.scope) {
+      log.fail(usage)
+      return 1
+    }
+    const result = await editGuidance(ctx, id, patch)
+    if (!result) {
+      log.fail(`no learned lesson matching "${id}"`)
+      return 1
+    }
+    if ('ambiguous' in result) {
+      log.fail(ambiguousGuidanceMessage(id, result.ambiguous))
+      return 1
+    }
+    log.ok(`lessons ${result.edited.id} (updated)`)
+    return 0
+  } catch (err) {
+    log.fail(err instanceof Error ? err.message : String(err))
+    return 1
   }
 }
 
@@ -996,12 +1213,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
 
   if (cmd === 'lessons') {
     const ctx = await loadContext(process.cwd())
-    log.log('## LESSONS.md (curated — read by the planner each run)')
-    log.log((await readLessons(ctx)) ?? '(none yet)')
-    log.log('')
-    log.log('## candidates (raw signal — curate the recurring ones into LESSONS.md)')
-    log.log((await readCandidates(ctx)) ?? '(none yet)')
-    return 0
+    return lessonsCommand(ctx, rest)
   }
 
   if (cmd === 'report') {
