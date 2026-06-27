@@ -189,6 +189,18 @@ describe('zsh completion script', () => {
       'inherit:Clear the task-local override',
       'edit:Open a config file in $EDITOR',
       'on-complete:Task-local delivery instructions',
+      'list:List learned lessons',
+      'show:Show a learned lesson',
+      'rm:Remove a learned lesson',
+      'edit:Edit a learned lesson',
+      '--all:Include deleted learned lessons',
+      '--scope:Filter by scope',
+      '--stage:Filter by stage',
+      '--message:Provide the lesson text inline',
+      '--edit:Compose the lesson text in $EDITOR',
+      'global',
+      'repo',
+      'deploy-safety',
     ]) {
       expect(script).toContain(token)
     }
@@ -320,5 +332,16 @@ describe('zsh completion smoke', () => {
     expect(backlog?.code).toBe(0)
     expect(backlog?.stdout).toContain('add')
     expect(backlog?.stdout).toContain('rm')
+  })
+
+  test('real zsh dispatch completes lessons choices when available', async () => {
+    const lessons = await runZshCompletion('factory lessons \t\t', 'Edit a learned lesson')
+    if (!lessons) {
+      return
+    }
+
+    expect(lessons.stderr).toBe('')
+    expect(lessons.code).toBe(0)
+    expect(lessons.stdout).toContain('edit')
   })
 })

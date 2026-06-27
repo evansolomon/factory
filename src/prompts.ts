@@ -15,6 +15,10 @@ function lessonsBlock(lessons: string | null): string {
   return lessons ? `\n\n## Lessons from past runs (apply these)\n${lessons}` : ''
 }
 
+function learnedLessonsBlock(guidance: string | null): string {
+  return guidance ? `\n\n${guidance}` : ''
+}
+
 function verifyBlock(verify: string | null): string {
   return verify ? `\n\n## Verification command\n\`${verify}\`` : ''
 }
@@ -118,6 +122,7 @@ export function planPrompt(
   verify: string | null,
   answers: string | null,
   lessons: string | null,
+  guidance: string | null,
   research: string | null,
   userFacing: boolean
 ): string {
@@ -141,7 +146,7 @@ Follow the existing patterns surfaced in the research — match how the codebase
 Scope it deliberately. Default to the simplest design that meets the requirements. But if the change is awkward to bolt onto the current structure, a focused preparatory refactor that makes it easy — "make the change easy, then make the easy change" — is in scope when it leaves the code simpler overall; and if the task clearly points at a general capability, weigh extracting a small shared abstraction now. The line is speculation: do NOT build for hypothetical futures, fold in unrelated cleanups, or add abstraction this change won't use. When narrow-vs-enabling-refactor is a real investment tradeoff, state your recommendation and reasoning explicitly so it's a visible decision, not a silent scope expansion.
 
 ## Task
-${intent}${verifyBlock(verify)}${answersBlock(answers)}${lessonsBlock(lessons)}${researchBlock(research, 'ground the plan in these facts')}
+${intent}${verifyBlock(verify)}${answersBlock(answers)}${lessonsBlock(lessons)}${learnedLessonsBlock(guidance)}${researchBlock(research, 'ground the plan in these facts')}
 
 Output ONLY the plan as markdown. Make no code changes.`
 }
@@ -151,6 +156,7 @@ export function critiquePrompt(
   otherPlan: string,
   answers: string | null,
   lessons: string | null,
+  guidance: string | null,
   research: string | null
 ): string {
   return `You are a skeptical staff engineer reviewing another engineer's implementation plan for the task below. You did not write it. Read the codebase to check the plan against reality.
@@ -166,7 +172,7 @@ Flag only problems that affect correctness, the stated requirements, scope, or w
 Separately, surface anything only the human can resolve: genuinely ambiguous requirements, product/UX/priority calls, missing acceptance criteria, or context absent from the codebase. Put these under "## Open questions for the human", each phrased for a one-line answer and each with your recommended default. Apply a HIGH bar: first try to resolve it from the codebase; only ask when a wrong guess would build the wrong thing and no reasonable default exists. Otherwise state the assumption you'd make and move on.
 
 ## Task
-${intent}${answersBlock(answers)}${lessonsBlock(lessons)}${researchBlock(research, 'check the plan against these facts')}
+${intent}${answersBlock(answers)}${lessonsBlock(lessons)}${learnedLessonsBlock(guidance)}${researchBlock(research, 'check the plan against these facts')}
 
 ## Plan under review
 ${otherPlan}
@@ -215,7 +221,8 @@ export function reconcilePrompt(
   intent: string,
   plans: Labeled[],
   critiques: Labeled[],
-  answers: string | null
+  answers: string | null,
+  guidance: string | null
 ): string {
   const critiqueSection = critiques.length ? `\n\n${labeledBlocks('Critique', critiques)}` : ''
   return `Decide whether this task is clear enough to implement autonomously, or must pause for the human. You have the task, the plan(s), and any critiques (which may raise open questions).
@@ -223,7 +230,7 @@ export function reconcilePrompt(
 Default to PROCEED. Pause only for a genuine blocker: the requirement is ambiguous in a way that changes what gets built, the work is destructive/irreversible, or no reasonable default exists. Test each candidate question — would a competent engineer also have to ask, or could they pick a sensible default and move on? If they'd proceed, so do you: state the assumption instead of asking. Drop anything already answered below or answerable from the codebase, and consolidate duplicates.
 
 ## Task
-${intent}${answersBlock(answers)}
+${intent}${answersBlock(answers)}${learnedLessonsBlock(guidance)}
 
 ${labeledBlocks('Plan', plans)}${critiqueSection}
 
@@ -298,6 +305,7 @@ export function implementPrompt(
   verify: string | null,
   userFacing: boolean,
   riskAssessment: string | null,
+  guidance: string | null,
   feedbackAnalysis: string | null = null
 ): string {
   return `Implement the plan below in the repository at your working directory. Make the code changes it calls for and nothing more — do not fix, refactor, or comment on unrelated code.
@@ -312,7 +320,7 @@ Do NOT commit — leave the changes in the working tree.
 ${intent}
 
 ## Plan
-${finalPlan}${feedbackAnalysisBlock(feedbackAnalysis)}${riskBlock(riskAssessment)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. Make sure it passes.` : ''}${uxBuildNote(userFacing)}`
+${finalPlan}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${riskBlock(riskAssessment)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. Make sure it passes.` : ''}${uxBuildNote(userFacing)}`
 }
 
 // First pass: decide whether a task is trivial enough to skip the planning
@@ -491,6 +499,7 @@ export function fixPrompt(
   diff: string,
   userFacing: boolean,
   riskAssessment: string | null,
+  guidance: string | null,
   feedbackAnalysis: string | null = null
 ): string {
   const tried = history.length
@@ -510,7 +519,7 @@ ${failure}${tried}
 ## Current diff
 \`\`\`diff
 ${diff}
-\`\`\`${feedbackAnalysisBlock(feedbackAnalysis)}${riskBlock(riskAssessment)}${uxBuildNote(userFacing)}`
+\`\`\`${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${riskBlock(riskAssessment)}${uxBuildNote(userFacing)}`
 }
 
 // The verify-gate doctor: runs with FULL access when the verify command fails.
@@ -523,7 +532,8 @@ export function remediatePrompt(
   intent: string,
   verify: string,
   failure: string,
-  priorRemedies: string[]
+  priorRemedies: string[],
+  guidance: string | null
 ): string {
   const tried = priorRemedies.length
     ? `\n\n## Environment fixes already applied this gate (verify STILL failed after each — don't just repeat them)\n${priorRemedies.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
@@ -549,7 +559,7 @@ ${intent}
 \`${verify}\`
 
 ## Verify failure
-${failure}${tried}
+${failure}${tried}${learnedLessonsBlock(guidance)}
 
 Output, as the FINAL two lines:
 SUMMARY: <one sentence: the root cause and, if you fixed it, what you changed>
@@ -599,7 +609,8 @@ export function postmortemPrompt(
   intent: string,
   failures: string[],
   diff: string,
-  reason: string
+  reason: string,
+  guidance: string | null
 ): string {
   const history = failures.length
     ? failures.map((s, i) => `${i + 1}. ${s}`).join('\n')
@@ -626,13 +637,21 @@ ${history}
 ## Final diff
 \`\`\`diff
 ${diff}
-\`\`\`
+\`\`\`${learnedLessonsBlock(guidance)}
 
 Output in this exact shape:
 CATEGORY: <one of the above>
 LESSON: <one or two sentences, generalizable to future tasks in this repo — not specific to this task's incidental details>
+ACTIONABLE: YES|NO
+SCOPE: GLOBAL|REPO
+STAGES: <comma-separated stages from: plan, critique, reconcile, implement, fix, review, security, deploy-safety, ux-review, consolidate, remediate, postmortem>
 ## Analysis
-<a few sentences: the root cause, and what would have prevented it>`
+<a few sentences: the root cause, and what would have prevented it>
+
+Rules:
+- ACTIONABLE: NO means the lesson is not specific or reusable enough to store as structured learned guidance.
+- SCOPE defaults to GLOBAL when uncertain.
+- STAGES must use only the listed stage names.`
 }
 
 // Distill a lesson from a human takeover: the agent's failed attempt vs. the
@@ -668,8 +687,16 @@ ${humanFix}
 Output in this exact shape:
 CATEGORY: <one of the above>
 LESSON: <one or two sentences the agent should remember, generalizable to future tasks in this repo>
+ACTIONABLE: YES|NO
+SCOPE: GLOBAL|REPO
+STAGES: <comma-separated stages from: plan, critique, reconcile, implement, fix, review, security, deploy-safety, ux-review, consolidate, remediate, postmortem>
 ## Analysis
-<what the agent missed, and why the human's approach is correct>`
+<what the agent missed, and why the human's approach is correct>
+
+Rules:
+- ACTIONABLE: NO means the lesson is not specific or reusable enough to store as structured learned guidance.
+- SCOPE defaults to GLOBAL when uncertain.
+- STAGES must use only the listed stage names.`
 }
 
 export function reviewPrompt(
@@ -677,7 +704,8 @@ export function reviewPrompt(
   verify: string | null,
   finalPlan: string,
   diff: string,
-  baselineDiff: string | null
+  baselineDiff: string | null,
+  guidance: string | null
 ): string {
   return `You are a senior staff engineer pairing with the person who wrote the diff below. You didn't write it, so you bring fresh eyes — verify against the actual code rather than assuming the implementer got it right. Your job is to help make this change correct and ship-worthy, not to find fault. Read files in the repo as needed.
 
@@ -700,7 +728,7 @@ ${finalPlan}
 ## Diff
 \`\`\`diff
 ${diff}
-\`\`\`${baselineBlock(baselineDiff)}
+\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
 
 For each finding, cite the specific code (file:line) and tag it BLOCKING (a correctness, requirements, or test-integrity defect that must be fixed before this ships) or ADVISORY (a real improvement that should not hold up the change). If there are none, say so.`
 }
@@ -795,7 +823,8 @@ export function securityPrompt(
   intent: string,
   finalPlan: string,
   diff: string,
-  baselineDiff: string | null
+  baselineDiff: string | null,
+  guidance: string | null
 ): string {
   return `You are a red-team security researcher auditing the diff below for the task. Assume an adversary controls every input the changed code can reach. You did not write it — trace the data flow through the repo as needed.
 
@@ -817,7 +846,7 @@ ${finalPlan}
 ## Diff
 \`\`\`diff
 ${diff}
-\`\`\`${baselineBlock(baselineDiff)}
+\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
 
 For each exploitable finding, name the attack and cite the specific code (file:line), then tag it BLOCKING (an exploitable vulnerability that must be fixed before this ships) or ADVISORY (a real but non-exploitable security improvement). If there are none, say so.`
 }
@@ -829,7 +858,8 @@ export function deploySafetyPrompt(
   intent: string,
   finalPlan: string,
   diff: string,
-  baselineDiff: string | null
+  baselineDiff: string | null,
+  guidance: string | null
 ): string {
   return `You are a release engineer auditing whether the diff below is safe to deploy. Judge mixed-version reality, not just whether the code works locally: old and new app versions may overlap, old queued data may meet new workers, old clients may call new APIs, rollback may happen after writes, and migrations/config may arrive before or after code depending on the deploy system.
 
@@ -852,7 +882,7 @@ ${finalPlan}
 ## Diff
 \`\`\`diff
 ${diff}
-\`\`\`${baselineBlock(baselineDiff)}
+\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
 
 Output in this structure:
 
@@ -873,7 +903,8 @@ export function uxReviewPrompt(
   intent: string,
   finalPlan: string,
   diff: string,
-  baselineDiff: string | null
+  baselineDiff: string | null,
+  guidance: string | null
 ): string {
   return `You are a senior UI/UX and design-systems engineer pairing on the diff below for a USER-FACING change. Read the repo to compare against how this product's UI is already built. Your job is to help the experience and design consistency land well — NOT code correctness or security (others cover those). Judge the user experience, not taste.
 
@@ -895,7 +926,7 @@ ${finalPlan}
 ## Diff
 \`\`\`diff
 ${diff}
-\`\`\`${baselineBlock(baselineDiff)}
+\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
 
 For each finding, cite the specific code (file:line) and tag it BLOCKING (a material design-system violation or clearly broken/inconsistent UX that must be fixed before this ships) or ADVISORY (a real improvement that should not hold up the change). If there are none, say so.`
 }
@@ -908,7 +939,8 @@ export function consolidatePrompt(
   finalPlan: string,
   diff: string,
   reports: Labeled[],
-  baselineDiff: string | null
+  baselineDiff: string | null,
+  guidance: string | null
 ): string {
   return `You are the lead engineer consolidating several independent expert reviews of the diff below into a single decision. Each report is one expert's findings; they overlap, sometimes conflict, and may include nits. Produce ONE verdict and ONE prioritized fix list — do not re-review from scratch.
 
@@ -927,7 +959,7 @@ ${finalPlan}
 ## Diff
 \`\`\`diff
 ${diff}
-\`\`\`${baselineBlock(baselineDiff)}
+\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
 
 ${labeledBlocks('Expert report', reports)}
 

@@ -10,6 +10,13 @@ import {
 } from './delivery.ts'
 import { run } from './exec.ts'
 import { commitAll, commitDiff, currentBranch, hasChanges, headSha, worktreeDiff } from './git.ts'
+import {
+  applicableGuidance,
+  createGuidanceFromDistillation,
+  type GuidanceStage,
+  loadGuidance,
+  renderGuidanceBlock,
+} from './guidance.ts'
 import { emit } from './hooks.ts'
 import { appendCandidate, readLessons } from './lessons.ts'
 import { log } from './log.ts'
@@ -375,11 +382,12 @@ async function blocked(
   meter: Meter,
   stats: RunStats,
   reason: string,
-  detail?: string
+  detail: string | undefined,
+  postmortemGuidance: string | null
 ): Promise<TaskOutcome> {
   logTotal(meter)
   recordTask(ctx, task, meter, 'blocked', stats)
-  await postmortem(ctx, task, meter, reason)
+  await postmortem(ctx, task, meter, reason, postmortemGuidance)
   return { ok: false, kind: 'blocked', reason, detail }
 }
 
@@ -391,7 +399,8 @@ async function postmortem(
   ctx: WorkContext,
   task: Task,
   meter: Meter,
-  reason: string
+  reason: string,
+  guidance: string | null
 ): Promise<void> {
   if (!ctx.config.postmortem) {
     await appendCandidate(ctx, `blocked · ${task.id} · ${reason}`)
@@ -407,7 +416,7 @@ async function postmortem(
       agentLabel(ctx.agents.reviewer),
       runAgent(ctx.agents.reviewer, {
         root: ctx.root,
-        prompt: postmortemPrompt(intent, history, diff, reason),
+        prompt: postmortemPrompt(intent, history, diff, reason, guidance),
         access: 'read',
         outFile: `${task.dir}/postmortem.md`,
       })
@@ -418,6 +427,24 @@ async function postmortem(
       ctx,
       lesson ? `blocked · ${task.id} · [${category}] ${lesson}` : `blocked · ${task.id} · ${reason}`
     )
+    if (lesson) {
+      try {
+        const captured = await createGuidanceFromDistillation(ctx, {
+          source: { kind: 'postmortem', taskId: task.id, detail: category },
+          text: lesson,
+          distillation: out,
+        })
+        if (captured === 'invalid') {
+          log.warn(`postmortem guidance metadata invalid for ${task.id}; kept raw candidate only`)
+        }
+      } catch (err) {
+        log.warn(
+          `postmortem guidance capture failed for ${task.id}: ${
+            err instanceof Error ? err.message : err
+          }`
+        )
+      }
+    }
   } catch (err) {
     log.warn(`postmortem failed for ${task.id}: ${err instanceof Error ? err.message : err}`)
     await appendCandidate(ctx, `blocked · ${task.id} · ${reason}`)
@@ -513,7 +540,8 @@ async function setAside(
   stats: RunStats,
   reason: string,
   detail: string | undefined,
-  intent: string
+  intent: string,
+  postmortemGuidance: string | null
 ): Promise<TaskOutcome> {
   if (task.meta.autoRetries >= AUTO_CAP) {
     const failures = await readFailures(task)
@@ -543,7 +571,8 @@ async function setAside(
           meter,
           stats,
           `${reason} (terminal after ${AUTO_CAP} auto-retries)`,
-          detail
+          detail,
+          postmortemGuidance
         )
     }
   }
@@ -630,7 +659,8 @@ async function verifyGate(
   task: Task,
   meter: Meter,
   intent: string,
-  verify: string
+  verify: string,
+  remediateGuidance: string | null
 ): Promise<VerifyVerdict> {
   const remedies: string[] = []
   while (true) {
@@ -671,7 +701,7 @@ async function verifyGate(
       agentLabel(ctx.agents.implementer),
       runAgent(ctx.agents.implementer, {
         root: ctx.root,
-        prompt: remediatePrompt(intent, verify, detail, remedies),
+        prompt: remediatePrompt(intent, verify, detail, remedies, remediateGuidance),
         access: 'full',
         outFile: `${task.dir}/remediate${n > 1 ? `.${n}` : ''}.md`,
       })
@@ -698,6 +728,7 @@ async function verifyGate(
 }
 
 type PlanResult = { plan: string } | { pause: TaskOutcome }
+type StageGuidance = (stage: GuidanceStage) => string | null
 
 // The planning ensemble: each planner drafts, they cross-critique (when ≥2), the
 // lead reconciles (may pause for the human), planners revise, the lead selects.
@@ -709,7 +740,8 @@ async function planEnsemble(
   verify: string | null,
   answers: string | null,
   lessons: string | null,
-  userFacing: boolean
+  userFacing: boolean,
+  stageGuidance: StageGuidance
 ): Promise<PlanResult> {
   const planners = ctx.agents.planners
   const labels = plannerLabels(planners)
@@ -744,7 +776,15 @@ async function planEnsemble(
         labels[i] ?? agent.cli,
         runAgent(agent, {
           root: ctx.root,
-          prompt: planPrompt(intent, verify, answers, lessons, research, userFacing),
+          prompt: planPrompt(
+            intent,
+            verify,
+            answers,
+            lessons,
+            stageGuidance('plan'),
+            research,
+            userFacing
+          ),
           access: 'read',
           outFile: `${task.dir}/plan.${labels[i]}.md`,
         })
@@ -765,7 +805,14 @@ async function planEnsemble(
           labels[i] ?? agent.cli,
           runAgent(agent, {
             root: ctx.root,
-            prompt: critiquePrompt(intent, others, answers, lessons, research),
+            prompt: critiquePrompt(
+              intent,
+              others,
+              answers,
+              lessons,
+              stageGuidance('critique'),
+              research
+            ),
             access: 'read',
             outFile: `${task.dir}/critique.${labels[i]}.md`,
           })
@@ -804,7 +851,13 @@ async function planEnsemble(
     agentLabel(lead),
     runAgent(lead, {
       root: ctx.root,
-      prompt: reconcilePrompt(intent, labeled(plans), critiquesForReconcile, answers),
+      prompt: reconcilePrompt(
+        intent,
+        labeled(plans),
+        critiquesForReconcile,
+        answers,
+        stageGuidance('reconcile')
+      ),
       access: 'read',
       outFile: `${task.dir}/reconcile.md`,
     })
@@ -1026,6 +1079,12 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   await persistLiveMeter(meter)
   const lead = ctx.agents.implementer
   const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null }
+  const guidance = await loadGuidance().catch((err) => {
+    log.warn(`guidance load failed: ${err instanceof Error ? err.message : err}`)
+    return []
+  })
+  const stageGuidance: StageGuidance = (stage) =>
+    renderGuidanceBlock(applicableGuidance(guidance, ctx, stage))
 
   const baselineDiff = await worktreeDiff(ctx.root)
   const baselineHasChanges = await hasChanges(ctx.root)
@@ -1117,7 +1176,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         verify,
         answers,
         lessons,
-        userFacing
+        userFacing,
+        stageGuidance
       )
       if ('pause' in planned) {
         recordTask(ctx, task, meter, 'needs-input', stats)
@@ -1176,7 +1236,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
 
   // A resume whose work already committed only has delivery left — skip the build.
   if (resuming && task.meta.commit) {
-    return shipAndFinish(ctx, task, intent, meter, stats)
+    return shipAndFinish(ctx, task, intent, meter, stats, stageGuidance)
   }
 
   // On resume, triage didn't run — derive user-facing from the existing diff so the
@@ -1245,6 +1305,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             await worktreeDiff(ctx.root),
             userFacing,
             riskAssessment,
+            stageGuidance('fix'),
             feedbackContext?.analysis ?? null
           )
         : implementPrompt(
@@ -1253,6 +1314,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             verify,
             userFacing,
             riskAssessment,
+            stageGuidance('implement'),
             feedbackContext?.analysis ?? null
           )
       await agentStep(
@@ -1268,7 +1330,15 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       )
 
       if (!(await hasChanges(ctx.root))) {
-        return blocked(ctx, task, meter, stats, 'implementation produced no changes')
+        return blocked(
+          ctx,
+          task,
+          meter,
+          stats,
+          'implementation produced no changes',
+          undefined,
+          stageGuidance('postmortem')
+        )
       }
     }
 
@@ -1290,7 +1360,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           verify,
           finalPlan,
           diff,
-          baselineHasChanges ? baselineDiff : null
+          baselineHasChanges ? baselineDiff : null,
+          stageGuidance('review')
         ),
       },
     ]
@@ -1298,7 +1369,13 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       panel.push({
         key: 'security',
         label: 'security',
-        prompt: securityPrompt(intent, finalPlan, diff, baselineHasChanges ? baselineDiff : null),
+        prompt: securityPrompt(
+          intent,
+          finalPlan,
+          diff,
+          baselineHasChanges ? baselineDiff : null,
+          stageGuidance('security')
+        ),
       })
     }
     panel.push(
@@ -1314,7 +1391,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           intent,
           finalPlan,
           diff,
-          baselineHasChanges ? baselineDiff : null
+          baselineHasChanges ? baselineDiff : null,
+          stageGuidance('deploy-safety')
         ),
       }
     )
@@ -1322,7 +1400,13 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       panel.push({
         key: 'ux',
         label: 'ux/design',
-        prompt: uxReviewPrompt(intent, finalPlan, diff, baselineHasChanges ? baselineDiff : null),
+        prompt: uxReviewPrompt(
+          intent,
+          finalPlan,
+          diff,
+          baselineHasChanges ? baselineDiff : null,
+          stageGuidance('ux-review')
+        ),
       })
     }
     await progress(ctx, task, 'review', `review — ${panel.length}-expert panel`)
@@ -1359,7 +1443,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           finalPlan,
           diff,
           reports,
-          baselineHasChanges ? baselineDiff : null
+          baselineHasChanges ? baselineDiff : null,
+          stageGuidance('consolidate')
         ),
         access: 'read',
         outFile: `${task.dir}/consolidated.md`,
@@ -1395,7 +1480,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         meter,
         stats,
         `review blocked after ${attempt + 1} implementation attempts`,
-        consolidated
+        consolidated,
+        stageGuidance('postmortem')
       )
     }
 
@@ -1404,7 +1490,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // only a real code defect feeds the code-fix loop, and a flake / unfixable env
     // problem goes straight to the backoff retry instead of burning fix attempts.
     if (verify) {
-      const v = await verifyGate(ctx, task, meter, intent, verify)
+      const v = await verifyGate(ctx, task, meter, intent, verify, stageGuidance('remediate'))
       if (v.kind === 'code') {
         const action = await assessFailure(
           ctx,
@@ -1433,7 +1519,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           meter,
           stats,
           `verify failed after ${attempt + 1} implementation attempts`,
-          v.detail
+          v.detail,
+          stageGuidance('postmortem')
         )
       }
       if (v.kind === 'aside') {
@@ -1476,7 +1563,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
                 meter,
                 stats,
                 `${v.reason} (terminal after ${AUTO_CAP} auto-retries)`,
-                v.detail
+                v.detail,
+                stageGuidance('postmortem')
               )
           }
         }
@@ -1514,7 +1602,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   }
   await saveMeta(task)
 
-  return shipAndFinish(ctx, task, intent, meter, stats)
+  return shipAndFinish(ctx, task, intent, meter, stats, stageGuidance)
 }
 
 // 8. Delivery — outward-facing delivery via the delivery agent (run a skill or
@@ -1569,7 +1657,8 @@ async function shipAndFinish(
   task: Task,
   intent: string,
   meter: Meter,
-  stats: RunStats
+  stats: RunStats,
+  stageGuidance: StageGuidance
 ): Promise<TaskOutcome> {
   await refreshMeta(task)
   if (task.meta.delivery.mode === 'pending') {
@@ -1603,7 +1692,16 @@ async function shipAndFinish(
       } catch (err) {
         log.warn(`delivery history: ${err instanceof Error ? err.message : String(err)}`)
       }
-      return setAside(ctx, task, meter, stats, `ship failed: ${ship.reason}`, shipOut, intent)
+      return setAside(
+        ctx,
+        task,
+        meter,
+        stats,
+        `ship failed: ${ship.reason}`,
+        shipOut,
+        intent,
+        stageGuidance('postmortem')
+      )
     }
   }
 

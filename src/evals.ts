@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { runAgent } from './agents.ts'
 import type { WorkContext } from './config.ts'
 import { commitDiff, headSha, worktreeDiff } from './git.ts'
+import { createGuidanceFromDistillation } from './guidance.ts'
 import { appendCandidate } from './lessons.ts'
 import { log } from './log.ts'
 import { correctionPrompt } from './prompts.ts'
@@ -15,6 +16,22 @@ import { readIntent, type Task } from './task.ts'
 // Best-effort — a capture failure is logged and never affects the task.
 
 type EvalOutcome = 'done' | 'blocked'
+
+export async function captureCorrectionGuidance(
+  ctx: WorkContext,
+  input: {
+    taskId: string
+    category: string
+    lesson: string
+    distillation: string
+  }
+): Promise<'created' | 'not-actionable' | 'invalid'> {
+  return createGuidanceFromDistillation(ctx, {
+    source: { kind: 'correction', taskId: input.taskId, detail: input.category },
+    text: input.lesson,
+    distillation: input.distillation,
+  })
+}
 
 export async function captureEvalCase(
   ctx: WorkContext,
@@ -71,12 +88,14 @@ export async function captureCorrection(ctx: WorkContext, task: Task, note: stri
 
   let category = 'other'
   let lesson = note
+  let distillation: string | null = null
   try {
     const out = await runAgent(ctx.agents.reviewer, {
       root: ctx.root,
       prompt: correctionPrompt(intent, agentAttempt, humanFix, note, reason),
       access: 'read',
     })
+    distillation = out.text
     category = /CATEGORY:\s*(\w+)/i.exec(out.text)?.[1]?.toLowerCase() ?? 'other'
     lesson = /LESSON:\s*(.+)/i.exec(out.text)?.[1]?.trim() ?? note
   } catch (err) {
@@ -117,5 +136,24 @@ export async function captureCorrection(ctx: WorkContext, task: Task, note: stri
     ctx,
     `correction · ${task.id} · [${category}] ${lesson || 'see eval candidate'}`
   )
+  if (distillation && lesson) {
+    try {
+      const captured = await captureCorrectionGuidance(ctx, {
+        taskId: task.id,
+        category,
+        lesson,
+        distillation,
+      })
+      if (captured === 'invalid') {
+        log.warn(`correction guidance metadata invalid for ${task.id}; kept raw candidate only`)
+      }
+    } catch (err) {
+      log.warn(
+        `correction guidance capture failed for ${task.id}: ${
+          err instanceof Error ? err.message : err
+        }`
+      )
+    }
+  }
   log.info(`recorded correction for ${task.id} (${category})`)
 }

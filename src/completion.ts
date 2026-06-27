@@ -110,6 +110,11 @@ export function renderZshCompletionScript(): string {
   const config = mustCommandSpec('config')
   const configSet = mustSubcommandSpec('config', 'set')
   const configEdit = mustSubcommandSpec('config', 'edit')
+  const lessons = mustCommandSpec('lessons')
+  const lessonsList = mustSubcommandSpec('lessons', 'list')
+  const lessonsEdit = mustSubcommandSpec('lessons', 'edit')
+  const guidanceScopes = lessonsList.options?.find((option) => option.name === '--scope')?.values
+  const guidanceStages = lessonsList.options?.find((option) => option.name === '--stage')?.values
 
   return `${[
     '#compdef factory',
@@ -135,6 +140,11 @@ export function renderZshCompletionScript(): string {
     renderChoiceArray('_factory_config_set_options', optionChoices(configSet.options)),
     renderChoiceArray('_factory_config_keys', TASK_CONFIG_KEY_CHOICES),
     renderChoiceArray('_factory_config_edit_options', optionChoices(configEdit.options)),
+    renderChoiceArray('_factory_lessons_subcommands', subcommandChoices(lessons.subcommands)),
+    renderChoiceArray('_factory_lessons_list_options', optionChoices(lessonsList.options)),
+    renderChoiceArray('_factory_lessons_edit_options', optionChoices(lessonsEdit.options)),
+    renderNameArray('_factory_guidance_scopes', guidanceScopes ?? []),
+    renderNameArray('_factory_guidance_stages', guidanceStages ?? []),
     renderChoiceArray('_factory_show_steps', SHOW_STEP_CHOICES),
     renderNameArray('_factory_complexities', COMPLEXITY_CHOICES),
     renderNameArray('_factory_agents', AGENT_CHOICES),
@@ -186,6 +196,9 @@ export function renderZshCompletionScript(): string {
     '          ;;',
     '        config)',
     '          _factory_config',
+    '          ;;',
+    '        lessons)',
+    '          _factory_lessons',
     '          ;;',
     '        show)',
     "          _describe -t steps 'factory step' _factory_show_steps",
@@ -283,6 +296,26 @@ export function renderZshCompletionScript(): string {
     '    fi',
     '  done',
     "  _describe -t keys 'config key' _factory_config_keys",
+    '}',
+    '',
+    '_factory_lessons() {',
+    `  local subcommand="${zshParam('words[2]-')}"`,
+    '  if (( CURRENT <= 2 )); then',
+    "    _describe -t subcommands 'lessons command' _factory_lessons_subcommands",
+    '    return',
+    '  fi',
+    '  case $subcommand in',
+    '    list)',
+    '      _factory_complete_after_option --scope _factory_guidance_scopes && return',
+    '      _factory_complete_after_option --stage _factory_guidance_stages && return',
+    '      _factory_describe_current_options _factory_lessons_list_options',
+    '      ;;',
+    '    edit)',
+    '      _factory_complete_after_option --scope _factory_guidance_scopes && return',
+    '      _factory_complete_after_option --stage _factory_guidance_stages && return',
+    '      _factory_describe_current_options _factory_lessons_edit_options',
+    '      ;;',
+    '  esac',
     '}',
     '',
     `if [[ ${zshParam('funcstack[1]')} == _factory ]]; then`,
