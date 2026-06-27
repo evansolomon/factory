@@ -37,6 +37,7 @@ const config: Config = {
     implementer: 'codex',
     reviewer: 'claude',
     delivery: 'claude',
+    namer: { cli: 'codex', model: 'gpt-5-nano' },
   },
   ask: { agent: 'claude' },
 }
@@ -46,6 +47,7 @@ const agents: RoleAgents = {
   implementer: { cli: 'codex' },
   reviewer: { cli: 'claude' },
   delivery: { cli: 'claude' },
+  namer: { cli: 'codex', model: 'gpt-5-nano' },
 }
 
 async function tempDir(prefix: string): Promise<string> {
@@ -96,6 +98,29 @@ describe('task state transitions', () => {
 
     expect(next?.id).toBe(ready.id)
     expect(next?.meta.status).toBe('ready')
+  })
+
+  test('uses a sanitized suggested slug for new task ids', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Can we make the task names better?', null, {
+      suggestedSlug: 'Improve Task Names!!!',
+    })
+
+    expect(task.id).toBe('improve-task-names')
+    expect(task.meta.slug).toBe('improve-task-names')
+    expect(await Bun.file(`${task.dir}/task.md`).text()).toBe(
+      'Can we make the task names better?\n'
+    )
+  })
+
+  test('falls back to the intent when the suggested slug is empty', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Fix upload retry behavior', null, {
+      suggestedSlug: '!!!',
+    })
+
+    expect(task.id).toBe('fix-upload-retry-behavior')
+    expect(task.meta.slug).toBe('fix-upload-retry-behavior')
   })
 
   test('stranded planning tasks restart planning instead of resuming work', async () => {

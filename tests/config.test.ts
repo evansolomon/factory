@@ -89,15 +89,20 @@ describe('config cascade', () => {
       const root = await tempDir('ask-agent')
 
       expect((await loadConfig(root)).ask.agent).toBe('claude')
+      expect((await loadConfig(root)).agents.namer).toEqual({
+        cli: 'codex',
+        model: 'gpt-5-nano',
+      })
 
       await writeJson(`${root}/.factory.json`, {
-        agents: { reviewer: 'codex' },
+        agents: { reviewer: 'codex', namer: { cli: 'codex', model: 'gpt-5-mini' } },
         ask: { agent: { cli: 'codex', model: 'gpt-5' } },
       })
 
       const config = await loadConfig(root)
 
       expect(config.agents.reviewer).toBe('codex')
+      expect(config.agents.namer).toEqual({ cli: 'codex', model: 'gpt-5-mini' })
       expect(config.ask.agent).toEqual({ cli: 'codex', model: 'gpt-5' })
     })
   })

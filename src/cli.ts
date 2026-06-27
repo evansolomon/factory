@@ -3,6 +3,7 @@ import { dirname } from 'node:path'
 import { type ParsedAddOptions, parseAddOptions } from './add-options.ts'
 import { type AddRouteTask, selectAddRoute } from './add-route.ts'
 import { openAgentSession } from './agent-session.ts'
+import { agentLabel, runAgent } from './agents.ts'
 import { askFactory } from './ask.ts'
 import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
 import { addBacklog, loadBacklog, removeBacklog } from './backlog.ts'
@@ -50,6 +51,7 @@ import { parseInputArgs, resolveMessage } from './input.ts'
 import { readCandidates, readLessons } from './lessons.ts'
 import { log } from './log.ts'
 import { startPromptWorker } from './prompt.ts'
+import { taskNamePrompt } from './prompts.ts'
 import { sharpen } from './sharpen.ts'
 import {
   addTask,
@@ -679,6 +681,23 @@ function addOptionsRequireNewTask(options: ParsedAddOptions): string | null {
   return null
 }
 
+async function suggestTaskSlug(ctx: WorkContext, intent: string): Promise<string | null> {
+  try {
+    const result = await runAgent(ctx.agents.namer, {
+      root: ctx.root,
+      prompt: taskNamePrompt(intent),
+      access: 'read',
+    })
+    return result.text
+  } catch (err) {
+    log.warn(
+      `task name: ${agentLabel(ctx.agents.namer)} failed; using prompt prefix - ` +
+        `${err instanceof Error ? err.message : String(err)}`
+    )
+    return null
+  }
+}
+
 async function queueNewTask(
   ctx: WorkContext,
   base: { intent: string; verify: string | null },
@@ -691,10 +710,12 @@ async function queueNewTask(
   // skips runtime triage.
   const skipSharpen = options.raw || options.complexity !== null || !process.stdin.isTTY
   const directed = extractDeliveryDirective(base.intent, await listDeliverySkills(ctx.root))
+  const suggestedSlug = await suggestTaskSlug(ctx, directed.intent)
   const task = await addTask(ctx, directed.intent, base.verify, {
     sharpen: skipSharpen ? 'skipped' : 'pending',
     complexity: options.complexity,
     delivery: directed.delivery ?? { mode: 'pending' },
+    suggestedSlug,
   })
   const suffix = queuedSuffix({
     verify: base.verify,
@@ -807,9 +828,11 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       markFeedbackConsumed(task, task.meta.feedbackCount)
       await saveMeta(task)
     }
-    const followUp = await addTask(ctx, followUpIntent(task, base.intent), task.meta.verify, {
+    const followUpText = followUpIntent(task, base.intent)
+    const followUp = await addTask(ctx, followUpText, task.meta.verify, {
       sharpen: 'skipped',
       feedbackSourceTaskId: task.id,
+      suggestedSlug: await suggestTaskSlug(ctx, followUpText),
     })
     log.ok(`${task.id}: routed as follow-up — ${route.reason}; queued ${followUp.id}`)
     return 0
@@ -1089,9 +1112,11 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       await appendFeedback(task, text)
       markFeedbackConsumed(task, task.meta.feedbackCount)
       await saveMeta(task)
-      const followUp = await addTask(ctx, followUpIntent(task, text), task.meta.verify, {
+      const followUpText = followUpIntent(task, text)
+      const followUp = await addTask(ctx, followUpText, task.meta.verify, {
         sharpen: 'skipped',
         feedbackSourceTaskId: task.id,
+        suggestedSlug: await suggestTaskSlug(ctx, followUpText),
       })
       log.ok(`${task.id}: done — queued follow-up ${followUp.id} for feedback`)
       return 0

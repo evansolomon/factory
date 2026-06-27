@@ -290,6 +290,21 @@ ${intent}
 ${plan}`
 }
 
+// Name a newly-queued task before planning exists. Keep this intent-only and
+// forbid repo inspection so `factory add` stays cheap and low-latency.
+export function taskNamePrompt(intent: string): string {
+  return `Name this coding task as a short filesystem-safe id: 2-5 words describing what the task DOES, in lowercase kebab-case (e.g. \`add-upload-retry\`, \`fix-billing-timezone\`).
+
+Rules:
+- Do not inspect the repository or run commands. Use only the task text below.
+- Name the action and its subject, not where it lives.
+- Do not copy a URL, domain, file path, branch name, ticket id, hash, or other long identifier verbatim.
+- Output ONLY the name on a single line: no quotes, punctuation, explanation, or markdown.
+
+## Task
+${intent}`
+}
+
 // A user-facing build checklist, appended to the implement/fix prompts so the
 // design system + UX decisions are honored at write time, not only caught in review.
 function uxBuildNote(userFacing: boolean): string {

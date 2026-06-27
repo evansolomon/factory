@@ -501,12 +501,16 @@ markdown artifacts and points to the brief.
     assessment, and deploy-safety review
     (best a *different* model from the implementer, to avoid self-bias).
   - `delivery` — runs task-local delivery and completion handoffs.
+  - `namer` — cheaply summarizes new task intents into short task ids. This is
+    best-effort; if the model call fails, `factory add` falls back to the local
+    prompt-prefix slug.
 
   Each value is `"codex"` / `"claude"` or
   `{ "cli": "codex"|"claude", "model"?: "…", "provider"?: "…" }`.
   Default: `{"planners": ["codex","claude"], "implementer": "codex",
-  "reviewer": "claude", "delivery": "claude"}`. Only `codex` and `claude` are
-  built in (each needs an adapter — see below).
+  "reviewer": "claude", "delivery": "claude",
+  "namer": {"cli": "codex", "model": "gpt-5-nano"}}`. Only `codex` and `claude`
+  are built in (each needs an adapter — see below).
 
   **Other models via `provider` (codex only).** codex is an OpenAI-API harness,
   so any OpenAI-compatible backend — xAI/Grok, or local/hosted OSS (Ollama, vLLM,
