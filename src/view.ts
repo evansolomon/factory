@@ -180,10 +180,11 @@ function liveMeterSummary(meter: LiveMeter | null): string {
 export async function printStatus(ctx: WorkContext): Promise<void> {
   const tasks = await loadTasks(ctx)
   const branch = await currentBranch(ctx.root)
-  log.log(`factory — ${tasks.length} task${tasks.length === 1 ? '' : 's'} · ${branch}`)
+  const plural = tasks.length === 1 ? '' : 's'
+  log.log(`factory — ${tasks.length} task record${plural} · ${branch}`)
 
   if (tasks.length === 0) {
-    log.info('no tasks — queue one with: factory add "…"')
+    log.info('no work in this factory — start with: factory add "…"')
     return
   }
 
