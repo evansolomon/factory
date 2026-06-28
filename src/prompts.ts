@@ -461,7 +461,6 @@ USER-FACING: YES|NO`
 export function deliverySelectPrompt(input: {
   intent: string
   verify: string | null
-  finalPlan: string
   skills: Array<{ name: string; description: string | null }>
   history: string
 }): string {
@@ -510,10 +509,7 @@ ${input.history}
 ${input.verify ?? 'none'}
 
 ## Task
-${input.intent}
-
-## Final plan
-${input.finalPlan}`
+${input.intent}`
 }
 
 // The delivery step: a full-permission agent delivers the committed branch,

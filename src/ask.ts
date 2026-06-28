@@ -238,7 +238,7 @@ Factory context:
 - worktree: ${ctx.root}
 - stateDir: ${ctx.stateDir}
 - tasksDir: ${ctx.tasksDir}
-- delivery: task-local, selected before implementation
+- delivery: task-local, selected before planning/implementation
 
 Task index, ordered by likely relevance:
 ${taskIndex}

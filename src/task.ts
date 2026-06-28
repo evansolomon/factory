@@ -97,8 +97,9 @@ const MetaSchema = z.object({
   autoRetries: z.number().int().default(0),
   // Explicit complexity declared by `factory add`; null means runtime triage decides.
   complexity: TaskComplexitySchema.nullable().default(null),
-  // Task-local delivery decision. Pending tasks choose delivery before implementation
-  // using repo context, available skills, history, and the task spec.
+  // Task-local delivery decision. Pending tasks choose delivery after the task is
+  // clarified, before planning/implementation, using repo context, available
+  // skills, history, and the task spec.
   delivery: TaskDeliverySchema.default({ mode: 'pending' }),
   deliveryProposal: TaskDeliverySchema.optional(),
   deliveryProposalAt: z.string().nullable().default(null),

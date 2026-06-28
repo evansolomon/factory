@@ -497,17 +497,17 @@ Fields:
   same auto-fix loop. Text-grounded only — no rendering/screenshots.
 - **`plansDir`** — where the clean final plan per task is written, one file per
   task, no meta (default `.coding-agent-plans/`, committed as docs; `null` off).
-- **Delivery** is task-local, not static config. Before implementation, factory
-  chooses whether a completed task should stop after the local commit, run a named
-  delivery skill, or follow a one-off policy. The selector reads the task spec,
-  repo docs, available `.skills/*/SKILL.md` descriptions, and recent repo delivery
-  history; if unsure, it chooses `none`. Explicit directives like `$ship` or
-  `/ship` in `factory add` win and are stripped from the task text. Plain wording
-  like "open a PR and auto merge" can resolve to a matching skill when one exists.
-  When the selector auto-selects a side-effecting action (`skill` or `policy`), the
-  task pauses at `needs-input` before implementation so you can confirm or override
-  it. Explicit directives, manual `factory delivery ...` choices, and selected
-  `none` do not pause.
+- **Delivery** is task-local, not static config. After sharpen/triage clarifies the
+  task, factory chooses whether a completed task should stop after the local
+  commit, run a named delivery skill, or follow a one-off policy. The selector
+  reads the task spec, repo docs, available `.skills/*/SKILL.md` descriptions, and
+  recent repo delivery history; if unsure, it chooses `none`. Explicit directives
+  like `$ship` or `/ship` in `factory add` win and are stripped from the task text.
+  Plain wording like "open a PR and auto merge" can resolve to a matching skill
+  when one exists. When the selector auto-selects a side-effecting action (`skill`
+  or `policy`), the task pauses at `needs-input` before the plan/implementation
+  stages so you can confirm or override it. Explicit directives, manual
+  `factory delivery ...` choices, and selected `none` do not pause.
 
   Interactive `factory run` prompts inline; pressing Enter accepts the recommended
   delivery. Non-interactive runs answer through the normal state-aware path, for
