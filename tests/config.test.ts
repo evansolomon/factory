@@ -84,6 +84,20 @@ describe('config cascade', () => {
     })
   })
 
+  test('rejects codex-only agent options on claude agents', async () => {
+    await withFactoryHome(async () => {
+      const root = await tempDir('invalid-agent')
+      await writeJson(`${root}/.factory.json`, {
+        agents: { reviewer: { cli: 'claude', reasoningEffort: 'low' } },
+      })
+
+      await expect(loadConfig(root)).rejects.toThrow(ConfigError)
+      await expect(loadConfig(root)).rejects.toThrow(
+        'reasoningEffort is only supported for the codex cli'
+      )
+    })
+  })
+
   test('configures the ask agent separately from pipeline agents', async () => {
     await withFactoryHome(async () => {
       const root = await tempDir('ask-agent')
@@ -91,19 +105,20 @@ describe('config cascade', () => {
       expect((await loadConfig(root)).ask.agent).toBe('claude')
       expect((await loadConfig(root)).agents.namer).toEqual({
         cli: 'codex',
-        model: 'gpt-5-nano',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'low',
       })
 
       await writeJson(`${root}/.factory.json`, {
-        agents: { reviewer: 'codex', namer: { cli: 'codex', model: 'gpt-5-mini' } },
-        ask: { agent: { cli: 'codex', model: 'gpt-5' } },
+        agents: { reviewer: 'codex', namer: { cli: 'codex', model: 'gpt-5.4-mini' } },
+        ask: { agent: { cli: 'codex', model: 'gpt-5.4' } },
       })
 
       const config = await loadConfig(root)
 
       expect(config.agents.reviewer).toBe('codex')
-      expect(config.agents.namer).toEqual({ cli: 'codex', model: 'gpt-5-mini' })
-      expect(config.ask.agent).toEqual({ cli: 'codex', model: 'gpt-5' })
+      expect(config.agents.namer).toEqual({ cli: 'codex', model: 'gpt-5.4-mini' })
+      expect(config.ask.agent).toEqual({ cli: 'codex', model: 'gpt-5.4' })
     })
   })
 

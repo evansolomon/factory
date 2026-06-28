@@ -2,8 +2,12 @@ import { dirname } from 'node:path'
 import { z } from 'zod'
 import { mainWorktreeRoot, repoRoot } from './git.ts'
 
-// An agent is a CLI, optionally pinned to a model. Accepts a bare "codex"/
-// "claude" or { cli, model } in config; normalized to Agent everywhere else.
+const ReasoningEffortSchema = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh'])
+type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>
+
+// An agent is a CLI, optionally pinned to a model and Codex reasoning effort.
+// Accepts a bare "codex"/"claude" or an object in config; normalized to Agent
+// everywhere else.
 const AgentSpecSchema = z
   .union(
     [
@@ -11,6 +15,7 @@ const AgentSpecSchema = z
       z.object({
         cli: z.enum(['codex', 'claude']),
         model: z.string().optional(),
+        reasoningEffort: ReasoningEffortSchema.optional(),
         // Selects a non-default codex backend — an OpenAI-compatible provider
         // configured in ~/.codex/config.toml (base_url/env_key/wire_api) —
         // passed through as `-c model_provider=`. This is how a single agent
@@ -20,9 +25,15 @@ const AgentSpecSchema = z
     ],
     {
       error:
-        'expected "codex" or "claude", or { "cli": "codex"|"claude", "model"?: string, "provider"?: string }',
+        'expected "codex" or "claude", or { "cli": "codex"|"claude", "model"?: string, "reasoningEffort"?: string, "provider"?: string }',
     }
   )
+  // reasoningEffort maps to codex's `model_reasoning_effort`; claude has a
+  // separate model-selection surface, so reject it here instead of ignoring it.
+  .refine((spec) => typeof spec === 'string' || !spec.reasoningEffort || spec.cli === 'codex', {
+    error: 'reasoningEffort is only supported for the codex cli',
+    path: ['reasoningEffort'],
+  })
   // provider routes through codex's `-c model_provider=`; claude has no
   // equivalent CLI flag (it selects backends via env/Bedrock/Vertex), so reject
   // it on claude rather than silently ignore it.
@@ -37,7 +48,20 @@ const AgentSpecSchema = z
     path: ['provider'],
   })
 type AgentSpec = z.infer<typeof AgentSpecSchema>
-export type Agent = { cli: 'codex' | 'claude'; model?: string; provider?: string }
+export type Agent = {
+  cli: 'codex' | 'claude'
+  model?: string
+  reasoningEffort?: ReasoningEffort
+  provider?: string
+}
+
+function defaultNamerAgent(): AgentSpec {
+  return {
+    cli: 'codex',
+    model: 'gpt-5.4-mini',
+    reasoningEffort: 'low',
+  }
+}
 
 function normAgent(spec: AgentSpec): Agent {
   return typeof spec === 'string' ? { cli: spec } : spec
@@ -54,7 +78,9 @@ const AgentsSchema = z.object({
   delivery: AgentSpecSchema.default('claude'),
   // Cheap, low-latency model used only to turn a raw task intent into a short id.
   // Best-effort callers fall back to the local slug heuristic if this is unavailable.
-  namer: AgentSpecSchema.default((): AgentSpec => ({ cli: 'codex', model: 'gpt-5-nano' })),
+  // Pin the Codex-recommended fast/lower-cost model and low reasoning so this
+  // does not inherit an expensive user default like gpt-5.5 high.
+  namer: AgentSpecSchema.default(defaultNamerAgent),
 })
 
 const AskSchema = z
@@ -141,7 +167,7 @@ const ConfigSchema = z.object({
       implementer: 'codex',
       reviewer: 'claude',
       delivery: 'claude',
-      namer: { cli: 'codex', model: 'gpt-5-nano' },
+      namer: defaultNamerAgent(),
     })
   ),
   // Conversational, read-only questions about factory's saved task state. Kept
