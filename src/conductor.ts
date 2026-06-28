@@ -5,10 +5,16 @@ import type { Agent, WorkContext } from './config.ts'
 import { buildDeckHtml } from './deck.ts'
 import {
   appendDeliveryHistory,
+  applyDeliveryConfirmation,
+  type DeliverySkill,
   deliveryAction,
+  deliveryLabel,
+  deliveryNeedsConfirmation,
+  deliveryRecommendation,
   formatDeliveryHistory,
   listDeliverySkills,
   readDeliveryHistory,
+  type TaskDelivery,
 } from './delivery.ts'
 import { run } from './exec.ts'
 import {
@@ -92,6 +98,7 @@ import {
 import {
   appendFailure,
   type Failure,
+  latestAnswerValueAfter,
   markFeedbackConsumed,
   pendingFeedbackCount,
   readAnswers,
@@ -373,6 +380,14 @@ export function decideComplexity(
 
 export function implementationAttemptCount(failures: Failure[]): number {
   return failures.filter((failure) => failure.remediation === 'code-fix').length
+}
+
+export function resumeUserFacing(
+  uxEnabled: boolean,
+  persisted: boolean | undefined,
+  diffUserFacing: boolean
+): boolean {
+  return uxEnabled && (persisted ?? diffUserFacing)
 }
 
 // Persist one telemetry record for this pass. Best-effort: recordRun never throws,
@@ -1053,21 +1068,112 @@ async function runSharpenStage(
   return reviewSharpenSpec(ctx, task, meter, turns, candidate)
 }
 
+function deliveryConfirmationSummary(delivery: TaskDelivery): string {
+  switch (delivery.mode) {
+    case 'skill':
+      return deliveryRecommendation(delivery) ?? 'skill'
+    case 'policy':
+      return 'policy'
+    case 'none':
+      return 'none'
+    case 'pending':
+      return 'pending'
+  }
+}
+
+function deliveryConfirmationPreamble(delivery: TaskDelivery): string {
+  const recommendation = deliveryRecommendation(delivery) ?? 'none'
+  const reason =
+    delivery.mode === 'pending'
+      ? 'No selector reason was available.'
+      : (delivery.reason ?? 'The selector did not provide a reason.')
+
+  return [
+    `Confirm delivery - ${deliveryConfirmationSummary(delivery)} auto-selected.`,
+    '',
+    'Factory inferred a side-effecting delivery action before implementation.',
+    `Proposed delivery: ${recommendation} (${deliveryLabel(delivery)})`,
+    `Reason: ${reason}`,
+    'Interactive: press Enter to accept, or type an accepted delivery answer.',
+    'Non-interactive: to accept, answer with the recommended value shown below.',
+    '',
+    'Accepted answers: `none`, `$pr`, `/pr`, `$ship`, `/ship`, or a one-off delivery policy.',
+  ].join('\n')
+}
+
+export function deliveryConfirmationQuestions(delivery: TaskDelivery): string {
+  return formatQuestions(deliveryConfirmationPreamble(delivery), [
+    {
+      q: 'Which delivery should run when the task finishes after review, verify, and commit?',
+      rec: deliveryRecommendation(delivery) ?? 'none',
+    },
+  ])
+}
+
+export function resolveDeliveryProposal(input: {
+  proposed: TaskDelivery
+  proposedAt: string | null
+  answers: string | null
+  skills: DeliverySkill[]
+}): { kind: 'confirmed'; delivery: TaskDelivery } | { kind: 'needs-input'; questions: string } {
+  const delivery = applyDeliveryConfirmation({
+    proposed: input.proposed,
+    answer: input.answers ? latestAnswerValueAfter(input.answers, input.proposedAt) : null,
+    skills: input.skills,
+  })
+  if (delivery) {
+    return { kind: 'confirmed', delivery }
+  }
+  return { kind: 'needs-input', questions: deliveryConfirmationQuestions(input.proposed) }
+}
+
 async function selectTaskDelivery(
   ctx: WorkContext,
   task: Task,
   meter: Meter,
+  stats: RunStats,
   intent: string,
   verify: string | null,
   finalPlan: string
-): Promise<void> {
+): Promise<TaskOutcome | null> {
   await refreshMeta(task)
+  const skills = await listDeliverySkills(ctx.root)
+  if (task.meta.deliveryProposal) {
+    if (!task.meta.deliveryProposalAt) {
+      task.meta.deliveryProposalAt = new Date().toISOString()
+      task.meta.resume = true
+      task.meta.updatedAt = task.meta.deliveryProposalAt
+      await saveMeta(task)
+      return needsInput(
+        ctx,
+        task,
+        meter,
+        stats,
+        deliveryConfirmationQuestions(task.meta.deliveryProposal)
+      )
+    }
+    const resolved = resolveDeliveryProposal({
+      proposed: task.meta.deliveryProposal,
+      proposedAt: task.meta.deliveryProposalAt,
+      answers: await readAnswers(task),
+      skills,
+    })
+    if (resolved.kind === 'needs-input') {
+      task.meta.resume = true
+      task.meta.updatedAt = new Date().toISOString()
+      await saveMeta(task)
+      return needsInput(ctx, task, meter, stats, resolved.questions)
+    }
+    await setTaskDelivery(task, resolved.delivery)
+    log.info(`${task.id}: delivery — ${deliveryLabel(resolved.delivery)} confirmed`)
+    return null
+  }
+
   if (task.meta.delivery.mode !== 'pending') {
-    return
+    return null
   }
 
   await progress(ctx, task, 'delivery-select', 'delivery — choosing completion action')
-  const skills = await listDeliverySkills(ctx.root)
   const history = formatDeliveryHistory(await readDeliveryHistory(ctx))
   const output = await agentStep(
     meter,
@@ -1090,8 +1196,20 @@ async function selectTaskDelivery(
     output,
     skills.map((skill) => skill.name)
   )
-  await setTaskDelivery(task, selection.delivery)
-  log.info(`${task.id}: delivery — ${selection.delivery.mode}`)
+  if (!deliveryNeedsConfirmation(selection.delivery)) {
+    await setTaskDelivery(task, selection.delivery)
+    log.info(`${task.id}: delivery — ${selection.delivery.mode}`)
+    return null
+  }
+
+  const now = new Date().toISOString()
+  task.meta.deliveryProposal = selection.delivery
+  task.meta.deliveryProposalAt = now
+  task.meta.resume = true
+  task.meta.updatedAt = now
+  await saveMeta(task)
+  log.info(`${task.id}: delivery — ${deliveryLabel(selection.delivery)} needs confirmation`)
+  return needsInput(ctx, task, meter, stats, deliveryConfirmationQuestions(selection.delivery))
 }
 
 async function runPrototypeStage(
@@ -1170,8 +1288,10 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     )
   }
   // Whether this task is user-facing (gates the UI/UX lenses). Set by triage on a
-  // fresh run; derived from the existing diff on resume (triage doesn't re-run).
-  let userFacing = false
+  // fresh run; restored from metadata or derived from the existing diff on resume.
+  let userFacing = ctx.config.ux && (task.meta.userFacing ?? false)
+  let classifiedUserFacing = task.meta.userFacing
+  let triageClassifiedUserFacing = false
 
   // RESUME — reuse the saved plan + the existing worktree and pick up where the
   // task left off, skipping the (expensive) planning ensemble. The marker + any
@@ -1220,7 +1340,12 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       const triage = parseTriage(verdict)
       trivial = triage.trivial
       stats.triage = trivial ? 'trivial' : 'complex'
-      userFacing = ctx.config.ux && triage.userFacing
+      classifiedUserFacing = triage.userFacing
+      userFacing = ctx.config.ux && classifiedUserFacing
+      triageClassifiedUserFacing = true
+      task.meta.userFacing = classifiedUserFacing
+      task.meta.updatedAt = new Date().toISOString()
+      await saveMeta(task)
     }
 
     if (trivial && task.meta.sharpen === 'pending') {
@@ -1319,7 +1444,15 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     )
   }
 
-  await selectTaskDelivery(ctx, task, meter, intent, verify, finalPlan)
+  if (triageClassifiedUserFacing || classifiedUserFacing !== undefined) {
+    task.meta.userFacing = classifiedUserFacing
+    task.meta.updatedAt = new Date().toISOString()
+    await saveMeta(task)
+  }
+  const deliveryPause = await selectTaskDelivery(ctx, task, meter, stats, intent, verify, finalPlan)
+  if (deliveryPause) {
+    return deliveryPause
+  }
 
   const feedbackContext = await analyzeFeedbackIfPending(ctx, task, meter, intent, finalPlan)
   const prototype = await prototypeContext(task)
@@ -1332,7 +1465,9 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   // On resume, triage didn't run — derive user-facing from the existing diff so the
   // fix pass still gets the design-context note. (The UX review gate detects it too.)
   if (resuming && ctx.config.ux) {
-    userFacing = uiInDiff(await worktreeDiff(ctx.root))
+    const diffUserFacing =
+      task.meta.userFacing === undefined ? uiInDiff(await worktreeDiff(ctx.root)) : false
+    userFacing = resumeUserFacing(ctx.config.ux, task.meta.userFacing, diffUserFacing)
   }
 
   // 5–7. IMPLEMENT → REVIEW → VERIFY with auto-fix: on a failed gate, feed the

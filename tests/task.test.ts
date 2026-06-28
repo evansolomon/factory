@@ -6,6 +6,8 @@ import type { Config, RepoContext, RoleAgents, WorkContext } from '../src/config
 import {
   addTask,
   appendFeedback,
+  latestAnswerValue,
+  latestAnswerValueAfter,
   loadTasks,
   markFeedbackConsumed,
   nextRunnable,
@@ -378,6 +380,115 @@ describe('task state transitions', () => {
       source: 'manual',
       confidence: 'high',
       reason: 'Manual policy.',
+    })
+  })
+
+  test('latestAnswerValue reads the latest raw answer body', () => {
+    const answers = [
+      '## Answer (2026-01-01T00:00:00.000Z)',
+      'Use the first option.',
+      '',
+      '## Answer (2026-01-02T00:00:00.000Z)',
+      'Use the second option.',
+    ].join('\n')
+
+    expect(latestAnswerValue(answers)).toBe('Use the second option.')
+  })
+
+  test('latestAnswerValue extracts the final formatted answer value', () => {
+    const answers = [
+      '## Answer (2026-01-01T00:00:00.000Z)',
+      'Q: Which delivery?',
+      'Recommended: $pr',
+      'A: none',
+      '',
+      '## Answer (2026-01-02T00:00:00.000Z)',
+      'Q: Run delivery?',
+      'Recommended: $ship',
+      'A: $ship',
+    ].join('\n')
+
+    expect(latestAnswerValue(answers)).toBe('$ship')
+  })
+
+  test('latestAnswerValueAfter ignores answers before the boundary', () => {
+    const answers = [
+      '## Answer (2026-01-01T00:00:00.000Z)',
+      'Q: Earlier clarification?',
+      'Recommended: $ship',
+      'A: $ship',
+      '',
+      '## Answer (2026-01-01T00:00:02.000Z)',
+      'Q: Confirm delivery?',
+      'Recommended: $ship',
+      'A: none',
+    ].join('\n')
+
+    expect(latestAnswerValueAfter(answers, '2026-01-01T00:00:01.000Z')).toBe('none')
+    expect(latestAnswerValueAfter(answers, '2026-01-01T00:00:02.000Z')).toBeNull()
+    expect(latestAnswerValueAfter(answers, null)).toBeNull()
+  })
+
+  test('latestAnswerValue returns null for missing or blank answers', () => {
+    expect(latestAnswerValue('')).toBeNull()
+    expect(latestAnswerValue('## Answer (2026-01-01T00:00:00.000Z)\n')).toBeNull()
+  })
+
+  test('task delivery proposal survives status writes before confirmation', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Confirm ship', null)
+    task.meta.deliveryProposal = {
+      mode: 'skill',
+      skill: 'ship',
+      source: 'selected',
+      confidence: 'high',
+      reason: 'Similar tasks shipped.',
+    }
+    task.meta.deliveryProposalAt = '2026-01-01T00:00:00.000Z'
+    await saveTask(task)
+
+    await setStatus(task, 'needs-input')
+
+    const latest = (await loadTasks(ctx)).find((t) => t.id === task.id)
+    expect(latest?.meta.delivery).toEqual({ mode: 'pending' })
+    expect(latest?.meta.deliveryProposal).toEqual({
+      mode: 'skill',
+      skill: 'ship',
+      source: 'selected',
+      confidence: 'high',
+      reason: 'Similar tasks shipped.',
+    })
+    expect(latest?.meta.deliveryProposalAt).toBe('2026-01-01T00:00:00.000Z')
+  })
+
+  test('manual delivery clears a pending proposal', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Confirm ship', null)
+    task.meta.deliveryProposal = {
+      mode: 'skill',
+      skill: 'ship',
+      source: 'selected',
+      confidence: 'high',
+      reason: 'Similar tasks shipped.',
+    }
+    task.meta.deliveryProposalAt = '2026-01-01T00:00:00.000Z'
+    await saveTask(task)
+
+    await setTaskDelivery(task, {
+      mode: 'none',
+      source: 'manual',
+      confidence: 'high',
+      reason: 'User manually disabled delivery.',
+    })
+
+    const latest = (await loadTasks(ctx)).find((t) => t.id === task.id)
+    expect(latest?.meta.deliveryProposal).toBeUndefined()
+    expect(latest?.meta.deliveryProposalAt).toBeNull()
+    expect(latest?.meta.delivery).toEqual({
+      mode: 'none',
+      source: 'manual',
+      confidence: 'high',
+      reason: 'User manually disabled delivery.',
     })
   })
 })

@@ -504,6 +504,18 @@ Fields:
   history; if unsure, it chooses `none`. Explicit directives like `$ship` or
   `/ship` in `factory add` win and are stripped from the task text. Plain wording
   like "open a PR and auto merge" can resolve to a matching skill when one exists.
+  When the selector auto-selects a side-effecting action (`skill` or `policy`), the
+  task pauses at `needs-input` before implementation so you can confirm or override
+  it. Explicit directives, manual `factory delivery ...` choices, and selected
+  `none` do not pause.
+
+  Interactive `factory run` prompts inline; pressing Enter accepts the recommended
+  delivery. Non-interactive runs answer through the normal state-aware path, for
+  example `factory add '$ship'` to accept a `$ship` recommendation. Accepted
+  answers are `none`, `$pr`, `/pr`, `$ship`, `/ship`, or a one-off policy string.
+  `delivery.md` remains the raw selector output, `questions.md` / `answers.md`
+  record the confirmation, and final `meta.delivery` is the confirmed or
+  overridden delivery.
 
   Inspect or override a task with `factory delivery`: `factory delivery`, `factory
   delivery none`, `factory delivery '$ship'`, or `factory delivery "open a PR and

@@ -100,6 +100,9 @@ const MetaSchema = z.object({
   // Task-local delivery decision. Pending tasks choose delivery before implementation
   // using repo context, available skills, history, and the task spec.
   delivery: TaskDeliverySchema.default({ mode: 'pending' }),
+  deliveryProposal: TaskDeliverySchema.optional(),
+  deliveryProposalAt: z.string().nullable().default(null),
+  userFacing: z.boolean().optional(),
   // Human feedback recorded after progress exists. Counted separately from answers
   // so the conductor can consume feedback only after a verified commit.
   feedbackCount: z.number().int().nonnegative().default(0),
@@ -220,6 +223,9 @@ export async function addTask(
     autoRetries: 0,
     complexity: options.complexity ?? null,
     delivery: options.delivery ?? { mode: 'pending' },
+    deliveryProposal: undefined,
+    deliveryProposalAt: null,
+    userFacing: undefined,
     feedbackCount: 0,
     feedbackConsumed: 0,
     feedbackSourceTaskId: options.feedbackSourceTaskId ?? null,
@@ -367,6 +373,8 @@ export async function refreshMeta(task: Task): Promise<void> {
 export async function setTaskDelivery(task: Task, delivery: TaskDelivery): Promise<void> {
   const latest = await readMeta(task.dir)
   latest.delivery = delivery
+  latest.deliveryProposal = undefined
+  latest.deliveryProposalAt = null
   latest.updatedAt = new Date().toISOString()
   task.meta = latest
   await writeMeta(task.dir, latest, { preserveDelivery: false })
@@ -443,6 +451,67 @@ export async function appendAnswer(task: Task, text: string): Promise<void> {
   const existing = (await readAnswers(task)) ?? ''
   const entry = `## Answer (${new Date().toISOString()})\n${text.trim()}\n`
   await Bun.write(`${task.dir}/answers.md`, existing ? `${existing}\n\n${entry}` : entry)
+}
+
+type AnswerEntry = {
+  timestamp: string
+  text: string
+}
+
+function answerEntries(text: string): AnswerEntry[] {
+  const starts = [...text.matchAll(/^## Answer \(([^)]+)\)\n/gm)].map((match) => ({
+    index: match.index,
+    timestamp: match[1] ?? '',
+  }))
+  return starts
+    .map((start, i) => ({
+      timestamp: start.timestamp,
+      text: text.slice(start.index, starts[i + 1]?.index ?? text.length).trim(),
+    }))
+    .filter((entry) => entry.text)
+}
+
+function answerValue(entry: AnswerEntry): string | null {
+  const body = entry.text.replace(/^## Answer \([^)]+\)(?:\n|$)/, '').trim()
+  if (!body) {
+    return null
+  }
+
+  const matches = [...body.matchAll(/^A:\s*(.*)$/gm)]
+  const answerLine = matches.at(-1)
+  if (!answerLine || answerLine.index === undefined) {
+    return body
+  }
+
+  const lineEnd = body.indexOf('\n', answerLine.index)
+  const inline = answerLine[1] ?? ''
+  const rest = lineEnd === -1 ? '' : body.slice(lineEnd + 1)
+  return `${inline}${rest ? `\n${rest}` : ''}`.trim() || null
+}
+
+export function latestAnswerValue(answers: string): string | null {
+  const latest = answerEntries(answers).at(-1)
+  if (!latest) {
+    return null
+  }
+  return answerValue(latest)
+}
+
+export function latestAnswerValueAfter(answers: string, after: string | null): string | null {
+  if (!after) {
+    return null
+  }
+  const afterMs = Date.parse(after)
+  if (!Number.isFinite(afterMs)) {
+    return null
+  }
+  const latest = answerEntries(answers)
+    .filter((entry) => {
+      const entryMs = Date.parse(entry.timestamp)
+      return Number.isFinite(entryMs) && entryMs > afterMs
+    })
+    .at(-1)
+  return latest ? answerValue(latest) : null
 }
 
 export function pendingFeedbackCount(task: Task): number {

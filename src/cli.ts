@@ -19,10 +19,10 @@ import {
 } from './config.ts'
 import { openDeck } from './deck.ts'
 import {
-  type DeliverySkill,
   deliveryLabel,
   extractDeliveryDirective,
   listDeliverySkills,
+  parseManualDelivery,
   type TaskDelivery,
 } from './delivery.ts'
 import { composeInEditor, openEditor } from './editor.ts'
@@ -375,29 +375,6 @@ async function inferTaskTarget(ctx: WorkContext, taskQuery: string | null): Prom
   throw new Error(`multiple active tasks; retry with --task <id>\nactive tasks: ${choices}`)
 }
 
-function manualDelivery(value: string, skills: DeliverySkill[]): TaskDelivery {
-  const lower = value.toLowerCase()
-  if (lower === 'none' || lower === 'disabled' || lower === 'off') {
-    return {
-      mode: 'none',
-      source: 'manual',
-      confidence: 'high',
-      reason: 'User manually disabled delivery.',
-    }
-  }
-  const explicit = extractDeliveryDirective(value, skills).delivery
-  if (explicit?.mode === 'skill') {
-    return { ...explicit, source: 'manual', reason: `User manually requested ${value}.` }
-  }
-  return {
-    mode: 'policy',
-    policy: value,
-    source: 'manual',
-    confidence: 'high',
-    reason: 'User manually set a delivery policy.',
-  }
-}
-
 function guidanceScopeText(record: GuidanceRecord): string {
   if (record.scope.kind === 'global') {
     return 'global'
@@ -614,7 +591,7 @@ async function taskDelivery(ctx: WorkContext, args: string[]): Promise<number> {
     const task = await inferTaskTarget(ctx, parsed.taskQuery)
     const value = parsed.args.join(' ').trim()
     if (value) {
-      await setTaskDelivery(task, manualDelivery(value, await listDeliverySkills(ctx.root)))
+      await setTaskDelivery(task, parseManualDelivery(value, await listDeliverySkills(ctx.root)))
       log.ok(`${task.id}: delivery set to ${deliveryLabel(task.meta.delivery)}`)
       return 0
     }
