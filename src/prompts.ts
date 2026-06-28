@@ -30,6 +30,10 @@ function researchBlock(research: string | null, framing: string): string {
   return research ? `\n\n## Repository research (${framing})\n${research}` : ''
 }
 
+function specialistBlock(policies: string | null): string {
+  return policies ? `\n\n## Specialist policies\n${policies}` : ''
+}
+
 function baselineBlock(baselineDiff: string | null): string {
   return baselineDiff
     ? `\n\n## Worktree diff before this factory run\nThe worktree already had changes before this run began. Treat factory as operating on the whole current worktree, but use this baseline to distinguish preexisting context from new changes when reviewing scope.\n\n\`\`\`diff\n${baselineDiff}\n\`\`\``
@@ -121,6 +125,127 @@ Investigate and report:
 ${intent}${verifyBlock(verify)}
 
 Output ONLY a markdown research dossier under the headings above. Report facts grounded in the actual code (cite file:line), not a plan or a recommendation. Make no code changes.`
+}
+
+export type WorkforcePromptInput = {
+  intent: string
+  verify: string | null
+  userFacing: boolean
+  securityEnabled: boolean
+  uxEnabled: boolean
+  agents: Array<{ id: string; label: string }>
+  researchScouts: string[]
+  reviewLenses: string[]
+  policies: Array<{ id: string; description: string | null; appliesTo: string[] }>
+}
+
+export function workforcePlanPrompt(input: WorkforcePromptInput): string {
+  const agents = input.agents.map((a) => `- ${a.id}: ${a.label}`).join('\n')
+  const research = input.researchScouts.map((kind) => `- ${kind}`).join('\n')
+  const review = input.reviewLenses.map((kind) => `- ${kind}`).join('\n')
+  const policies =
+    input.policies.length > 0
+      ? input.policies
+          .map((p) => {
+            const applies = p.appliesTo.length > 0 ? ` appliesTo=${p.appliesTo.join(',')}` : ''
+            return `- ${p.id}:${applies} ${p.description ?? ''}`.trimEnd()
+          })
+          .join('\n')
+      : '(none)'
+
+  return `Choose the read-only agent workforce for the task below. You are routing known capabilities; do not invent new stages, agents, scouts, lenses, files, or side effects.
+
+Keep the workforce small. Pick only scouts and review lenses that materially improve correctness for this task. The conductor will still enforce required safety floors such as correctness review, and security/UX config gates.
+
+Available agent ids:
+${agents}
+
+Available research scout kinds:
+${research}
+
+Available review lens kinds:
+${review}
+
+Available specialist policy ids:
+${policies}
+
+Rules:
+- Use only the listed ids.
+- Research scouts run before planning and must be read-only. Use "external" only when current upstream/API/library facts matter.
+- Review lenses run after implementation. Include optional lenses when their perspective is relevant; omit ones unlikely to add signal.
+- Attach policy ids only when they apply to that scout or lens.
+- Prefer "reviewer" for adversarial review and "implementer" for codebase research unless a named specialist is clearly better.
+- This task is ${input.userFacing ? 'USER-FACING' : 'not classified as user-facing'}.
+- Security gate is ${input.securityEnabled ? 'enabled' : 'disabled'}; UX lenses are ${input.uxEnabled ? 'enabled' : 'disabled'}.
+
+## Task
+${input.intent}${verifyBlock(input.verify)}
+
+Output ONLY a JSON object with this exact shape:
+{
+  "research": [
+    { "kind": "<available research kind>", "agent": "<available agent id>", "policies": ["<policy id>"], "reason": "<short reason>" }
+  ],
+  "review": [
+    { "kind": "<available review lens>", "agent": "<available agent id>", "policies": ["<policy id>"], "reason": "<short reason>" }
+  ]
+}`
+}
+
+export function researchScoutPrompt(
+  kind: string,
+  intent: string,
+  verify: string | null,
+  plansDir: string | null,
+  userFacing: boolean,
+  policies: string | null
+): string {
+  const plansLine = plansDir
+    ? `\n- Prior plans: inspect recent files under \`${plansDir}\` when relevant.`
+    : ''
+  const focus: Record<string, string> = {
+    code: 'Map the exact code surfaces, interfaces, ownership boundaries, and local patterns this task depends on.',
+    tests:
+      'Map the test and verification surface: relevant existing tests, likely commands, fixtures, and where a weak proof would miss real behavior.',
+    history:
+      'Map recent git history, prior plans, reversions, and recurring local gotchas in the areas this task appears to touch.',
+    external:
+      'Research current external facts only when they matter: upstream docs, APIs, schemas, standards, service behavior, or library semantics.',
+    runtime:
+      'Map runtime and deploy concerns: env/config, services, jobs, queues, migrations, serialization, rollout order, and rollback.',
+    'data-model':
+      'Map data model and persistence concerns: schema, migrations, validation boundaries, invariants, indexes, backfills, and callers.',
+    migration:
+      'Map migration/backfill/compatibility concerns: old and new versions, defaults, destructive changes, and rollback after writes.',
+    'ui-map':
+      'Map the user-facing surface: routes, components, design system, copy patterns, states, navigation, and closest existing flows.',
+  }
+  return `You are the ${kind} research scout for this task. Gather facts for planning; do not propose an implementation plan and do not edit files.
+
+Focus:
+${focus[kind] ?? 'Gather the facts this scout is responsible for.'}${plansLine}
+
+Ground every claim in repository evidence (file:line where possible) or clearly labeled external documentation when external research is needed.
+
+## Task
+${intent}${verifyBlock(verify)}
+
+Task is ${userFacing ? 'USER-FACING' : 'not classified as user-facing'}.${specialistBlock(policies)}
+
+Output ONLY a concise markdown dossier for this scout. Make no code changes.`
+}
+
+export function researchSynthesisPrompt(intent: string, reports: Labeled[]): string {
+  return `Synthesize the independent research scout reports below into one factual repository research dossier for planners.
+
+Do not plan the solution. Deduplicate, resolve conflicts by citing the better-grounded evidence, and preserve concrete file/function/test/runtime facts. Keep uncertainty explicit.
+
+## Task
+${intent}
+
+${labeledBlocks('Research scout', reports)}
+
+Output ONLY the synthesized markdown research dossier. Make no code changes.`
 }
 
 export function planPrompt(
@@ -752,6 +877,65 @@ SUMMARY: <one sentence naming the latest failure's root cause; for ASK_HUMAN, ma
 VERDICT: CONTINUE_CODE_FIX | RETRY_LATER | ASK_HUMAN | TERMINAL`
 }
 
+export function rescuePrompt(input: {
+  intent: string
+  finalPlan: string
+  verify: string | null
+  currentDiff: string
+  failures: string[]
+  latestFailure: string
+  guidance: string | null
+}): string {
+  const history =
+    input.failures.length > 0
+      ? input.failures.map((failure, i) => `${i + 1}. ${failure}`).join('\n')
+      : '(none)'
+  return `You are a last-chance rescue strategist for an autonomous coding loop. The normal convergence judge is about to block this task. Do NOT edit files. Decide whether one better next move exists, or whether blocking is correct.
+
+Classify the root cause first:
+- bad spec
+- bad plan
+- implementation mistake
+- test/verify issue
+- environment/transient
+- missing human decision
+- model/tool limitation
+
+Verdicts:
+- CONTINUE_CODE_FIX — one more code-fix attempt is likely useful, but only with a concrete materially different direction.
+- RETRY_LATER — the failure is likely external/transient; backoff is better than code churn.
+- ASK_HUMAN — the smallest missing decision/credential/context question would unblock progress.
+- TERMINAL — another autonomous pass would likely repeat, churn, or damage unrelated code.
+
+Rules:
+- Be skeptical of CONTINUE_CODE_FIX after repeated same-root-cause failures. If you choose it, NEXT must be a specific fix strategy the implementer can follow.
+- If you choose ASK_HUMAN, NEXT must be exactly the question to ask.
+- If you choose RETRY_LATER, NEXT must name the external/transient condition.
+- If you choose TERMINAL, NEXT must explain why no autonomous move should continue.
+
+## Task
+${input.intent}${verifyBlock(input.verify)}
+
+## Final plan
+${input.finalPlan}
+
+## Current diff
+\`\`\`diff
+${input.currentDiff}
+\`\`\`
+
+## Failure history
+${history}
+
+## Latest terminal failure
+${input.latestFailure}${learnedLessonsBlock(input.guidance)}
+
+Output exactly these final marker lines:
+SUMMARY: <one sentence root cause classification and reason>
+NEXT: <one concrete next move, question, transient condition, or terminal explanation>
+VERDICT: CONTINUE_CODE_FIX | RETRY_LATER | ASK_HUMAN | TERMINAL`
+}
+
 // Postmortem on a task the fix loop gave up on: a fast triage briefing for the
 // human + a distilled, generalizable lesson candidate (richer than a raw block
 // reason). Runs automatically on block; classifies the root cause so recurring
@@ -927,7 +1111,8 @@ export function riskReviewPrompt(
   intent: string,
   finalPlan: string,
   diff: string,
-  baselineDiff: string | null
+  baselineDiff: string | null,
+  guidance: string | null = null
 ): string {
   return `Assess the residual merge risk of the implemented diff below. Read the changed code and adjacent files as needed. Your job is to answer "0 to 10, how risky is this to merge?" with concrete rationale, not to re-review correctness.
 
@@ -947,7 +1132,7 @@ ${finalPlan}
 ## Diff
 \`\`\`diff
 ${diff}
-\`\`\`${baselineBlock(baselineDiff)}
+\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
 
 Output ONLY this markdown structure:
 

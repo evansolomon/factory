@@ -122,6 +122,44 @@ describe('config cascade', () => {
     })
   })
 
+  test('configures workforce routing agents and specialist policies', async () => {
+    await withFactoryHome(async () => {
+      const root = await tempDir('workforce-config')
+      await writeJson(`${root}/.factory.json`, {
+        workforce: true,
+        rescue: true,
+        agents: {
+          workforce: { cli: 'codex', model: 'gpt-5.4-mini', reasoningEffort: 'low' },
+          rescue: 'claude',
+          researchers: { runtime: 'claude' },
+          reviewers: { deploy: { cli: 'codex', model: 'gpt-5.4' } },
+        },
+        specialists: {
+          deploy: {
+            path: 'policies/deploy.md',
+            description: 'Deploy safety policy',
+            appliesTo: ['review.deploy', 'research.runtime'],
+          },
+        },
+      })
+
+      const config = await loadConfig(root)
+
+      expect(config.agents.workforce).toEqual({
+        cli: 'codex',
+        model: 'gpt-5.4-mini',
+        reasoningEffort: 'low',
+      })
+      expect(config.agents.researchers['runtime']).toBe('claude')
+      expect(config.agents.reviewers['deploy']).toEqual({ cli: 'codex', model: 'gpt-5.4' })
+      expect(config.specialists['deploy']).toEqual({
+        path: 'policies/deploy.md',
+        description: 'Deploy safety policy',
+        appliesTo: ['review.deploy', 'research.runtime'],
+      })
+    })
+  })
+
   test('resolves the default state directory under FACTORY_HOME sessions', async () => {
     await withFactoryHome(async (home) => {
       const base = await tempDir('repo')

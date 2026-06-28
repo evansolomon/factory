@@ -47,7 +47,7 @@ const AgentSpecSchema = z
     error: 'provider requires an explicit model',
     path: ['provider'],
   })
-type AgentSpec = z.infer<typeof AgentSpecSchema>
+export type AgentSpec = z.infer<typeof AgentSpecSchema>
 export type Agent = {
   cli: 'codex' | 'claude'
   model?: string
@@ -63,7 +63,7 @@ function defaultNamerAgent(): AgentSpec {
   }
 }
 
-function normAgent(spec: AgentSpec): Agent {
+export function normAgent(spec: AgentSpec): Agent {
   return typeof spec === 'string' ? { cli: spec } : spec
 }
 
@@ -71,16 +71,32 @@ function normAgent(spec: AgentSpec): Agent {
 // implementer also runs triage/reconcile/select; reviewer does the adversarial
 // review; delivery runs task-local delivery. Each defaults independently when
 // omitted.
+const AgentMapSchema = z.record(z.string(), AgentSpecSchema)
+
 const AgentsSchema = z.object({
   planners: z.array(AgentSpecSchema).default((): AgentSpec[] => ['codex', 'claude']),
   implementer: AgentSpecSchema.default('codex'),
   reviewer: AgentSpecSchema.default('claude'),
   delivery: AgentSpecSchema.default('claude'),
+  // Read-only router for dynamic research/review/policy selection.
+  workforce: AgentSpecSchema.default('claude'),
+  // Last-chance read-only strategist before a task truly blocks.
+  rescue: AgentSpecSchema.default('claude'),
+  // Optional named agent pools the workforce planner can route research scouts
+  // and review lenses to, e.g. { "runtime": "claude" }.
+  researchers: AgentMapSchema.default({}),
+  reviewers: AgentMapSchema.default({}),
   // Cheap, low-latency model used only to turn a raw task intent into a short id.
   // Best-effort callers fall back to the local slug heuristic if this is unavailable.
   // Pin the Codex-recommended fast/lower-cost model and low reasoning so this
   // does not inherit an expensive user default like gpt-5.5 high.
   namer: AgentSpecSchema.default(defaultNamerAgent),
+})
+
+const SpecialistPolicySchema = z.object({
+  path: z.string().min(1),
+  description: z.string().nullable().default(null),
+  appliesTo: z.array(z.string().min(1)).default([]),
 })
 
 const AskSchema = z
@@ -94,6 +110,10 @@ type AgentsConfig = {
   implementer: AgentSpec
   reviewer: AgentSpec
   delivery: AgentSpec
+  workforce: AgentSpec
+  rescue: AgentSpec
+  researchers: Record<string, AgentSpec>
+  reviewers: Record<string, AgentSpec>
   namer: AgentSpec
 }
 
@@ -155,6 +175,16 @@ const ConfigSchema = z.object({
   // self-unblocks instead of burning the fix budget re-implementing code that was
   // never the problem. false = a verify failure always routes to the code-fix loop.
   remediate: z.boolean().default(true),
+  // Let a read-only agent choose the research scouts, optional review lenses,
+  // lens agents, and specialist policies for complex tasks. false falls back to
+  // the fixed legacy research/review shape.
+  workforce: z.boolean().default(true),
+  // Run a read-only rescue strategist before a terminal block. It may authorize
+  // one sharper code-fix attempt, ask the human, retry later, or accept the block.
+  rescue: z.boolean().default(true),
+  // User-authored standing policy files the workforce planner may attach to
+  // specific research scouts or review lenses. Relative paths resolve from root.
+  specialists: z.record(z.string(), SpecialistPolicySchema).default({}),
   // Lifecycle hooks: event name → shell commands run when factory reaches that
   // event (see hooks.ts). Lets the surrounding environment react — tmux, desktop
   // notifications, dashboards — without factory knowing about it. Concatenated
@@ -167,6 +197,10 @@ const ConfigSchema = z.object({
       implementer: 'codex',
       reviewer: 'claude',
       delivery: 'claude',
+      workforce: 'claude',
+      rescue: 'claude',
+      researchers: {},
+      reviewers: {},
       namer: defaultNamerAgent(),
     })
   ),
