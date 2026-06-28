@@ -536,7 +536,7 @@ pre-implementation artifacts, not completion briefs; they are visible through
   `agents.reviewer` because asking is about assembling the right saved context, not
   participating in the task pipeline. Shape:
   `{ "agent": "claude" }` or
-  `{ "agent": { "cli": "codex", "model": "gpt-5" } }`. Default:
+  `{ "agent": { "cli": "codex", "model": "gpt-5.4" } }`. Default:
   `{ "agent": "claude" }`.
 - **`agents`** — which agent fills each role:
   - `planners` (list) — draft + cross-critique + revise. **≥2 different agents
@@ -551,11 +551,12 @@ pre-implementation artifacts, not completion briefs; they are visible through
     prompt-prefix slug.
 
   Each value is `"codex"` / `"claude"` or
-  `{ "cli": "codex"|"claude", "model"?: "…", "provider"?: "…" }`.
+  `{ "cli": "codex"|"claude", "model"?: "…", "reasoningEffort"?: "low", "provider"?: "…" }`.
   Default: `{"planners": ["codex","claude"], "implementer": "codex",
   "reviewer": "claude", "delivery": "claude",
-  "namer": {"cli": "codex", "model": "gpt-5-nano"}}`. Only `codex` and `claude`
-  are built in (each needs an adapter — see below).
+  "namer": {"cli": "codex", "model": "gpt-5.4-mini", "reasoningEffort": "low"}}`.
+  `reasoningEffort` is codex-only and maps to Codex's `model_reasoning_effort`.
+  Only `codex` and `claude` are built in (each needs an adapter — see below).
 
   **Other models via `provider` (codex only).** codex is an OpenAI-API harness,
   so any OpenAI-compatible backend — xAI/Grok, or local/hosted OSS (Ollama, vLLM,

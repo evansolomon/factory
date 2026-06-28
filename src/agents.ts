@@ -172,6 +172,7 @@ async function runCodex(agent: Agent, opts: AgentRun): Promise<AgentResult> {
     // Route to a non-default OpenAI-compatible backend (xAI, local/hosted OSS)
     // defined in ~/.codex/config.toml; absent → codex's default provider.
     ...(agent.provider ? ['-c', `model_provider="${agent.provider}"`] : []),
+    ...(agent.reasoningEffort ? ['-c', `model_reasoning_effort="${agent.reasoningEffort}"`] : []),
     '--json',
     ...(agent.model ? ['-m', agent.model] : []),
     '-o',
