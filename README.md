@@ -172,7 +172,8 @@ task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.m
         (config.retries is the hard-cap backstop), then block / set-aside.
         A flake or an environment problem it can't fix → set-aside (backoff)
         │ (pass)
-  commit → 12. SHIP (if configured) full-perms agent: MR/PR, CI, review
+  commit (message from diff + author/repo history) → 12. SHIP (if configured)
+        full-perms agent: MR/PR, CI, review
         → 13. FEEDBACK read-only local handoff
         │
         ├─ pass → write proof.md + feedback.md, status: done (shipped if ship set)
@@ -631,6 +632,7 @@ or jump-target behavior you want.
   verify.log             # latest verify output
   remediate[.N].md       # verify-failure doctor: diagnosis + env repair, when it runs
   proof.md               # pass proof written before commit
+  commit-message.md      # final commit subject synthesized from diff + author/repo history
   feedback.md            # completion handoff on success: summary + next verification steps
   brief.html             # visual one-page completion brief on success, best-effort
   agent-session.md       # manifest for a realtime interactive agent tweak session

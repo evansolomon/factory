@@ -305,6 +305,56 @@ Rules:
 ${intent}`
 }
 
+export function commitMessagePrompt(input: {
+  intent: string
+  finalPlan: string
+  diff: string
+  recentSubjects: string[]
+  authorSubjects: { identity: string; subjects: string[] } | null
+  verify: string | null
+}): string {
+  const recent =
+    input.recentSubjects.length > 0
+      ? input.recentSubjects.map((subject) => `- ${subject}`).join('\n')
+      : '(no recent commit subjects available)'
+  const author = input.authorSubjects
+    ? `Recent subjects by the current Git author (${input.authorSubjects.identity}):\n${
+        input.authorSubjects.subjects.length > 0
+          ? input.authorSubjects.subjects.map((subject) => `- ${subject}`).join('\n')
+          : '(no recent commits found for this author)'
+      }`
+    : 'Current Git author subjects unavailable.'
+  const verify = input.verify
+    ? `\n\n## Verification command that passed\n\`${input.verify}\``
+    : '\n\n## Verification\nNo verification command was recorded.'
+
+  return `Write the git commit subject for the completed change below.
+
+Match the commit-message style this repository and current author already use. Use the
+implemented diff as the source of truth for what changed; use the task and plan only
+as context. If the current author's examples show a distinct style, prefer that style
+when it still fits the repository.
+
+Output only the commit subject text, with no markdown or explanation.
+
+## Task intent
+${input.intent}
+
+## Final plan
+${input.finalPlan}${verify}
+
+## Recent commit subjects
+${author}
+
+Repo-wide recent subjects:
+${recent}
+
+## Implemented diff
+\`\`\`diff
+${input.diff}
+\`\`\``
+}
+
 // A user-facing build checklist, appended to the implement/fix prompts so the
 // design system + UX decisions are honored at write time, not only caught in review.
 function uxBuildNote(userFacing: boolean): string {
