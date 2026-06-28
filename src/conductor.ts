@@ -1,5 +1,6 @@
 import { mkdir } from 'node:fs/promises'
 import { type AgentResult, agentLabel, runAgent } from './agents.ts'
+import { cleanCommitMessage, fallbackCommitMessage } from './commit-message.ts'
 import type { Agent, WorkContext } from './config.ts'
 import { buildDeckHtml } from './deck.ts'
 import {
@@ -10,7 +11,17 @@ import {
   readDeliveryHistory,
 } from './delivery.ts'
 import { run } from './exec.ts'
-import { commitAll, commitDiff, currentBranch, hasChanges, headSha, worktreeDiff } from './git.ts'
+import {
+  type AuthorCommitSubjects,
+  commitAll,
+  commitDiff,
+  currentBranch,
+  hasChanges,
+  headSha,
+  recentAuthorCommitSubjects,
+  recentCommitSubjects,
+  worktreeDiff,
+} from './git.ts'
 import {
   applicableGuidance,
   createGuidanceFromDistillation,
@@ -32,6 +43,7 @@ import {
 } from './markers.ts'
 import { recordRun, type StageStat } from './metrics.ts'
 import {
+  commitMessagePrompt,
   consolidatePrompt,
   convergePrompt,
   critiquePrompt,
@@ -113,6 +125,10 @@ function fmtSecs(ms: number): string {
 
 function fmtTok(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`
+}
+
+function formatErr(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 // Per-task running tally of tokens + wall time, plus a per-stage breakdown that
@@ -1596,7 +1612,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   ].join('\n')
   await writeArtifact(task, 'proof.md', proof)
 
-  await commitAll(ctx.root, commitMessage(intent))
+  const message = await synthesizeCommitMessage(ctx, task, meter, intent, finalPlan, verify)
+  await commitAll(ctx.root, message)
   task.meta.commit = await headSha(ctx.root)
   if (feedbackContext) {
     await refreshFeedbackState(task)
@@ -1757,9 +1774,56 @@ async function shipAndFinish(
   return { ok: true }
 }
 
-function commitMessage(intent: string): string {
-  const subject = (intent.trim().split('\n', 1)[0] ?? 'Apply task').replace(/\.$/, '').slice(0, 72)
-  return subject.length > 0 ? subject : 'Apply task'
+async function synthesizeCommitMessage(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  intent: string,
+  finalPlan: string,
+  verify: string | null
+): Promise<string> {
+  const fallback = fallbackCommitMessage(intent)
+  try {
+    await progress(ctx, task, 'commit-message', 'commit — writing message')
+    const diff = await worktreeDiff(ctx.root)
+    let subjects: string[] = []
+    let authorSubjects: AuthorCommitSubjects | null = null
+    try {
+      subjects = await recentCommitSubjects(ctx.root)
+    } catch (err) {
+      log.warn(`commit message: recent history unavailable - ${formatErr(err)}`)
+    }
+    try {
+      authorSubjects = await recentAuthorCommitSubjects(ctx.root)
+    } catch (err) {
+      log.warn(`commit message: author history unavailable - ${formatErr(err)}`)
+    }
+    const output = await agentStep(
+      meter,
+      'commit-message',
+      agentLabel(ctx.agents.implementer),
+      runAgent(ctx.agents.implementer, {
+        root: ctx.root,
+        prompt: commitMessagePrompt({
+          intent,
+          finalPlan,
+          diff,
+          recentSubjects: subjects,
+          authorSubjects,
+          verify,
+        }),
+        access: 'read',
+        outFile: `${task.dir}/commit-message.md`,
+      })
+    )
+    const message = cleanCommitMessage(output, fallback)
+    await writeArtifact(task, 'commit-message.md', `${message}\n`)
+    return message
+  } catch (err) {
+    log.warn(`commit message: using fallback - ${formatErr(err)}`)
+    await writeArtifact(task, 'commit-message.md', `${fallback}\n`)
+    return fallback
+  }
 }
 
 // User-facing file extensions, used to fire the UX review on a diff even when

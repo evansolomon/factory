@@ -38,6 +38,51 @@ export async function commitAll(root: string, message: string): Promise<void> {
   await $`git -C ${root} commit -m ${message}`.quiet()
 }
 
+export async function recentCommitSubjects(root: string, count: number = 30): Promise<string[]> {
+  const out = await $`git -C ${root} log --no-merges -n ${count} --format=%s`.text()
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+}
+
+export type AuthorCommitSubjects = {
+  identity: string
+  subjects: string[]
+}
+
+function escapeGitAuthorPattern(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')
+}
+
+function authorIdentity(ident: string): string | null {
+  const email = ident.match(/<([^>]+)>/)
+  if (email?.[1]) {
+    return email[1].trim()
+  }
+  const name = ident.replace(/\s+\d+\s+[+-]\d{4}\s*$/, '').trim()
+  return name.length > 0 ? name : null
+}
+
+export async function recentAuthorCommitSubjects(
+  root: string,
+  count: number = 20
+): Promise<AuthorCommitSubjects | null> {
+  const ident = await $`git -C ${root} var GIT_AUTHOR_IDENT`.text()
+  const identity = authorIdentity(ident)
+  if (!identity) {
+    return null
+  }
+  const pattern = escapeGitAuthorPattern(identity)
+  const out =
+    await $`git -C ${root} log --all --no-merges -n ${count} --format=%s --author=${pattern}`.text()
+  const subjects = out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  return { identity, subjects }
+}
+
 // The main worktree of the repo (the first entry of `git worktree list`) — the
 // stable per-repo anchor for repo-level state like the backlog, shared across
 // all of the repo's linked worktrees.
