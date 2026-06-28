@@ -1091,7 +1091,7 @@ function deliveryConfirmationPreamble(delivery: TaskDelivery): string {
   return [
     `Confirm delivery - ${deliveryConfirmationSummary(delivery)} auto-selected.`,
     '',
-    'Factory inferred a side-effecting delivery action before implementation.',
+    'Factory inferred a side-effecting delivery action early in the run.',
     `Proposed delivery: ${recommendation} (${deliveryLabel(delivery)})`,
     `Reason: ${reason}`,
     'Interactive: press Enter to accept, or type an accepted delivery answer.',
@@ -1133,15 +1133,15 @@ async function selectTaskDelivery(
   meter: Meter,
   stats: RunStats,
   intent: string,
-  verify: string | null,
-  finalPlan: string
+  verify: string | null
 ): Promise<TaskOutcome | null> {
   await refreshMeta(task)
   const skills = await listDeliverySkills(ctx.root)
+  const resumeOnPause = task.meta.commit !== null || (await readPlan(task)) !== null
   if (task.meta.deliveryProposal) {
     if (!task.meta.deliveryProposalAt) {
       task.meta.deliveryProposalAt = new Date().toISOString()
-      task.meta.resume = true
+      task.meta.resume = resumeOnPause
       task.meta.updatedAt = task.meta.deliveryProposalAt
       await saveMeta(task)
       return needsInput(
@@ -1159,7 +1159,7 @@ async function selectTaskDelivery(
       skills,
     })
     if (resolved.kind === 'needs-input') {
-      task.meta.resume = true
+      task.meta.resume = resumeOnPause
       task.meta.updatedAt = new Date().toISOString()
       await saveMeta(task)
       return needsInput(ctx, task, meter, stats, resolved.questions)
@@ -1184,7 +1184,6 @@ async function selectTaskDelivery(
       prompt: deliverySelectPrompt({
         intent,
         verify,
-        finalPlan,
         skills,
         history,
       }),
@@ -1205,7 +1204,7 @@ async function selectTaskDelivery(
   const now = new Date().toISOString()
   task.meta.deliveryProposal = selection.delivery
   task.meta.deliveryProposalAt = now
-  task.meta.resume = true
+  task.meta.resume = resumeOnPause
   task.meta.updatedAt = now
   await saveMeta(task)
   log.info(`${task.id}: delivery — ${deliveryLabel(selection.delivery)} needs confirmation`)
@@ -1355,7 +1354,6 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
 
     if (trivial) {
       log.info(`${task.id}: trivial — fast path (skipping the plan ensemble)`)
-      finalPlan = intent
     } else {
       if (task.meta.sharpen === 'pending') {
         const sharpened = await runSharpenStage(ctx, task, meter, intent, verify, answers)
@@ -1368,7 +1366,16 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         intent = sharpened.result.intent
         verify = sharpened.result.verify
       }
+    }
 
+    const deliveryPause = await selectTaskDelivery(ctx, task, meter, stats, intent, verify)
+    if (deliveryPause) {
+      return deliveryPause
+    }
+
+    if (trivial) {
+      finalPlan = intent
+    } else {
       const planned = await planEnsemble(
         ctx,
         task,
@@ -1432,6 +1439,13 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     await writeArtifact(task, 'plan.md', finalPlan)
   }
 
+  if (resuming) {
+    const deliveryPause = await selectTaskDelivery(ctx, task, meter, stats, intent, verify)
+    if (deliveryPause) {
+      return deliveryPause
+    }
+  }
+
   if (shouldPrototype) {
     await runPrototypeStage(
       ctx,
@@ -1448,10 +1462,6 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     task.meta.userFacing = classifiedUserFacing
     task.meta.updatedAt = new Date().toISOString()
     await saveMeta(task)
-  }
-  const deliveryPause = await selectTaskDelivery(ctx, task, meter, stats, intent, verify, finalPlan)
-  if (deliveryPause) {
-    return deliveryPause
   }
 
   const feedbackContext = await analyzeFeedbackIfPending(ctx, task, meter, intent, finalPlan)
@@ -1927,6 +1937,20 @@ async function shipAndFinish(
   stageGuidance: StageGuidance
 ): Promise<TaskOutcome> {
   await refreshMeta(task)
+  if (task.meta.deliveryProposal) {
+    const deliveryPause = await selectTaskDelivery(
+      ctx,
+      task,
+      meter,
+      stats,
+      intent,
+      task.meta.verify
+    )
+    if (deliveryPause) {
+      return deliveryPause
+    }
+    await refreshMeta(task)
+  }
   if (task.meta.delivery.mode === 'pending') {
     await setTaskDelivery(task, {
       mode: 'none',

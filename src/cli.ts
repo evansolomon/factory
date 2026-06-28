@@ -98,7 +98,7 @@ COMMANDS
       intents. --raw skips sharpening; --trivial / --complexity also use the
       declared runtime complexity instead of triage. A directive like $ship or
       /ship maps to a repo skill when present; plain delivery wording is resolved
-      by the run loop before implementation.
+      by the run loop before planning/implementation.
 
   factory run [--once | --drain] [--no-prompt]
       Work the stream. Default: stay running and pick up tasks as they're added
