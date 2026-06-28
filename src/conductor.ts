@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { type AgentResult, agentLabel, runAgent } from './agents.ts'
 import { cleanCommitMessage, fallbackCommitMessage } from './commit-message.ts'
-import type { Agent, WorkContext } from './config.ts'
+import { type Agent, normAgent, type WorkContext } from './config.ts'
 import { buildDeckHtml } from './deck.ts'
 import {
   appendDeliveryHistory,
@@ -68,7 +68,10 @@ import {
   prototypePrompt,
   reconcilePrompt,
   remediatePrompt,
+  rescuePrompt,
   researchPrompt,
+  researchScoutPrompt,
+  researchSynthesisPrompt,
   reviewPrompt,
   revisePrompt,
   riskReviewPrompt,
@@ -80,6 +83,7 @@ import {
   triagePrompt,
   uxPlanCritiquePrompt,
   uxReviewPrompt,
+  workforcePlanPrompt,
 } from './prompts.ts'
 import {
   PROTOTYPE_RAW,
@@ -118,6 +122,16 @@ import {
   writeArtifact,
   writeLiveMeter,
 } from './task.ts'
+import {
+  parseWorkforcePlan,
+  RESEARCH_SCOUTS,
+  REVIEW_LENSES,
+  type ResearchScout,
+  type ReviewLens,
+  serializeWorkforcePlan,
+  type WorkforceEntry,
+  type WorkforcePlan,
+} from './workforce.ts'
 
 export type TaskOutcome =
   | { ok: true }
@@ -350,6 +364,210 @@ function plannerLabels(planners: Agent[]): string[] {
     seen.set(b, n)
     return `${b}-${n}`
   })
+}
+
+type AgentChoice = { id: string; agent: Agent; label: string }
+
+function agentChoices(ctx: WorkContext): AgentChoice[] {
+  const choices: AgentChoice[] = [
+    { id: 'implementer', agent: ctx.agents.implementer, label: agentLabel(ctx.agents.implementer) },
+    { id: 'reviewer', agent: ctx.agents.reviewer, label: agentLabel(ctx.agents.reviewer) },
+    {
+      id: 'workforce',
+      agent: normAgent(ctx.config.agents.workforce),
+      label: agentLabel(normAgent(ctx.config.agents.workforce)),
+    },
+    {
+      id: 'rescue',
+      agent: normAgent(ctx.config.agents.rescue),
+      label: agentLabel(normAgent(ctx.config.agents.rescue)),
+    },
+  ]
+  const labels = plannerLabels(ctx.agents.planners)
+  for (const [i, agent] of ctx.agents.planners.entries()) {
+    choices.push({ id: `planner.${labels[i] ?? agent.cli}`, agent, label: agentLabel(agent) })
+  }
+  for (const [name, spec] of Object.entries(ctx.config.agents.researchers)) {
+    const agent = normAgent(spec)
+    choices.push({ id: `researcher.${name}`, agent, label: agentLabel(agent) })
+  }
+  for (const [name, spec] of Object.entries(ctx.config.agents.reviewers)) {
+    const agent = normAgent(spec)
+    choices.push({ id: `reviewer.${name}`, agent, label: agentLabel(agent) })
+  }
+  return choices
+}
+
+function agentChoiceMap(ctx: WorkContext): Map<string, Agent> {
+  return new Map(agentChoices(ctx).map((choice) => [choice.id, choice.agent]))
+}
+
+function defaultResearchAgentId(ctx: WorkContext, kind: ResearchScout): string {
+  return kind in ctx.config.agents.researchers ? `researcher.${kind}` : 'implementer'
+}
+
+function defaultReviewAgentId(ctx: WorkContext, kind: ReviewLens): string {
+  return kind in ctx.config.agents.reviewers ? `reviewer.${kind}` : 'reviewer'
+}
+
+function normalizeWorkforcePlan(
+  ctx: WorkContext,
+  plan: WorkforcePlan,
+  userFacing: boolean
+): WorkforcePlan {
+  const fallbackResearch: Array<WorkforceEntry<ResearchScout>> = [
+    {
+      kind: 'code',
+      agent: defaultResearchAgentId(ctx, 'code'),
+      policies: [],
+      reason: 'Required baseline code research.',
+    },
+  ]
+  const research = plan.research.length ? plan.research : fallbackResearch
+  const review = ensureReviewLens(
+    ensureReviewLens(
+      userFacing && ctx.config.ux ? ensureReviewLens(plan.review, ctx, 'ux') : plan.review,
+      ctx,
+      'correctness'
+    ),
+    ctx,
+    'security',
+    !ctx.config.security
+  )
+  return { research, review }
+}
+
+function reviewWorkforceForDiff(
+  ctx: WorkContext,
+  plan: WorkforcePlan,
+  userFacing: boolean,
+  diff: string
+): Array<WorkforceEntry<ReviewLens>> {
+  let entries = plan.review
+  entries = ensureReviewLens(entries, ctx, 'correctness')
+  entries = ensureReviewLens(entries, ctx, 'security', !ctx.config.security)
+  entries = ensureReviewLens(entries, ctx, 'ux', !(ctx.config.ux && (userFacing || uiInDiff(diff))))
+  return entries
+}
+
+function ensureReviewLens(
+  entries: Array<WorkforceEntry<ReviewLens>>,
+  ctx: WorkContext,
+  kind: ReviewLens,
+  skip: boolean = false
+): Array<WorkforceEntry<ReviewLens>> {
+  if (skip || entries.some((entry) => entry.kind === kind)) {
+    return entries
+  }
+  return [
+    ...entries,
+    {
+      kind,
+      agent: defaultReviewAgentId(ctx, kind),
+      policies: [],
+      reason: 'Required safety floor.',
+    },
+  ]
+}
+
+function expandTildePath(path: string): string {
+  return path.startsWith('~') ? `${process.env['HOME'] ?? ''}${path.slice(1)}` : path
+}
+
+function resolvePolicyPath(root: string, path: string): string {
+  const expanded = expandTildePath(path)
+  return expanded.startsWith('/') ? expanded : `${root}/${expanded}`
+}
+
+async function renderPolicies(
+  ctx: WorkContext,
+  ids: string[],
+  appliesTo: string
+): Promise<string | null> {
+  const blocks: string[] = []
+  const seen = new Set<string>()
+  for (const id of ids) {
+    if (seen.has(id)) {
+      continue
+    }
+    seen.add(id)
+    const policy = ctx.config.specialists[id]
+    if (!policy) {
+      log.warn(`specialist policy ${id} is not configured; ignoring`)
+      continue
+    }
+    if (policy.appliesTo.length > 0 && !policy.appliesTo.includes(appliesTo)) {
+      log.warn(`specialist policy ${id} does not apply to ${appliesTo}; ignoring`)
+      continue
+    }
+    const path = resolvePolicyPath(ctx.root, policy.path)
+    const file = Bun.file(path)
+    if (!(await file.exists())) {
+      log.warn(`specialist policy ${id} missing at ${path}; ignoring`)
+      continue
+    }
+    blocks.push(`### ${id}\n${(await file.text()).trim()}`)
+  }
+  return blocks.length > 0 ? blocks.join('\n\n') : null
+}
+
+function combineGuidance(...blocks: Array<string | null>): string | null {
+  const rendered = blocks.filter((block): block is string => Boolean(block?.trim()))
+  return rendered.length > 0 ? rendered.join('\n\n') : null
+}
+
+async function runWorkforcePlanner(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  intent: string,
+  verify: string | null,
+  userFacing: boolean
+): Promise<WorkforcePlan | null> {
+  if (!ctx.config.workforce) {
+    return null
+  }
+  await progress(ctx, task, 'workforce', 'workforce — choosing scouts and reviewers')
+  const raw = await agentStep(
+    meter,
+    'workforce',
+    agentLabel(normAgent(ctx.config.agents.workforce)),
+    runAgent(normAgent(ctx.config.agents.workforce), {
+      root: ctx.root,
+      prompt: workforcePlanPrompt({
+        intent,
+        verify,
+        userFacing,
+        securityEnabled: ctx.config.security,
+        uxEnabled: ctx.config.ux,
+        agents: agentChoices(ctx).map((choice) => ({ id: choice.id, label: choice.label })),
+        researchScouts: [...RESEARCH_SCOUTS],
+        reviewLenses: REVIEW_LENSES.filter(
+          (lens) => (lens !== 'security' || ctx.config.security) && (lens !== 'ux' || ctx.config.ux)
+        ),
+        policies: Object.entries(ctx.config.specialists).map(([id, policy]) => ({
+          id,
+          description: policy.description,
+          appliesTo: policy.appliesTo,
+        })),
+      }),
+      access: 'read',
+      outFile: `${task.dir}/workforce.raw.json`,
+    })
+  )
+  const parsed = parseWorkforcePlan(raw)
+  if (!parsed) {
+    log.warn(`${task.id}: workforce plan malformed; using legacy research/review defaults`)
+    return null
+  }
+  const normalized = normalizeWorkforcePlan(ctx, parsed, userFacing)
+  await writeArtifact(task, 'workforce.json', serializeWorkforcePlan(normalized))
+  return normalized
+}
+
+async function readWorkforcePlan(task: Task): Promise<WorkforcePlan | null> {
+  const raw = await readArtifact(task, 'workforce.json')
+  return raw ? parseWorkforcePlan(raw) : null
 }
 
 // Run-level facts for the telemetry record, mutated as the task progresses so
@@ -670,6 +888,77 @@ async function assessFailure(
   return judged.action
 }
 
+function markerText(text: string, marker: string): string | null {
+  return new RegExp(`^${marker}:\\s*(.+)$`, 'im').exec(text)?.[1]?.trim() ?? null
+}
+
+async function rescueTerminalFailure(input: {
+  ctx: WorkContext
+  task: Task
+  meter: Meter
+  intent: string
+  finalPlan: string
+  verify: string | null
+  failures: Failure[]
+  attempt: number
+  latestFailure: string
+  guidance: string | null
+}): Promise<FailureAction | null> {
+  if (!input.ctx.config.rescue) {
+    return null
+  }
+  await progress(input.ctx, input.task, 'rescue', 'rescue — checking for a better next move')
+  const agent = normAgent(input.ctx.config.agents.rescue)
+  const out = await agentStep(
+    input.meter,
+    'rescue',
+    agentLabel(agent),
+    runAgent(agent, {
+      root: input.ctx.root,
+      prompt: rescuePrompt({
+        intent: input.intent,
+        finalPlan: input.finalPlan,
+        verify: input.verify,
+        currentDiff: await worktreeDiff(input.ctx.root),
+        failures: input.failures.map((f) => `${f.gate}: ${f.summary}`),
+        latestFailure: input.latestFailure,
+        guidance: input.guidance,
+      }),
+      access: 'read',
+      outFile: `${input.task.dir}/rescue.md`,
+    })
+  )
+  const summary = markerText(out, 'SUMMARY') ?? firstLine(out).slice(0, 200)
+  const next = markerText(out, 'NEXT') ?? summary
+  switch (parseConvergenceVerdict(out)) {
+    case 'CONTINUE_CODE_FIX': {
+      const detail = `Rescue direction:\n${next}\n\nOriginal terminal failure:\n${input.latestFailure}`
+      const entry: Failure = {
+        attempt: input.attempt,
+        gate: 'rescue',
+        summary: next.slice(0, 200),
+        detail,
+        remediation: 'code-fix',
+      }
+      input.failures.push(entry)
+      await appendFailure(input.task, entry)
+      return { kind: 'continue' }
+    }
+    case 'RETRY_LATER':
+      return { kind: 'retry', reason: next }
+    case 'ASK_HUMAN':
+      return {
+        kind: 'needs-input',
+        questions: `Factory needs human input before it can continue:\n\n${next}`,
+      }
+    case 'TERMINAL':
+      return { kind: 'terminal' }
+    default:
+      log.warn(`${input.task.id}: rescue output malformed; blocking normally`)
+      return null
+  }
+}
+
 // How many rounds of automated ENVIRONMENT remediation a single verify gate will
 // attempt before giving up. Env fixes (install deps, build, start a service) take
 // one or two rounds; this caps a doctor that keeps claiming a fix while verify
@@ -781,7 +1070,8 @@ async function planEnsemble(
   answers: string | null,
   lessons: string | null,
   userFacing: boolean,
-  stageGuidance: StageGuidance
+  stageGuidance: StageGuidance,
+  workforcePlan: WorkforcePlan | null
 ): Promise<PlanResult> {
   const planners = ctx.agents.planners
   const labels = plannerLabels(planners)
@@ -789,22 +1079,69 @@ async function planEnsemble(
   const labeled = (texts: string[]): Labeled[] =>
     texts.map((text, i) => ({ label: labels[i] ?? `plan-${i + 1}`, text }))
 
-  // 1. RESEARCH — one subagent gathers the factual groundwork (relevant code,
-  // existing patterns, git history of the target areas, prior plans, gotchas)
-  // so the whole ensemble plans from grounded facts, not assumptions.
+  // 1. RESEARCH — either the legacy single dossier or a workforce-planned set of
+  // independent scouts synthesized back into one canonical research.md.
   await setStatus(task, 'planning')
-  await progress(ctx, task, 'research', 'research — mapping the relevant code & history')
-  const research = await agentStep(
-    meter,
-    'research',
-    agentLabel(lead),
-    runAgent(lead, {
-      root: ctx.root,
-      prompt: researchPrompt(intent, verify, ctx.plansDir, userFacing),
-      access: 'research',
-      outFile: `${task.dir}/research.md`,
-    })
-  )
+  let research: string
+  if (workforcePlan) {
+    await progress(
+      ctx,
+      task,
+      'research',
+      `research — ${workforcePlan.research.length}-scout workforce`
+    )
+    const agents = agentChoiceMap(ctx)
+    const reports = await Promise.all(
+      workforcePlan.research.map(async (entry) => {
+        const agent = agents.get(entry.agent) ?? ctx.agents.implementer
+        const policies = await renderPolicies(ctx, entry.policies, `research.${entry.kind}`)
+        return agentStep(
+          meter,
+          `research.${entry.kind}`,
+          agentLabel(agent),
+          runAgent(agent, {
+            root: ctx.root,
+            prompt: researchScoutPrompt(
+              entry.kind,
+              intent,
+              verify,
+              ctx.plansDir,
+              userFacing,
+              policies
+            ),
+            access: entry.kind === 'external' ? 'research' : 'read',
+            outFile: `${task.dir}/research.${entry.kind}.md`,
+          }),
+          `${agentLabel(agent)} · research/${entry.kind}`
+        ).then((text): Labeled => ({ label: entry.kind, text }))
+      })
+    )
+    await progress(ctx, task, 'research', 'research — synthesizing scouts')
+    research = await agentStep(
+      meter,
+      'research',
+      agentLabel(normAgent(ctx.config.agents.workforce)),
+      runAgent(normAgent(ctx.config.agents.workforce), {
+        root: ctx.root,
+        prompt: researchSynthesisPrompt(intent, reports),
+        access: 'read',
+        outFile: `${task.dir}/research.md`,
+      })
+    )
+  } else {
+    await progress(ctx, task, 'research', 'research — mapping the relevant code & history')
+    research = await agentStep(
+      meter,
+      'research',
+      agentLabel(lead),
+      runAgent(lead, {
+        root: ctx.root,
+        prompt: researchPrompt(intent, verify, ctx.plansDir, userFacing),
+        access: 'research',
+        outFile: `${task.dir}/research.md`,
+      })
+    )
+  }
 
   // 2. PLAN — every planner drafts in parallel (read-only).
   await progress(ctx, task, 'plan', 'plan — drafting')
@@ -1301,9 +1638,11 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   let finalPlan: string
   let riskAssessment: string | null = null
   let shouldPrototype = false
+  let workforcePlan: WorkforcePlan | null = null
   if (resuming) {
     finalPlan = (await readPlan(task)) ?? intent
     riskAssessment = await readArtifact(task, 'risk.plan.md')
+    workforcePlan = await readWorkforcePlan(task)
     resumeNote = task.meta.resumeNote
     task.meta.resume = false
     task.meta.resumeNote = null
@@ -1376,6 +1715,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     if (trivial) {
       finalPlan = intent
     } else {
+      workforcePlan = await runWorkforcePlanner(ctx, task, meter, intent, verify, userFacing)
+
       const planned = await planEnsemble(
         ctx,
         task,
@@ -1385,7 +1726,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         answers,
         lessons,
         userFacing,
-        stageGuidance
+        stageGuidance,
+        workforcePlan
       )
       if ('pause' in planned) {
         recordTask(ctx, task, meter, 'needs-input', stats)
@@ -1488,6 +1830,25 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   let attempt = 0
   const hardCap = ctx.config.retries
   const failures = await readFailures(task)
+  let rescueUsed = false
+  const rescueOnce = async (latestFailure: string): Promise<FailureAction | null> => {
+    if (rescueUsed) {
+      return null
+    }
+    rescueUsed = true
+    return rescueTerminalFailure({
+      ctx,
+      task,
+      meter,
+      intent,
+      finalPlan,
+      verify,
+      failures,
+      attempt,
+      latestFailure,
+      guidance: stageGuidance('postmortem'),
+    })
+  }
   // On resume with an existing diff, re-enter at the gates: run them against the
   // work already in the worktree, and only implement (a fix pass) if one fails.
   let skipImplement = resuming && (await hasChanges(ctx.root))
@@ -1588,63 +1949,138 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     const diff = await worktreeDiff(ctx.root)
     await writeArtifact(task, 'diff.patch', diff)
     const reviewer = ctx.agents.reviewer
-    const panel: Array<{ key: string; label: string; prompt: string }> = [
+    const legacyReviewEntries: Array<WorkforceEntry<ReviewLens>> = [
       {
-        key: 'review',
-        label: 'correctness',
-        prompt: reviewPrompt(
-          intent,
-          verify,
-          finalPlan,
-          diff,
-          baselineHasChanges ? baselineDiff : null,
-          stageGuidance('review')
-        ),
+        kind: 'correctness',
+        agent: defaultReviewAgentId(ctx, 'correctness'),
+        policies: [],
+        reason: 'Legacy review default.',
       },
     ]
     if (ctx.config.security) {
-      panel.push({
-        key: 'security',
-        label: 'security',
-        prompt: securityPrompt(
-          intent,
-          finalPlan,
-          diff,
-          baselineHasChanges ? baselineDiff : null,
-          stageGuidance('security')
-        ),
+      legacyReviewEntries.push({
+        kind: 'security',
+        agent: defaultReviewAgentId(ctx, 'security'),
+        policies: [],
+        reason: 'Legacy review default.',
       })
     }
-    panel.push(
+    legacyReviewEntries.push(
       {
-        key: 'risk',
-        label: 'risk',
-        prompt: riskReviewPrompt(intent, finalPlan, diff, baselineHasChanges ? baselineDiff : null),
+        kind: 'risk',
+        agent: defaultReviewAgentId(ctx, 'risk'),
+        policies: [],
+        reason: 'Legacy review default.',
       },
       {
-        key: 'deploy',
-        label: 'deploy safety',
-        prompt: deploySafetyPrompt(
-          intent,
-          finalPlan,
-          diff,
-          baselineHasChanges ? baselineDiff : null,
-          stageGuidance('deploy-safety')
-        ),
+        kind: 'deploy',
+        agent: defaultReviewAgentId(ctx, 'deploy'),
+        policies: [],
+        reason: 'Legacy review default.',
       }
     )
     if (ctx.config.ux && (userFacing || uiInDiff(diff))) {
-      panel.push({
-        key: 'ux',
-        label: 'ux/design',
-        prompt: uxReviewPrompt(
-          intent,
-          finalPlan,
-          diff,
-          baselineHasChanges ? baselineDiff : null,
-          stageGuidance('ux-review')
-        ),
+      legacyReviewEntries.push({
+        kind: 'ux',
+        agent: defaultReviewAgentId(ctx, 'ux'),
+        policies: [],
+        reason: 'Legacy review default.',
       })
+    }
+    const legacyReview: WorkforcePlan = {
+      research: [],
+      review: legacyReviewEntries,
+    }
+    const reviewEntries = reviewWorkforceForDiff(
+      ctx,
+      workforcePlan ?? legacyReview,
+      userFacing,
+      diff
+    )
+    const agents = agentChoiceMap(ctx)
+    const panel: Array<{ key: string; label: string; agent: Agent; prompt: string }> = []
+    for (const entry of reviewEntries) {
+      const agent = agents.get(entry.agent) ?? reviewer
+      const baseline = baselineHasChanges ? baselineDiff : null
+      if (entry.kind === 'correctness') {
+        panel.push({
+          key: 'review',
+          label: 'correctness',
+          agent,
+          prompt: reviewPrompt(
+            intent,
+            verify,
+            finalPlan,
+            diff,
+            baseline,
+            combineGuidance(
+              stageGuidance('review'),
+              await renderPolicies(ctx, entry.policies, 'review.correctness')
+            )
+          ),
+        })
+      } else if (entry.kind === 'security') {
+        panel.push({
+          key: 'security',
+          label: 'security',
+          agent,
+          prompt: securityPrompt(
+            intent,
+            finalPlan,
+            diff,
+            baseline,
+            combineGuidance(
+              stageGuidance('security'),
+              await renderPolicies(ctx, entry.policies, 'review.security')
+            )
+          ),
+        })
+      } else if (entry.kind === 'risk') {
+        panel.push({
+          key: 'risk',
+          label: 'risk',
+          agent,
+          prompt: riskReviewPrompt(
+            intent,
+            finalPlan,
+            diff,
+            baseline,
+            await renderPolicies(ctx, entry.policies, 'review.risk')
+          ),
+        })
+      } else if (entry.kind === 'deploy') {
+        panel.push({
+          key: 'deploy',
+          label: 'deploy safety',
+          agent,
+          prompt: deploySafetyPrompt(
+            intent,
+            finalPlan,
+            diff,
+            baseline,
+            combineGuidance(
+              stageGuidance('deploy-safety'),
+              await renderPolicies(ctx, entry.policies, 'review.deploy')
+            )
+          ),
+        })
+      } else if (entry.kind === 'ux') {
+        panel.push({
+          key: 'ux',
+          label: 'ux/design',
+          agent,
+          prompt: uxReviewPrompt(
+            intent,
+            finalPlan,
+            diff,
+            baseline,
+            combineGuidance(
+              stageGuidance('ux-review'),
+              await renderPolicies(ctx, entry.policies, 'review.ux')
+            )
+          ),
+        })
+      }
     }
     await progress(ctx, task, 'review', `review — ${panel.length}-expert panel`)
     const reports = await Promise.all(
@@ -1652,14 +2088,14 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         agentStep(
           meter,
           e.key,
-          agentLabel(reviewer),
-          runAgent(reviewer, {
+          agentLabel(e.agent),
+          runAgent(e.agent, {
             root: ctx.root,
             prompt: e.prompt,
             access: 'read',
             outFile: `${task.dir}/${e.key}.md`,
           }),
-          `${agentLabel(reviewer)} · ${e.label}`
+          `${agentLabel(e.agent)} · ${e.label}`
         ).then((text): Labeled => ({ label: e.label, text }))
       )
     )
@@ -1711,6 +2147,17 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       if (action.kind === 'needs-input') {
         return needsInput(ctx, task, meter, stats, action.questions)
       }
+      const rescued = await rescueOnce(consolidated)
+      if (rescued?.kind === 'continue') {
+        attempt++
+        continue
+      }
+      if (rescued?.kind === 'retry') {
+        return retryLater(task, meter, rescued.reason)
+      }
+      if (rescued?.kind === 'needs-input') {
+        return needsInput(ctx, task, meter, stats, rescued.questions)
+      }
       return blocked(
         ctx,
         task,
@@ -1749,6 +2196,17 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         }
         if (action.kind === 'needs-input') {
           return needsInput(ctx, task, meter, stats, action.questions)
+        }
+        const rescued = await rescueOnce(v.detail)
+        if (rescued?.kind === 'continue') {
+          attempt++
+          continue
+        }
+        if (rescued?.kind === 'retry') {
+          return retryLater(task, meter, rescued.reason)
+        }
+        if (rescued?.kind === 'needs-input') {
+          return needsInput(ctx, task, meter, stats, rescued.questions)
         }
         return blocked(
           ctx,

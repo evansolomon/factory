@@ -135,50 +135,52 @@ task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.m
   2. SHARPEN     [pending non-trivial only] refine intent    (read-only)
         ├─ ASK  → write questions.md, status: needs-input, set task aside
         │
-  3. RESEARCH    one subagent maps the relevant code,       (read + network)
-                 patterns, git history & prior plans; may
-                 look up external data; for user-facing
-                 work also the UI vocabulary (components,
-                 tokens, where features are exposed)
-  4. PLAN        codex + claude each draft a plan           (read-only, parallel)
-  5. CRITIQUE    each critiques the other's plan and        (read-only, parallel)
+  3. WORKFORCE   [complex path] route read-only scouts,      (read-only)
+                 review lenses, agents, and policies
+  4. RESEARCH    selected scouts map relevant code, tests,   (read + optional network)
+                 history, runtime/deploy, external facts,
+                 and UI vocabulary, then synthesize one
+                 research.md dossier
+  5. PLAN        codex + claude each draft a plan           (read-only, parallel)
+  6. CRITIQUE    each critiques the other's plan and        (read-only, parallel)
                  surfaces "open questions for the human"
-  5.4 UX/IA      [user-facing only] claude critiques the    (read-only)
+  6.4 UX/IA      [user-facing only] claude critiques the    (read-only)
                  plan's information architecture & UX
-  5.5 RECONCILE  proceed autonomously, or PAUSE and ask?    (read-only)
+  6.5 RECONCILE  proceed autonomously, or PAUSE and ask?    (read-only)
         │
         ├─ ASK  → write questions.md, status: needs-input, set task aside
         │
-  6. REVISE      each revises its own plan w/ the critique  (read-only, parallel)
-  7. SELECT      codex picks or merges the stronger plan    (read-only)
+  7. REVISE      each revises its own plan w/ the critique  (read-only, parallel)
+  8. SELECT      codex picks or merges the stronger plan    (read-only)
                  → clean plan written to plansDir (committed docs)
-  7.5 RISK       [complex path] score plan risk and          (read-only)
+  8.5 RISK       [complex path] score plan risk and          (read-only)
                  verification focus, advisory to implement
-  7.6 PROTOTYPE  [complex path] best-effort autonomous       (read-only)
+  8.6 PROTOTYPE  [complex path] best-effort autonomous       (read-only)
                  decision: create a standalone pre-impl
                  artifact only when it materially derisks
                  UX, architecture, data flow, rollout, etc.
-  ┌─ 8. IMPLEMENT     codex edits the worktree             (workspace-write)
-  │  9. REVIEW PANEL  parallel expert finders on the diff  (read-only, parallel)
-  │                   correctness + security + risk +
-  │                   deploy safety + ux (if UI);
+  ┌─ 9. IMPLEMENT     codex edits the worktree             (workspace-write)
+  │  10. REVIEW PANEL selected expert finders on the diff  (read-only, parallel)
+  │                   correctness + required gates +
+  │                   routed optional lenses;
   │                   each reports findings, none blocks alone
-  │  10. CONSOLIDATE  one judge dedupes, drops nits,        (read-only)
+  │  11. CONSOLIDATE  one judge dedupes, drops nits,        (read-only)
   │                   resolves conflicts by priority, marks
   │                   blocking vs advisory → one verdict + fix list
-  │  11. VERIFY       run the task's verify command for real;       (full-access
+  │  12. VERIFY       run the task's verify command for real;       (full-access
   │                   on failure a doctor classifies it and          remediation)
   │                   REPAIRS the environment in place (install
   │                   deps/tools, build, start a service) then
   │                   re-runs — code defects fall through to auto-fix
   └──── consolidated FAIL / real code defect → auto-fix; a convergence judge keeps
         iterating while each failure is NEW, stops when it's going in circles
-        (config.retries is the hard-cap backstop), then block / set-aside.
+        (config.retries is the hard-cap backstop); rescue gets one last
+        read-only strategy pass before a terminal block.
         A flake or an environment problem it can't fix → set-aside (backoff)
         │ (pass)
-  commit (message from diff + author/repo history) → 12. SHIP (if configured)
+  commit (message from diff + author/repo history) → 13. SHIP (if configured)
         full-perms agent: MR/PR, CI, review
-        → 13. FEEDBACK read-only local handoff
+        → 14. FEEDBACK read-only local handoff
         │
         ├─ pass → write proof.md + feedback.md, status: done (shipped if ship set)
         └─ fail → status: retrying (auto-resume), then blocked if the cap is spent
@@ -477,6 +479,14 @@ Fields:
 - **`security`** — run a dedicated red-team security gate on the implemented diff
   (every task, both paths), feeding the same auto-fix retry loop as the review
   gate (default `true`; `false` skips it).
+- **`workforce`** — before complex-task planning, run a read-only workforce router
+  that chooses which research scouts, optional review lenses, lens agents, and
+  specialist policies fit the task (default `true`). The conductor still enforces
+  required floors like correctness review and the `security`/`ux` gates; malformed
+  router output falls back to the legacy single-research/fixed-review shape.
+- **`rescue`** — before a task becomes terminally blocked, run a read-only rescue
+  strategist that may authorize one sharper code-fix attempt, ask the human, retry
+  later, or accept the block (default `true`).
 - **`remediate`** — on a verify failure, run a **full-access doctor** that
   classifies the failure and, for **environment/setup** problems (missing deps, an
   uninstalled tool, an un-run build/codegen step, a service that's down), repairs
@@ -546,6 +556,10 @@ pre-implementation artifacts, not completion briefs; they are visible through
     assessment, and deploy-safety review
     (best a *different* model from the implementer, to avoid self-bias).
   - `delivery` — runs task-local delivery and completion handoffs.
+  - `workforce` — chooses the dynamic read-only workforce shape for complex tasks.
+  - `rescue` — last-chance read-only strategist before terminal blocking.
+  - `researchers` / `reviewers` — optional named maps the workforce router can
+    select for specific scouts or lenses, e.g. `{ "runtime": "claude" }`.
   - `namer` — cheaply summarizes new task intents into short task ids. This is
     best-effort; if the model call fails, `factory add` falls back to the local
     prompt-prefix slug.
@@ -553,7 +567,7 @@ pre-implementation artifacts, not completion briefs; they are visible through
   Each value is `"codex"` / `"claude"` or
   `{ "cli": "codex"|"claude", "model"?: "…", "reasoningEffort"?: "low", "provider"?: "…" }`.
   Default: `{"planners": ["codex","claude"], "implementer": "codex",
-  "reviewer": "claude", "delivery": "claude",
+  "reviewer": "claude", "delivery": "claude", "workforce": "claude", "rescue": "claude",
   "namer": {"cli": "codex", "model": "gpt-5.4-mini", "reasoningEffort": "low"}}`.
   `reasoningEffort` is codex-only and maps to Codex's `model_reasoning_effort`.
   Only `codex` and `claude` are built in (each needs an adapter — see below).
@@ -587,6 +601,12 @@ pre-implementation artifacts, not completion briefs; they are visible through
   one **harness**; a model with its own agentic CLI (e.g. gemini) is still a new
   adapter, not a `provider` (see below). Local OSS needs no special `--oss` flag —
   point a `provider` at `http://localhost:11434/v1` and it's the same mechanism.
+
+- **`specialists`** — user-authored markdown policy files the workforce router may
+  attach to a scout or review lens. Shape:
+  `{ "deploy": { "path": "policies/deploy.md", "description": "Deploy safety", "appliesTo": ["review.deploy", "research.runtime"] } }`.
+  Relative paths resolve from the repo root; `appliesTo` is optional and, when set,
+  limits where the policy can be injected.
 
 `$FACTORY_HOME` is the easy "all repos, state out of the tree" switch;
 `.factory.json` (cascading) is for per-repo/per-tree rules like `ship`.
@@ -898,6 +918,10 @@ dollar figure, so there's no consistent number across both models.)
   `needs-input` escalation. Proven end-to-end on real tasks.
 - ✅ **Configurable agents:** planners / implementer / reviewer / delivery roles,
   each `codex`/`claude` (+ optional model).
+- ✅ **Dynamic workforce routing:** a read-only router chooses research scouts,
+  optional review lenses, lens agents, and specialist policies for complex tasks.
+- ✅ **Rescue strategist:** terminal blocks get one read-only last-chance pass
+  before the task truly blocks.
 - ✅ **Intent sharpening:** `factory run` refines default queued intents into a
   self-contained spec before planning.
 - ✅ **tmux integration (via hooks):** live-stage window name, semantic attention

@@ -212,8 +212,13 @@ CONFIG (.factory.json — cascades up the dir tree, closest wins)
             failure is genuinely new, stop when it's going in circles.
   triage    classify each task; trivial ones skip the plan ensemble and go
             straight to implement (still reviewed + verified). default true.
-  security  run a red-team security gate on the diff (default true).
-            Risk and deploy-safety lenses always run in the review panel.
+  security  keep the red-team security gate in the review safety floor
+            (default true).
+  workforce let a read-only router choose research scouts, optional review
+            lenses, lens agents, and specialist policies for complex tasks.
+            malformed output falls back to legacy defaults. default true.
+  rescue    run a last-chance read-only strategist before terminal blocks.
+            default true.
   ux        UI/UX lenses for user-facing work: an information-architecture
             critique in planning + a design-consistency review of the diff,
             auto-gated per task (triage flags it; review also fires when the
