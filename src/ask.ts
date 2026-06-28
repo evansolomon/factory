@@ -4,6 +4,7 @@ import type { Agent, WorkContext } from './config.ts'
 import { deliveryLabel } from './delivery.ts'
 import { composeInEditor } from './editor.ts'
 import { log } from './log.ts'
+import { prototypeContext } from './prototype.ts'
 import { renderAgentMarkdown } from './sharpen-render.ts'
 import { loadTasks, type Task } from './task.ts'
 
@@ -141,6 +142,7 @@ async function taskArtifacts(task: Task): Promise<string[]> {
     'human-feedback.analysis.md',
     'delivery.md',
     'plan.final.md',
+    'prototype.md',
     'consolidated.md',
     'postmortem.md',
     'proof.md',
@@ -157,6 +159,13 @@ async function taskArtifacts(task: Task): Promise<string[]> {
   const failureText = await failures(task)
   if (failureText) {
     out.push(failureText)
+  }
+  const prototype = await prototypeContext(task, {
+    includeArtifactContent: false,
+    summaryLimit: 2000,
+  })
+  if (prototype) {
+    out.push(`### ${task.id}/prototype context\n${prototype}`)
   }
   return out
 }

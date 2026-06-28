@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { WorkContext } from './config.ts'
 import { log } from './log.ts'
+import { prototypePrimaryArtifactPath } from './prototype.ts'
 import { findTask, latestTask, type Task, writeArtifact } from './task.ts'
 
 export type InteractiveAgent = 'codex' | 'claude'
@@ -19,6 +20,7 @@ const ARTIFACT_ORDER = [
   'plan.md',
   'plan.final.md',
   'risk.plan.md',
+  'prototype.md',
   'implement.log.md',
   'diff.patch',
   'review.md',
@@ -119,7 +121,9 @@ async function existingArtifactNames(task: Task): Promise<string[]> {
         !ARTIFACT_ORDER.includes(name) && (name.endsWith('.md') || name.endsWith('.activity.jsonl'))
     )
     .sort()
-  return [...ordered, ...extra]
+  const primaryPrototype = await prototypePrimaryArtifactPath(task)
+  const dynamic = primaryPrototype && !ordered.includes(primaryPrototype) ? [primaryPrototype] : []
+  return [...ordered, ...dynamic, ...extra]
 }
 
 function artifactLine(task: Task, name: string): string {

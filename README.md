@@ -154,6 +154,10 @@ task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.m
                  → clean plan written to plansDir (committed docs)
   7.5 RISK       [complex path] score plan risk and          (read-only)
                  verification focus, advisory to implement
+  7.6 PROTOTYPE  [complex path] best-effort autonomous       (read-only)
+                 decision: create a standalone pre-impl
+                 artifact only when it materially derisks
+                 UX, architecture, data flow, rollout, etc.
   ┌─ 8. IMPLEMENT     codex edits the worktree             (workspace-write)
   │  9. REVIEW PANEL  parallel expert finders on the diff  (read-only, parallel)
   │                   correctness + security + risk +
@@ -208,6 +212,30 @@ with concrete drivers and verification focus. Deploy safety is more concrete: it
 checks mixed-version compatibility, migrations/backfills, config/env requirements,
 queued/event payloads, and rollback safety. A deploy-safety finding may block when
 it names a real unsafe rollout path.
+
+### Prototype stage
+
+Complex tasks get one additional pre-implementation consideration after the final
+plan and risk assessment are saved. The implementer decides whether a standalone
+prototype would materially reduce risk or make the intended solution easier to
+inspect. Complexity alone is not enough: a large dependency upgrade can be complex
+without needing a prototype, while a UX flow, state machine, data-flow design, API
+shape, or rollout sequence may benefit from one.
+
+The stage is read-only with respect to the worktree and best-effort. If useful, it
+writes `prototype.md`, `prototype.meta.json`, and a primary artifact under
+`prototype-artifacts/` using the model-chosen basename. If not useful,
+`prototype.md` records the skip decision and reason. Malformed output or stage
+failure falls back to `prototype.md` and a fallback manifest, logs a warning, and
+the loop continues.
+
+There is no pre-implementation approval pause. Inspect prototypes with
+`factory show <task-id>`; when a primary artifact exists, show prints a local
+`file://` URL that you can open from the task directory. If you have feedback, use
+the existing `factory feedback <task-id> -m "..."` workflow once the task is
+eligible for feedback: blocked, retrying, ready with saved progress, has
+implementation progress, or done. That feedback is consumed by the next resume or
+linked follow-up path.
 
 ### The escalation valve (`needs-input`)
 
@@ -288,7 +316,7 @@ factory completion zsh                              # print the zsh completion s
   follow-ups; `factory ask <task-id>` opens a session scoped to that task. Each
   turn rebuilds a compact context packet from `meta.json`, the task index, and
   relevant artifacts such as `questions.md`, `failures.jsonl`, `postmortem.md`,
-  `feedback.md`, `agent-session.summary.md`, `delivery.md`, `proof.md`,
+  `feedback.md`, `agent-session.summary.md`, `delivery.md`, `prototype.md`, `proof.md`,
   `ship.md`, and `verify.log`, then asks the configured `ask.agent` to answer
   only from that packet.
   The live session transcript is kept
@@ -309,9 +337,11 @@ factory completion zsh                              # print the zsh completion s
   a successful `done` task. With no id it targets the latest `done` task in this
   worktree. `--url` prints the local `file://` URL instead of opening a browser.
 - **`factory show`** displays the saved completion feedback near the top when a
-  done task has `feedback.md`, followed by the plan, review, verify, delivery, and
-  activity artifacts. If `brief.html` exists, it prints the `factory deck` command
-  instead of rendering the HTML inline.
+  done task has `feedback.md`, followed by the plan, prototype summary, review,
+  verify, delivery, and activity artifacts. If a prototype has a primary artifact,
+  show prints a `file://` pointer instead of rendering arbitrary HTML/SVG inline.
+  If `brief.html` exists, it prints the `factory deck` command instead of
+  rendering the HTML inline.
 
 ### Recovery & auto-resume
 
@@ -487,7 +517,9 @@ optional delivery: `feedback.md` for the concise markdown handoff, and best-effo
 capture, or delivery behavior. `factory run` prints a bounded rendering of the
 handoff with `detail: factory show <task-id>` and, when a brief exists,
 `brief: factory deck <task-id>`. `factory show <task-id>` displays the saved
-markdown artifacts and points to the brief.
+markdown artifacts and points to the brief. Complex-path prototype artifacts are
+pre-implementation artifacts, not completion briefs; they are visible through
+`factory show <task-id>` and, for primary artifacts, a local `file://` pointer.
 - **`ask`** — which AI answers `factory ask` questions. This is separate from
   `agents.reviewer` because asking is about assembling the right saved context, not
   participating in the task pipeline. Shape:
@@ -619,6 +651,10 @@ or jump-target behavior you want.
   plan.final.md          # selected/merged plan
   plan.md                # selected plan persisted for resume
   risk.plan.md           # plan risk scores + verification focus, complex path
+  prototype.md           # prototype decision summary or malformed-output fallback
+  prototype.raw.md       # raw model output from the prototype stage
+  prototype.meta.json    # prototype decision + primary artifact manifest
+  prototype-artifacts/<artifact> # optional standalone primary prototype artifact
   implement.log.md       # implementer final message
   diff.patch             # latest worktree diff under review
   review.md              # correctness expert report
@@ -674,7 +710,7 @@ text. Global lessons apply everywhere; repo lessons apply only when the current
 repo state dir matches the record.
 
 Lessons are auto-applied to the stages they name: planning, critique/reconcile,
-implementation/fix, review experts, consolidation, remediation, and postmortem.
+prototype, implementation/fix, review experts, consolidation, remediation, and postmortem.
 Prompt blocks include the lesson id so bad guidance can be found and corrected.
 Use `factory lessons list`, `factory lessons show <id>`,
 `factory lessons rm <id>`, and `factory lessons edit <id>` to inspect, remove, or

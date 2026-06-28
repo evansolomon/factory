@@ -310,10 +310,17 @@ async function resumeRun(task: Task, kind: 'manual' | 'auto-retry' | 'stranded')
   return task
 }
 
-// Planning has no durable selected plan yet, so restart it from the original intent.
-// Later stages can reuse the saved plan and whatever worktree diff survived.
+// Early planning has no durable selected plan yet, so restart it from the original
+// intent. Once plan.md exists, the selected design is a resumable boundary.
 async function recoverStranded(task: Task): Promise<Task> {
-  if (task.meta.status === 'sharpening' || task.meta.status === 'planning') {
+  if (task.meta.status === 'sharpening') {
+    task.meta.resume = false
+    task.meta.resumeKind = null
+    task.meta.retryAt = null
+    await setStatus(task, 'ready', `recovered after interrupted ${task.meta.status} stage`)
+    return task
+  }
+  if (task.meta.status === 'planning' && !(await readPlan(task))) {
     task.meta.resume = false
     task.meta.resumeKind = null
     task.meta.retryAt = null

@@ -8,6 +8,7 @@ import {
   parseAgentSessionArgs,
 } from '../src/agent-session.ts'
 import type { Config, RoleAgents, WorkContext } from '../src/config.ts'
+import { writePrototypeOutput } from '../src/prototype.ts'
 import { addTask, writeArtifact } from '../src/task.ts'
 
 const config: Config = {
@@ -80,6 +81,17 @@ describe('buildAgentSessionHandoff', () => {
     await writeArtifact(task, 'brief.html', '<!doctype html>\n<html></html>')
     await writeArtifact(task, 'plan.md', 'Use the existing component.')
     await writeArtifact(task, 'verify.log', '$ bun test\npassed')
+    await writePrototypeOutput(
+      task,
+      [
+        'PROTOTYPE: YES',
+        'ARTIFACT: mock.html',
+        'REASON: clarify UI risk',
+        '--- BEGIN ARTIFACT ---',
+        '<html>mock</html>',
+        '--- END ARTIFACT ---',
+      ].join('\n')
+    )
     await writeArtifact(task, 'implement.activity.jsonl', '{"type":"turn.completed"}')
     await writeArtifact(task, 'agent-session.summary.md', 'Prior summary')
 
@@ -101,11 +113,16 @@ describe('buildAgentSessionHandoff', () => {
     expect(handoff.content).toContain(`- feedback.md: ${task.dir}/feedback.md`)
     expect(handoff.content).toContain(`- brief.html: ${task.dir}/brief.html`)
     expect(handoff.content).toContain(`- plan.md: ${task.dir}/plan.md`)
+    expect(handoff.content).toContain(`- prototype.md: ${task.dir}/prototype.md`)
+    expect(handoff.content).toContain(
+      `- prototype-artifacts/mock.html: ${task.dir}/prototype-artifacts/mock.html`
+    )
     expect(handoff.content).toContain(`- verify.log: ${task.dir}/verify.log`)
     expect(handoff.content).toContain(
       `- implement.activity.jsonl: ${task.dir}/implement.activity.jsonl`
     )
     expect(handoff.content).not.toContain('agent-session.summary.md:')
+    expect(handoff.content).not.toContain('prototype.meta.json:')
     expect(handoff.content).not.toContain('ship.md:')
     expect(handoff.content.indexOf('feedback.md:')).toBeLessThan(
       handoff.content.indexOf('brief.html:')

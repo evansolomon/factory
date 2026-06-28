@@ -9,6 +9,7 @@ import {
   implementPrompt,
   planPrompt,
   postmortemPrompt,
+  prototypePrompt,
   reconcilePrompt,
   remediatePrompt,
   reviewPrompt,
@@ -80,6 +81,53 @@ describe('feedback prompts', () => {
     expect(prompt).toContain(guidance)
     expect(prompt).toContain('## Human feedback analysis')
     expect(prompt).toContain('The root cause is narrow buttons.')
+  })
+
+  test('prototypePrompt includes the marker contract, no-prototype option, and examples', () => {
+    const prompt = prototypePrompt('Task', 'Plan', 'Risk', guidance)
+
+    expect(prompt).toContain('PROTOTYPE: YES|NO')
+    expect(prompt).toContain('ARTIFACT: <relative basename or none>')
+    expect(prompt).toContain('REASON: <one sentence>')
+    expect(prompt).toContain('For PROTOTYPE: NO, set ARTIFACT: none')
+    expect(prompt).toContain('static HTML')
+    expect(prompt).toContain('Mermaid markdown')
+    expect(prompt).toContain('state-machine specs')
+    expect(prompt).toContain('will not pause for approval')
+  })
+
+  test('implementPrompt includes prototype context when provided', () => {
+    const prompt = implementPrompt(
+      'Task',
+      'Plan',
+      null,
+      false,
+      null,
+      null,
+      null,
+      'Decision: created'
+    )
+
+    expect(prompt).toContain('## Prototype artifact (advisory)')
+    expect(prompt).toContain('Decision: created')
+  })
+
+  test('fixPrompt includes prototype context when provided', () => {
+    const prompt = fixPrompt(
+      'Task',
+      'Plan',
+      'Failed',
+      [],
+      'diff',
+      false,
+      null,
+      null,
+      null,
+      'Decision: created'
+    )
+
+    expect(prompt).toContain('## Prototype artifact (advisory)')
+    expect(prompt).toContain('Decision: created')
   })
 })
 

@@ -9,6 +9,7 @@ export const GuidanceStageSchema = z.enum([
   'plan',
   'critique',
   'reconcile',
+  'prototype',
   'implement',
   'fix',
   'review',

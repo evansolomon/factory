@@ -1,7 +1,7 @@
 // Stage prompts for the per-task ensemble. Read-only stages must output only
 // markdown (it's saved verbatim as the artifact). Stages parsed by the conductor
 // or sharpen loop must keep their exact marker lines
-// (DECISION/COMPLEXITY/DELIVERY/VERDICT/SHIP/SPEC READY/SHARPEN).
+// (DECISION/COMPLEXITY/DELIVERY/PROTOTYPE/ARTIFACT/REASON/VERDICT/SHIP/SPEC READY/SHARPEN).
 
 // Prior human answers, threaded into every pre-implementation stage so a resumed
 // run doesn't re-ask what's already been settled.
@@ -39,6 +39,12 @@ function baselineBlock(baselineDiff: string | null): string {
 function riskBlock(riskAssessment: string | null): string {
   return riskAssessment
     ? `\n\n## Risk assessment (advisory)\nUse this to calibrate implementation and verification effort. Do not expand scope beyond the plan just because a score is high; use the rationale to make the planned change safer and better proven.\n${riskAssessment}`
+    : ''
+}
+
+function prototypeBlock(prototypeContext: string | null): string {
+  return prototypeContext
+    ? `\n\n## Prototype artifact (advisory)\nThis pre-implementation prototype is context for the intended solution. Use it when it clarifies UX, architecture, data flow, rollout risk, or another concrete implementation risk; the plan remains the source of truth.\n${prototypeContext}`
     : ''
 }
 
@@ -371,7 +377,8 @@ export function implementPrompt(
   userFacing: boolean,
   riskAssessment: string | null,
   guidance: string | null,
-  feedbackAnalysis: string | null = null
+  feedbackAnalysis: string | null = null,
+  prototypeContext: string | null = null
 ): string {
   return `Implement the plan below in the repository at your working directory. Make the code changes it calls for and nothing more — do not fix, refactor, or comment on unrelated code.
 
@@ -385,7 +392,40 @@ Do NOT commit — leave the changes in the working tree.
 ${intent}
 
 ## Plan
-${finalPlan}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${riskBlock(riskAssessment)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. Make sure it passes.` : ''}${uxBuildNote(userFacing)}`
+${finalPlan}${riskBlock(riskAssessment)}${prototypeBlock(prototypeContext)}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. Make sure it passes.` : ''}${uxBuildNote(userFacing)}`
+}
+
+export function prototypePrompt(
+  intent: string,
+  finalPlan: string,
+  riskAssessment: string | null,
+  guidance: string | null
+): string {
+  return `Decide whether a pre-implementation prototype would materially derisk or improve the task below. Make no code changes and do not write files. The task loop will not pause for approval after this stage; the artifact is advisory context for implementation.
+
+Use a prototype only when a standalone artifact would clarify a concrete implementation risk: UX or interaction flow, architecture, data flow, state machines, rollout safety, API shape, migration behavior, or another risk that becomes easier to inspect before code is written. Complexity alone is not enough; for example, a large library upgrade may be complex without benefiting from a prototype.
+
+If a prototype helps, choose the standalone artifact format that best fits the task. Examples are non-exhaustive: static HTML, Mermaid markdown, architecture or data-flow diagrams, state-machine specs, rollout sketches, interface mocks, tables, or other inspectable artifacts.
+
+Output exactly this contract:
+PROTOTYPE: YES|NO
+ARTIFACT: <relative basename or none>
+REASON: <one sentence>
+--- BEGIN ARTIFACT ---
+<standalone artifact content>
+--- END ARTIFACT ---
+
+Rules:
+- For PROTOTYPE: NO, set ARTIFACT: none and give the reason no prototype is useful.
+- For PROTOTYPE: YES, ARTIFACT must be one basename only, with no path separators.
+- Put only the primary standalone artifact between the BEGIN/END markers.
+- Do not restrict yourself to the examples above if another artifact type fits better.
+
+## Task
+${intent}
+
+## Final plan
+${finalPlan}${riskBlock(riskAssessment)}${learnedLessonsBlock(guidance)}`
 }
 
 // First pass: decide whether a task is trivial enough to skip the planning
@@ -614,7 +654,8 @@ export function fixPrompt(
   userFacing: boolean,
   riskAssessment: string | null,
   guidance: string | null,
-  feedbackAnalysis: string | null = null
+  feedbackAnalysis: string | null = null,
+  prototypeContext: string | null = null
 ): string {
   const tried = history.length
     ? `\n\n## Already attempted (these fixes did NOT work — do not repeat them)\n${history.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
@@ -633,7 +674,7 @@ ${failure}${tried}
 ## Current diff
 \`\`\`diff
 ${diff}
-\`\`\`${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${riskBlock(riskAssessment)}${uxBuildNote(userFacing)}`
+\`\`\`${riskBlock(riskAssessment)}${prototypeBlock(prototypeContext)}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${uxBuildNote(userFacing)}`
 }
 
 // The verify-gate doctor: runs with FULL access when the verify command fails.
@@ -758,7 +799,7 @@ CATEGORY: <one of the above>
 LESSON: <one or two sentences, generalizable to future tasks in this repo — not specific to this task's incidental details>
 ACTIONABLE: YES|NO
 SCOPE: GLOBAL|REPO
-STAGES: <comma-separated stages from: plan, critique, reconcile, implement, fix, review, security, deploy-safety, ux-review, consolidate, remediate, postmortem>
+STAGES: <comma-separated stages from: plan, critique, reconcile, prototype, implement, fix, review, security, deploy-safety, ux-review, consolidate, remediate, postmortem>
 ## Analysis
 <a few sentences: the root cause, and what would have prevented it>
 
@@ -803,7 +844,7 @@ CATEGORY: <one of the above>
 LESSON: <one or two sentences the agent should remember, generalizable to future tasks in this repo>
 ACTIONABLE: YES|NO
 SCOPE: GLOBAL|REPO
-STAGES: <comma-separated stages from: plan, critique, reconcile, implement, fix, review, security, deploy-safety, ux-review, consolidate, remediate, postmortem>
+STAGES: <comma-separated stages from: plan, critique, reconcile, prototype, implement, fix, review, security, deploy-safety, ux-review, consolidate, remediate, postmortem>
 ## Analysis
 <what the agent missed, and why the human's approach is correct>
 

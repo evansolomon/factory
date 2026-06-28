@@ -136,6 +136,20 @@ describe('task state transitions', () => {
     expect(next?.meta.note).toContain('recovered after interrupted planning stage')
   })
 
+  test('stranded planning tasks resume when a selected plan exists', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Prototype after planning', null, { status: 'planning' })
+    await writeArtifact(task, 'plan.md', 'Use the saved plan.')
+
+    const next = await nextRunnable(ctx, 2_000)
+
+    expect(next?.id).toBe(task.id)
+    expect(next?.meta.status).toBe('ready')
+    expect(next?.meta.resume).toBe(true)
+    expect(next?.meta.resumeKind).toBe('stranded')
+    expect(next?.meta.resumeNote).toContain('interrupted planning stage')
+  })
+
   test('stranded later-stage tasks resume from saved artifacts', async () => {
     const ctx = await workContext()
     const task = await addTask(ctx, 'Resume review', null, { status: 'reviewing' })
