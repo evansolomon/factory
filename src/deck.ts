@@ -1,7 +1,7 @@
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { WorkContext } from './config.ts'
-import { run } from './exec.ts'
+import { type RunResult, run } from './exec.ts'
 import { log } from './log.ts'
 import { findTask, latestTask, type Task } from './task.ts'
 
@@ -76,12 +76,21 @@ export function browserOpenCommand(platform: NodeJS.Platform, url: string): stri
   return null
 }
 
+function openerErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : String(error)
+}
+
 export async function defaultDeckOpener(url: string): Promise<DeckOpenResult> {
   const cmd = browserOpenCommand(process.platform, url)
   if (!cmd) {
     return { ok: false, message: `no browser opener for platform ${process.platform}` }
   }
-  const result = await run(cmd, { cwd: process.cwd() })
+  let result: RunResult
+  try {
+    result = await run(cmd, { cwd: process.cwd() })
+  } catch (error) {
+    return { ok: false, message: `browser opener failed: ${openerErrorMessage(error)}` }
+  }
   if (result.code === 0) {
     return { ok: true }
   }
@@ -133,9 +142,13 @@ export async function openDeck(
     return 0
   }
 
-  const result = await (opts.opener ?? defaultDeckOpener)(url)
+  let result: DeckOpenResult
+  try {
+    result = await (opts.opener ?? defaultDeckOpener)(url)
+  } catch (error) {
+    result = { ok: false, message: openerErrorMessage(error) }
+  }
   if (!result.ok) {
-    log.warn(`could not open deck: ${result.message}`)
     log.log(url)
   }
   return 0

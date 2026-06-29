@@ -260,7 +260,7 @@ describe('openDeck', () => {
     expect(result.lines).toEqual(['no task matching missing'])
   })
 
-  test('opener failure returns 0 and prints the URL', async () => {
+  test('opener failure returns 0 and prints only the URL', async () => {
     const ctx = await workContext()
     const task = await addTask(ctx, 'Headless deck', null)
     await setStatus(task, 'done')
@@ -273,10 +273,25 @@ describe('openDeck', () => {
     )
 
     expect(result.code).toBe(0)
-    expect(result.lines).toEqual([
-      'could not open deck: no display',
-      deckUrl(`${task.dir}/brief.html`),
-    ])
+    expect(result.lines).toEqual([deckUrl(`${task.dir}/brief.html`)])
+  })
+
+  test('opener exception returns 0 and prints only the URL', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Missing opener deck', null)
+    await setStatus(task, 'done')
+    await writeArtifact(task, 'brief.html', '<!doctype html>\n<html></html>')
+
+    const result = await captureLogs(() =>
+      openDeck(ctx, [task.id], {
+        opener: async () => {
+          throw new Error('Executable not found in $PATH: "xdg-open"')
+        },
+      })
+    )
+
+    expect(result.code).toBe(0)
+    expect(result.lines).toEqual([deckUrl(`${task.dir}/brief.html`)])
   })
 })
 
