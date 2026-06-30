@@ -215,8 +215,8 @@ export function agentSessionCommand(input: {
     summaryPath: input.summaryPath,
   })
   return input.agent === 'codex'
-    ? ['codex', '-C', input.root, '-s', 'workspace-write', '-a', 'on-request', prompt]
-    : ['claude', '--add-dir', input.root, '--permission-mode', 'default', prompt]
+    ? ['codex', '-C', input.root, '--dangerously-bypass-approvals-and-sandbox', prompt]
+    : ['claude', '--add-dir', input.root, '--dangerously-skip-permissions', prompt]
 }
 
 async function targetTask(ctx: WorkContext, query: string | null): Promise<Task | null> {

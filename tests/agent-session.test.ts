@@ -140,7 +140,7 @@ describe('buildAgentSessionHandoff', () => {
 })
 
 describe('agentSessionCommand', () => {
-  test('opens interactive codex with workspace-write and approval prompts', () => {
+  test('opens interactive codex without approval prompts or sandboxing', () => {
     const cmd = agentSessionCommand({
       agent: 'codex',
       root: '/repo',
@@ -149,16 +149,13 @@ describe('agentSessionCommand', () => {
       summaryPath: '/state/tasks/fix-button/agent-session.summary.md',
     })
 
-    expect(cmd.slice(0, 7)).toEqual([
+    expect(cmd.slice(0, 4)).toEqual([
       'codex',
       '-C',
       '/repo',
-      '-s',
-      'workspace-write',
-      '-a',
-      'on-request',
+      '--dangerously-bypass-approvals-and-sandbox',
     ])
-    expect(cmd[7]).toBe(
+    expect(cmd[4]).toBe(
       agentSessionPrompt({
         taskId: 'fix-button',
         handoffPath: '/state/tasks/fix-button/agent-session.md',
@@ -167,7 +164,7 @@ describe('agentSessionCommand', () => {
     )
   })
 
-  test('opens interactive claude in the task worktree', () => {
+  test('opens interactive claude without permission prompts', () => {
     const cmd = agentSessionCommand({
       agent: 'claude',
       root: '/repo',
@@ -176,14 +173,13 @@ describe('agentSessionCommand', () => {
       summaryPath: '/state/tasks/fix-button/agent-session.summary.md',
     })
 
-    expect(cmd.slice(0, 5)).toEqual([
+    expect(cmd.slice(0, 4)).toEqual([
       'claude',
       '--add-dir',
       '/repo',
-      '--permission-mode',
-      'default',
+      '--dangerously-skip-permissions',
     ])
-    expect(cmd[5]).toBe(
+    expect(cmd[4]).toBe(
       agentSessionPrompt({
         taskId: 'fix-button',
         handoffPath: '/state/tasks/fix-button/agent-session.md',

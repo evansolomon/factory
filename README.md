@@ -327,14 +327,15 @@ factory completion zsh                              # print the zsh completion s
   `/edit` opens a long reply in `$EDITOR`, and `/cancel` aborts. Non-TTY callers
   must use `factory ask --print [task-id] "<question...>"`, which preserves the
   one-shot scriptable behavior.
-- **`factory session`** opens a normal interactive Codex or Claude session for
-  realtime follow-up tweaks after a task is done. It defaults to Codex and the
-  latest `done` task; use `--agent claude` to choose Claude. `factory codex` and
-  `factory claude` are shortcuts. The command writes `agent-session.md` as a
-  manifest of useful artifact paths and asks the agent to append
-  `agent-session.summary.md` before exiting. This is an escape hatch for
-  human-in-the-loop editing; it does not change task status or route work back
-  through the autonomous loop.
+- **`factory session`** opens an interactive Codex or Claude session for realtime
+  follow-up tweaks after a task is done. It runs the selected CLI in its
+  permission-skipping mode because the session is already an explicit human
+  handoff. It defaults to Codex and the latest `done` task; use `--agent claude`
+  to choose Claude. `factory codex` and `factory claude` are shortcuts. The
+  command writes `agent-session.md` as a manifest of useful artifact paths and
+  asks the agent to append `agent-session.summary.md` before exiting. This is an
+  escape hatch for human-in-the-loop editing; it does not change task status or
+  route work back through the autonomous loop.
 - **`factory deck [task-id] [--url]`** opens the visual `brief.html` generated for
   a successful `done` task. With no id it targets the latest `done` task in this
   worktree. `--url` prints the local `file://` URL instead of opening a browser.
