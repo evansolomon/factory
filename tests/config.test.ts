@@ -84,6 +84,21 @@ describe('config cascade', () => {
     })
   })
 
+  test('warns and ignores unknown keys instead of failing', async () => {
+    await withFactoryHome(async () => {
+      const root = await tempDir('unknown-key')
+      await writeJson(`${root}/.factory.json`, { onComplete: ['echo done'], retries: 5 })
+
+      // An unknown key (here a removed one) must not abort the run (which mid-`add`
+      // would discard a just-typed task intent); the rest of the file still applies
+      // and the key is dropped from the resolved config.
+      const config = await loadConfig(root)
+
+      expect(config.retries).toBe(5)
+      expect('onComplete' in config).toBe(false)
+    })
+  })
+
   test('rejects codex-only agent options on claude agents', async () => {
     await withFactoryHome(async () => {
       const root = await tempDir('invalid-agent')
