@@ -1,6 +1,7 @@
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { mainWorktreeRoot, repoRoot } from './git.ts'
+import { log } from './log.ts'
 
 const ReasoningEffortSchema = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh'])
 type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>
@@ -219,6 +220,14 @@ export class ConfigError extends Error {
   override readonly name = 'ConfigError'
 }
 
+// An unknown key (a typo, or one a factory upgrade removed) is not worth aborting
+// the whole run over: the rest of the file is still valid, and the schema drops
+// unknown keys anyway (z.object strips them). So we warn and carry on. Throwing
+// here was especially bad mid-`add`, where it discarded a task intent the user had
+// just composed in their editor. Malformed *values* still fail — only unknown keys
+// are downgraded to a warning.
+const KNOWN_CONFIG_KEYS = new Set(Object.keys(ConfigSchema.shape))
+
 function formatConfigError(err: z.ZodError, sources: string[]): string {
   const issues = err.issues.map((i) => {
     const path = i.path.length > 0 ? i.path.join('.') : '(root)'
@@ -318,10 +327,10 @@ export async function loadConfig(root: string): Promise<Config> {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       throw new ConfigError(`invalid config\n\n  ${path}: expected a JSON object`)
     }
-    if ('onComplete' in raw) {
-      throw new ConfigError(
-        `invalid config\n\n  ${path}: onComplete was removed; use task-local factory delivery`
-      )
+    for (const key of Object.keys(raw)) {
+      if (!KNOWN_CONFIG_KEYS.has(key)) {
+        log.warn(`${path}: unknown config key "${key}" — ignoring`)
+      }
     }
 
     let hooks: Record<string, string[]> | null = null
