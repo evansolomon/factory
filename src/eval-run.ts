@@ -1,8 +1,9 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { $ } from 'bun'
 import { z } from 'zod'
 import { run } from './exec.ts'
+import { type GuidanceRecord, GuidanceRecordSchema } from './guidance.ts'
 import { log } from './log.ts'
 
 // The eval replay runner — the missing consumer of the harvested eval corpus.
@@ -91,6 +92,7 @@ export function fileJaccard(a: Set<string>, b: Set<string>): number {
 }
 
 export type EvalResult = {
+  variant: string | null
   file: string
   id: string
   expectedOutcome: string
@@ -140,11 +142,12 @@ async function replayTaskState(
 export async function runEvalCase(
   mainRoot: string,
   loaded: LoadedEvalCase,
-  opts: { keep?: boolean } = {}
+  opts: { keep?: boolean; guidance?: GuidanceRecord[]; variant?: string | null } = {}
 ): Promise<EvalResult> {
   const c = loaded.case
   const started = Date.now()
   const fail = (error: string): EvalResult => ({
+    variant: opts.variant ?? null,
     file: loaded.file,
     id: c.id,
     expectedOutcome: c.outcome,
@@ -190,6 +193,7 @@ export async function runEvalCase(
       }
     }
     env['FACTORY_HOME'] = home
+    await seedGuidance(home, opts.guidance ?? [])
     const invoke = factoryInvocation()
     const addArgs = c.verify
       ? ['add', '--raw', c.spec, '--verify', c.verify]
@@ -214,6 +218,7 @@ export async function runEvalCase(
     const referenceFiles = diffFileSet(c.diff)
     const status = state?.status ?? (runRes.code === 0 ? 'unknown' : 'error')
     const result: EvalResult = {
+      variant: opts.variant ?? null,
       file: loaded.file,
       id: c.id,
       expectedOutcome: c.outcome,
@@ -230,6 +235,23 @@ export async function runEvalCase(
   } catch (err) {
     await cleanup()
     return fail(err instanceof Error ? err.message : String(err))
+  }
+}
+
+async function seedGuidance(home: string, records: GuidanceRecord[]): Promise<void> {
+  if (records.length === 0) {
+    return
+  }
+  const dir = `${home}/guidance/items`
+  await mkdir(dir, { recursive: true })
+  for (const record of records) {
+    const seeded = GuidanceRecordSchema.parse({
+      ...record,
+      // Replay worktrees compute a different repoStateDir under the isolated home.
+      // Seeding as global tests the prompt impact of the proposed text and stages.
+      scope: { kind: 'global' },
+    })
+    await Bun.write(`${dir}/${seeded.id}.json`, `${JSON.stringify(seeded, null, 2)}\n`)
   }
 }
 

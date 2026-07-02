@@ -35,7 +35,14 @@ import {
   type TaskDelivery,
 } from './delivery.ts'
 import { composeInEditor, openEditor } from './editor.ts'
-import { appendEvalResult, factoryInvocation, listEvalCases, runEvalCase } from './eval-run.ts'
+import {
+  appendEvalResult,
+  type EvalResult,
+  factoryInvocation,
+  type LoadedEvalCase,
+  listEvalCases,
+  runEvalCase,
+} from './eval-run.ts'
 import { captureCorrection, captureEvalCase } from './evals.ts'
 import { run } from './exec.ts'
 import {
@@ -60,7 +67,14 @@ import {
 import { harvestTask, logHarvest } from './harvest.ts'
 import { emit, type Hooks } from './hooks.ts'
 import { parseInputArgs, resolveMessage } from './input.ts'
-import { readCandidates, readLessons } from './lessons.ts'
+import {
+  applyLessonCuration,
+  guidanceRecordsForCuration,
+  type LessonCuratePlan,
+  planLessonCuration,
+  readCandidates,
+  readLessons,
+} from './lessons.ts'
 import { acquireRunLock, RunLockError, runLockHolder } from './lock.ts'
 import { log } from './log.ts'
 import { parseMoot } from './markers.ts'
@@ -211,8 +225,10 @@ COMMANDS
                              Telemetry for one task (defaults to the latest here):
                              cost, cycle time, where the tokens go. --all rolls up
                              across the repo: first-pass yield, escalation/blocked rate.
-  factory lessons [list|show|rm|edit] ...
+  factory lessons [list|show|rm|edit|curate] ...
                              Learned lessons, legacy lessons, and raw candidates.
+                             curate drains recurring candidates into learned guidance
+                             after an eval replay gate; use --dry-run to inspect.
   factory config [edit [--global|--repo|--worktree|--repo-parent|--dir <dir>]]
                            Show effective config + where it's set; edit opens the
                            global config by default; flags target another layer.
@@ -497,8 +513,110 @@ function ambiguousGuidanceMessage(query: string, records: GuidanceRecord[]): str
   return `ambiguous lesson id "${query}"\n  matches: ${records.map((record) => record.id).join(', ')}`
 }
 
+function lessonClusterSummary(plan: LessonCuratePlan): void {
+  log.info(
+    `curate: ${plan.candidates.length} candidate${plan.candidates.length === 1 ? '' : 's'} · ` +
+      `${plan.clusters.length} cluster${plan.clusters.length === 1 ? '' : 's'} · ` +
+      `${plan.promotions.length} promotion${plan.promotions.length === 1 ? '' : 's'}`
+  )
+  for (const proposal of plan.promotions) {
+    const stages = proposal.capture.stages.join(',')
+    log.log(
+      `PROMOTE ${proposal.candidates.length}x [${proposal.capture.scope} ${stages}] ` +
+        proposal.text
+    )
+    log.log(`  source: ${proposal.artifactPath}`)
+  }
+  if (plan.duplicates.length > 0) {
+    log.info(`${plan.duplicates.length} recurring cluster(s) already covered by active guidance`)
+  }
+  if (plan.noise.length > 0) {
+    log.info(`${plan.noise.length} cluster(s) classified as noise or below threshold`)
+  }
+}
+
+type EvalBatchSummary = { total: number; matched: number }
+
+function logEvalResult(result: EvalResult): boolean {
+  if (result.error) {
+    log.fail(`${result.file}: ${result.error}`)
+    return false
+  }
+  const verdict = result.outcomeMatch ? 'outcome-match' : 'OUTCOME-MISMATCH'
+  log.ok(
+    `${result.file}: ${verdict} ` +
+      `(expected ${result.expectedOutcome}, replay ${result.replayStatus}) · ` +
+      `file overlap ${(result.fileJaccard * 100).toFixed(0)}% · ` +
+      `${Math.round(result.durationMs / 1000)}s`
+  )
+  return result.outcomeMatch
+}
+
+async function runEvalBatch(
+  ctx: WorkContext,
+  mainRoot: string,
+  cases: LoadedEvalCase[],
+  opts: { keep?: boolean; variant: string; guidance?: GuidanceRecord[] }
+): Promise<EvalBatchSummary> {
+  let matched = 0
+  for (const c of cases) {
+    log.step(`${opts.variant}: replaying ${c.file}`)
+    const result = await runEvalCase(mainRoot, c, {
+      keep: opts.keep,
+      guidance: opts.guidance,
+      variant: opts.variant,
+    })
+    await appendEvalResult(ctx.repoStateDir, result)
+    if (logEvalResult(result)) {
+      matched++
+    }
+  }
+  return { total: cases.length, matched }
+}
+
+async function gateLessonPromotions(
+  ctx: WorkContext,
+  evalFilter: string | null,
+  keep: boolean,
+  plan: LessonCuratePlan
+): Promise<boolean> {
+  const repoCtx = await loadRepoContext(process.cwd())
+  const cases = await listEvalCases(ctx.repoStateDir)
+  const selected = evalFilter ? cases.filter((c) => c.file.includes(evalFilter)) : cases
+  const runnable = selected.filter((c) => c.case.outcome !== 'corrected')
+  if (runnable.length === 0) {
+    log.fail(evalFilter ? `no replayable case matching ${evalFilter}` : 'no replayable eval cases')
+    return false
+  }
+
+  log.info(
+    `gating ${plan.promotions.length} promotion${plan.promotions.length === 1 ? '' : 's'} ` +
+      `with ${runnable.length} replay${runnable.length === 1 ? '' : 's'}`
+  )
+  const baseline = await runEvalBatch(ctx, repoCtx.mainRoot, runnable, {
+    keep,
+    variant: 'curate-baseline',
+  })
+  const guidance = guidanceRecordsForCuration(ctx, plan.promotions)
+  const proposed = await runEvalBatch(ctx, repoCtx.mainRoot, runnable, {
+    keep,
+    variant: 'curate-guidance',
+    guidance,
+  })
+  log.info(
+    `curate gate: baseline ${baseline.matched}/${baseline.total}, ` +
+      `with guidance ${proposed.matched}/${proposed.total}`
+  )
+  if (proposed.matched < baseline.matched) {
+    log.fail('curate gate regressed eval pass rate; candidates left untouched')
+    return false
+  }
+  return true
+}
+
 async function lessonsCommand(ctx: WorkContext, args: string[]): Promise<number> {
-  const sub = args[0] && ['list', 'show', 'rm', 'edit'].includes(args[0]) ? args[0] : 'list'
+  const sub =
+    args[0] && ['list', 'show', 'rm', 'edit', 'curate'].includes(args[0]) ? args[0] : 'list'
   const rest = sub === 'list' && args[0] !== 'list' ? args : args.slice(1)
 
   try {
@@ -527,6 +645,79 @@ async function lessonsCommand(ctx: WorkContext, args: string[]): Promise<number>
       }
       await printLessonsList(ctx, { includeDeleted, scope, stage })
       return 0
+    }
+
+    if (sub === 'curate') {
+      const usage =
+        'usage: factory lessons curate [--dry-run] [--min-cluster <n>] ' +
+        '[--eval-case <substring>] [--keep-evals]'
+      let dryRun = false
+      let minClusterSize = 2
+      let evalFilter: string | null = null
+      let keep = false
+      for (let i = 0; i < rest.length; i++) {
+        const arg = rest[i] ?? ''
+        if (arg === '--dry-run') {
+          dryRun = true
+        } else if (arg === '--keep-evals') {
+          keep = true
+        } else if (arg === '--min-cluster') {
+          const value = Number(rest[i + 1])
+          if (!Number.isInteger(value) || value < 1) {
+            throw new Error(usage)
+          }
+          minClusterSize = value
+          i++
+        } else if (arg.startsWith('--min-cluster=')) {
+          const value = Number(arg.slice('--min-cluster='.length))
+          if (!Number.isInteger(value) || value < 1) {
+            throw new Error(usage)
+          }
+          minClusterSize = value
+        } else if (arg === '--eval-case') {
+          const value = rest[i + 1]
+          if (!value) {
+            throw new Error(usage)
+          }
+          evalFilter = value
+          i++
+        } else if (arg.startsWith('--eval-case=')) {
+          evalFilter = arg.slice('--eval-case='.length)
+        } else {
+          throw new Error(usage)
+        }
+      }
+
+      const release = await acquireRunLock(`${ctx.repoStateDir}/lessons-curate`)
+      try {
+        const plan = await planLessonCuration(ctx, { minClusterSize })
+        lessonClusterSummary(plan)
+        if (plan.candidates.length === 0) {
+          log.info('lesson candidate queue is empty')
+          return 0
+        }
+        if (dryRun) {
+          log.info('dry run: no guidance written and candidates left untouched')
+          return 0
+        }
+        if (
+          plan.promotions.length > 0 &&
+          !(await gateLessonPromotions(ctx, evalFilter, keep, plan))
+        ) {
+          return 1
+        }
+        const applied = await applyLessonCuration(ctx, plan)
+        for (const record of applied.created) {
+          log.ok(`lessons ${record.id} (curated)`)
+        }
+        log.info(`drained ${applied.drained} candidate${applied.drained === 1 ? '' : 's'}`)
+        if (applied.archivePath) {
+          log.info(`archived drained candidates: ${applied.archivePath}`)
+        }
+        return 0
+      } finally {
+        await release()
+      }
     }
 
     if (sub === 'show') {

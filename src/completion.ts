@@ -114,6 +114,7 @@ export function renderZshCompletionScript(): string {
   const lessons = mustCommandSpec('lessons')
   const lessonsList = mustSubcommandSpec('lessons', 'list')
   const lessonsEdit = mustSubcommandSpec('lessons', 'edit')
+  const lessonsCurate = mustSubcommandSpec('lessons', 'curate')
   const guidanceScopes = lessonsList.options?.find((option) => option.name === '--scope')?.values
   const guidanceStages = lessonsList.options?.find((option) => option.name === '--stage')?.values
 
@@ -145,6 +146,7 @@ export function renderZshCompletionScript(): string {
     renderChoiceArray('_factory_lessons_subcommands', subcommandChoices(lessons.subcommands)),
     renderChoiceArray('_factory_lessons_list_options', optionChoices(lessonsList.options)),
     renderChoiceArray('_factory_lessons_edit_options', optionChoices(lessonsEdit.options)),
+    renderChoiceArray('_factory_lessons_curate_options', optionChoices(lessonsCurate.options)),
     renderNameArray('_factory_guidance_scopes', guidanceScopes ?? []),
     renderNameArray('_factory_guidance_stages', guidanceStages ?? []),
     renderChoiceArray('_factory_show_steps', SHOW_STEP_CHOICES),
@@ -319,6 +321,9 @@ export function renderZshCompletionScript(): string {
     '      _factory_complete_after_option --scope _factory_guidance_scopes && return',
     '      _factory_complete_after_option --stage _factory_guidance_stages && return',
     '      _factory_describe_current_options _factory_lessons_edit_options',
+    '      ;;',
+    '    curate)',
+    '      _factory_describe_current_options _factory_lessons_curate_options',
     '      ;;',
     '  esac',
     '}',
