@@ -1,5 +1,7 @@
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { scanArgs } from './args.ts'
+import { DECK_OPTIONS } from './commands.ts'
 import type { WorkContext } from './config.ts'
 import { type RunResult, run } from './exec.ts'
 import { log } from './log.ts'
@@ -34,25 +36,20 @@ export async function buildDeckHtml(runDeck: () => Promise<string>): Promise<str
 export function parseDeckArgs(
   args: string[]
 ): { ok: true; request: DeckRequest } | { ok: false; message: string } {
-  let urlOnly = false
-  const positional: string[] = []
-
-  for (const arg of args) {
-    if (arg === '--url') {
-      urlOnly = true
-      continue
-    }
-    if (arg.startsWith('-')) {
-      return { ok: false, message: `unknown option ${arg}\n${USAGE}` }
-    }
-    positional.push(arg)
+  // A lone '-' is an unknown option here, not a positional.
+  const scan = scanArgs(DECK_OPTIONS, args, { unknown: 'error', loneDash: 'flagish' })
+  if (!scan.ok) {
+    return { ok: false, message: `unknown option ${scan.error.option}\n${USAGE}` }
   }
 
-  if (positional.length > 1) {
+  if (scan.positionals.length > 1) {
     return { ok: false, message: USAGE }
   }
 
-  return { ok: true, request: { taskQuery: positional[0] ?? null, urlOnly } }
+  return {
+    ok: true,
+    request: { taskQuery: scan.positionals[0] ?? null, urlOnly: scan.flags['--url'] },
+  }
 }
 
 export function deckPath(task: Task): string {

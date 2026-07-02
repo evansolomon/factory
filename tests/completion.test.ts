@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { activeCommandChoices } from '../src/commands.ts'
@@ -75,7 +75,21 @@ async function runCommand(cmd: string[], env: Record<string, string> = {}): Prom
   return { stdout, stderr, code }
 }
 
-async function runZshCompletion(input: string, expected: string): Promise<CliResult | null> {
+// The shim shells out to `factory __complete` via ${words[1]}, so the zpty
+// harness needs a `factory` executable on PATH that runs the source CLI.
+async function factoryWrapperDir(): Promise<string> {
+  const dir = await tempDir('completion-bin')
+  const wrapper = `${dir}/factory`
+  await writeFile(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${cliPath}" "$@"\n`)
+  await chmod(wrapper, 0o755)
+  return dir
+}
+
+async function runZshCompletion(
+  input: string,
+  expected: string,
+  opts: { cwd?: string; env?: Record<string, string> } = {}
+): Promise<CliResult | null> {
   const zsh = Bun.which('zsh')
   if (!zsh) {
     process.stderr.write('skipping zsh completion dispatch smoke: zsh not found\n')
@@ -83,6 +97,7 @@ async function runZshCompletion(input: string, expected: string): Promise<CliRes
   }
 
   const dir = await tempDir('completion-dispatch')
+  const binDir = await factoryWrapperDir()
   const scriptPath = `${dir}/_factory`
   const harnessPath = `${dir}/dispatch.zsh`
   await writeFile(scriptPath, renderZshCompletionScript())
@@ -92,13 +107,16 @@ async function runZshCompletion(input: string, expected: string): Promise<CliRes
       'zmodload zsh/zpty',
       'zpty -b completion zsh -f -i',
       'zpty -w completion $\'PROMPT="PROMPT> "\\n\'',
+      'if [[ -n $COMPLETION_CWD ]]; then',
+      '  zpty -w completion $\'cd "$COMPLETION_CWD"\\n\'',
+      'fi',
       [
         'zpty -w completion',
         '$\'autoload -Uz compinit\\ncompinit -D\\nsource "$SCRIPT_PATH"',
         '\\nbindkey "^I" complete-word\\n\'',
       ].join(' '),
       'zpty -w -n completion "$COMPLETION_INPUT"',
-      'local output chunk deadline=$((SECONDS + 3))',
+      'local output chunk deadline=$((SECONDS + 15))',
       'while (( SECONDS < deadline )); do',
       '  if zpty -r -t completion chunk; then',
       '    output+=$chunk',
@@ -117,6 +135,9 @@ async function runZshCompletion(input: string, expected: string): Promise<CliRes
     SCRIPT_PATH: scriptPath,
     COMPLETION_INPUT: input,
     COMPLETION_EXPECT: expected,
+    COMPLETION_CWD: opts.cwd ?? '',
+    PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
+    ...(opts.env ?? {}),
   })
 }
 
@@ -132,7 +153,7 @@ describe('zsh completion script', () => {
     )
   })
 
-  test('top-level completion includes active commands and hides deprecated aliases', () => {
+  test('top-level completion includes active commands and hides internal ones', () => {
     const choices = activeCommandChoices().map((choice) => choice.name)
 
     expect(choices).toEqual([
@@ -141,7 +162,9 @@ describe('zsh completion script', () => {
       'retry',
       'feedback',
       'correct',
+      'close',
       'backlog',
+      'dispatch',
       'config',
       'status',
       'ask',
@@ -150,7 +173,12 @@ describe('zsh completion script', () => {
       'claude',
       'show',
       'deck',
+      'delivery',
       'report',
+      'harvest',
+      'gc',
+      'skills',
+      'evals',
       'lessons',
       'version',
       'upgrade',
@@ -159,65 +187,21 @@ describe('zsh completion script', () => {
     ])
     expect(choices).not.toContain('answer')
     expect(choices).not.toContain('resume')
+    expect(choices).not.toContain('__complete')
   })
 
-  test('generated script includes top-level options and fixed grammar choices', () => {
+  test('shim delegates all candidates to the hidden helper', () => {
     const script = renderZshCompletionScript()
 
-    for (const token of [
-      '--version:Print the current CLI version',
-      '--help:Show help',
-      '-h:Show help',
-      'zsh:Print zsh completion script',
-      'add:Add an intent to the backlog',
-      'rm:Remove a backlog entry',
-      '--raw:Skip sharpening for the backlog entry',
-      '--verify:Set a verify command for the backlog entry',
-      '--edit:Compose the intent in $EDITOR',
-      '--complexity:Declare the new task complexity',
-      'trivial',
-      'complex',
-      '--agent:Choose the interactive agent',
-      '--agent=:Choose the interactive agent',
-      '--url:Print the deck file URL instead of opening a browser',
-      'codex',
-      'claude',
-      '--message:Provide the message inline',
-      '--message=:Provide the message inline',
-      '-m:Provide the message inline',
-      'set:Set a task-local config value',
-      'get:Show a task-local config value',
-      'unset:Disable a task-local config value',
-      'inherit:Clear the task-local override',
-      'edit:Open a config file in $EDITOR',
-      'on-complete:Task-local delivery instructions',
-      'list:List learned lessons',
-      'show:Show a learned lesson',
-      'rm:Remove a learned lesson',
-      'edit:Edit a learned lesson',
-      'curate:Drain recurring lesson candidates through the eval gate',
-      '--all:Include deleted learned lessons',
-      '--scope:Filter by scope',
-      '--stage:Filter by stage',
-      '--dry-run:Inspect curation without writing',
-      '--min-cluster:Minimum similar candidates before promotion',
-      '--eval-case:Gate with matching eval case files only',
-      '--keep-evals:Keep throwaway eval replay worktrees',
-      '--message:Provide the lesson text inline',
-      '--edit:Compose the lesson text in $EDITOR',
-      'global',
-      'repo',
-      'deploy-safety',
-    ]) {
-      expect(script).toContain(token)
-    }
-  })
-
-  test('config set completes on-complete as the fixed key only', () => {
-    const script = renderZshCompletionScript()
-
-    expect(script).toContain("_describe -t keys 'config key' _factory_config_keys")
-    expect(script.match(/on-complete:Task-local delivery instructions/g) ?? []).toHaveLength(1)
+    // Invokes the completed binary itself with the 0-based cursor index.
+    expect(script).toContain(`"${zshParameter('words[1]')}" __complete $(( CURRENT - 2 ))`)
+    expect(script).toContain('2>/dev/null')
+    // Tab-separated name/description lines feed _describe, with ':' escaped in names.
+    expect(script).toContain(`name=${zshParameter('name//:/\\\\:')}`)
+    expect(script).toContain('_describe -t factory-candidates')
+    // The script itself enumerates no commands — that would reintroduce drift.
+    expect(script).not.toContain('backlog')
+    expect(script).not.toContain('lessons')
   })
 })
 
@@ -317,7 +301,10 @@ describe('zsh completion smoke', () => {
   })
 
   test('real zsh dispatch completes top-level and command-specific choices when available', async () => {
-    const version = await runZshCompletion('factory ve\t', 'factory version')
+    const home = await tempDir('completion-zpty-home')
+    const version = await runZshCompletion('factory ve\t', 'factory version', {
+      env: { FACTORY_HOME: home },
+    })
     if (!version) {
       return
     }
@@ -326,15 +313,16 @@ describe('zsh completion smoke', () => {
     expect(version.code).toBe(0)
     expect(version.stdout).toContain('factory version')
 
-    const configSet = await runZshCompletion(
-      'factory config set \t',
-      'factory config set on-complete'
-    )
-    expect(configSet?.stderr).toBe('')
-    expect(configSet?.code).toBe(0)
-    expect(configSet?.stdout).toContain('factory config set on-complete')
+    const configEdit = await runZshCompletion('factory config \t', 'factory config edit', {
+      env: { FACTORY_HOME: home },
+    })
+    expect(configEdit?.stderr).toBe('')
+    expect(configEdit?.code).toBe(0)
+    expect(configEdit?.stdout).toContain('factory config edit')
 
-    const backlog = await runZshCompletion('factory backlog \t\t', 'Remove a backlog entry')
+    const backlog = await runZshCompletion('factory backlog \t\t', 'Remove a backlog entry', {
+      env: { FACTORY_HOME: home },
+    })
     expect(backlog?.stderr).toBe('')
     expect(backlog?.code).toBe(0)
     expect(backlog?.stdout).toContain('add')
@@ -342,7 +330,10 @@ describe('zsh completion smoke', () => {
   })
 
   test('real zsh dispatch completes lessons choices when available', async () => {
-    const lessons = await runZshCompletion('factory lessons \t\t', 'Edit a learned lesson')
+    const home = await tempDir('completion-zpty-home')
+    const lessons = await runZshCompletion('factory lessons \t\t', 'Edit a learned lesson', {
+      env: { FACTORY_HOME: home },
+    })
     if (!lessons) {
       return
     }
@@ -350,5 +341,41 @@ describe('zsh completion smoke', () => {
     expect(lessons.stderr).toBe('')
     expect(lessons.code).toBe(0)
     expect(lessons.stdout).toContain('edit')
+  })
+
+  test('real zsh dispatch completes a task step from activity files when available', async () => {
+    const zsh = Bun.which('zsh')
+    if (!zsh) {
+      process.stderr.write('skipping zsh dynamic completion smoke: zsh not found\n')
+      return
+    }
+    // A real repo with a fabricated task whose only activity file is triage:
+    // the motivating case — `factory show tri<TAB>` → triage.
+    const repo = await realpath(await tempDir('completion-repo'))
+    const home = await realpath(await tempDir('completion-repo-home'))
+    const init = await runCommand(['git', 'init', '-q', repo])
+    expect(init.code).toBe(0)
+
+    const worktreeKey = repo.replace(/\//g, '-').replace(/^-+/, '')
+    const taskDir = `${home}/sessions/${worktreeKey}/tasks/fix-login`
+    await mkdir(taskDir, { recursive: true })
+    await writeFile(
+      `${taskDir}/meta.json`,
+      JSON.stringify({
+        id: 'fix-login',
+        slug: 'fix-login',
+        status: 'done',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      })
+    )
+    await writeFile(`${taskDir}/triage.activity.jsonl`, '{"type":"turn.completed"}\n')
+
+    const result = await runZshCompletion('factory show tri\t', 'factory show triage', {
+      cwd: repo,
+      env: { FACTORY_HOME: home },
+    })
+    expect(result?.stderr).toBe('')
+    expect(result?.code).toBe(0)
+    expect(result?.stdout).toContain('factory show triage')
   })
 })

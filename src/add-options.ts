@@ -1,3 +1,5 @@
+import { scanArgs } from './args.ts'
+import { ADD_PARSE_OPTIONS } from './commands.ts'
 import { type TaskComplexity, TaskComplexitySchema } from './task.ts'
 
 const ADD_USAGE =
@@ -36,75 +38,57 @@ function setComplexity(
 }
 
 export function parseAddOptions(args: string[]): ParseAddOptionsResult {
-  const verifyIndex = args.indexOf('--verify')
-  const head = verifyIndex === -1 ? args : args.slice(0, verifyIndex)
-  const tail = verifyIndex === -1 ? [] : args.slice(verifyIndex + 1)
-  if (tail.includes('--trivial') || tail.includes('--complexity')) {
+  // Unknown flag-ish tokens are intent words ('collect'); --verify consumes the
+  // rest of the line as its tail. --edit is intentionally undeclared here so it
+  // stays in the intent tokens for resolveIntent (which strips it anywhere,
+  // including inside the verify tail).
+  const scan = scanArgs(ADD_PARSE_OPTIONS, args, { unknown: 'collect' })
+  if (!scan.ok) {
+    if (scan.error.option === '--name') {
+      return fail('--name needs a value')
+    }
+    return fail('--complexity needs a value: trivial or complex')
+  }
+
+  const tail = scan.flags['--verify']
+  if (tail?.includes('--trivial') || tail?.includes('--complexity')) {
     return fail('complexity flags must appear before --verify')
   }
 
-  const cleaned: string[] = []
-  let raw = false
-  let forceNew = false
   let name: string | null = null
+  for (const value of scan.flags['--name']) {
+    if (value.startsWith('--')) {
+      return fail('--name needs a value')
+    }
+    name = value
+  }
+
   let complexity: TaskComplexity | null = null
-  for (let i = 0; i < head.length; i++) {
-    const arg = head[i]
-    if (arg === undefined) {
-      continue
+  if (scan.flags['--trivial']) {
+    complexity = 'trivial'
+  }
+  for (const value of scan.flags['--complexity']) {
+    if (value.startsWith('--')) {
+      return fail('--complexity needs a value: trivial or complex')
     }
-    if (arg === '--raw') {
-      raw = true
-      continue
+    const parsed = TaskComplexitySchema.safeParse(value)
+    if (!parsed.success) {
+      return fail(`invalid complexity "${value}" (expected trivial or complex)`)
     }
-    if (arg === '--force-new') {
-      forceNew = true
-      continue
+    const next = setComplexity(complexity, parsed.data)
+    if (typeof next !== 'string') {
+      return next
     }
-    if (arg === '--name') {
-      const value = head[i + 1]
-      if (!value || value.startsWith('--')) {
-        return fail('--name needs a value')
-      }
-      name = value
-      i++
-      continue
-    }
-    if (arg === '--trivial') {
-      const next = setComplexity(complexity, 'trivial')
-      if (typeof next !== 'string') {
-        return next
-      }
-      complexity = next
-      continue
-    }
-    if (arg === '--complexity') {
-      const value = head[i + 1]
-      if (!value || value.startsWith('--')) {
-        return fail('--complexity needs a value: trivial or complex')
-      }
-      const parsed = TaskComplexitySchema.safeParse(value)
-      if (!parsed.success) {
-        return fail(`invalid complexity "${value}" (expected trivial or complex)`)
-      }
-      const next = setComplexity(complexity, parsed.data)
-      if (typeof next !== 'string') {
-        return next
-      }
-      complexity = next
-      i++
-      continue
-    }
-    cleaned.push(arg)
+    complexity = next
   }
 
   return {
     ok: true,
     options: {
-      args: verifyIndex === -1 ? cleaned : [...cleaned, '--verify', ...tail],
-      raw,
+      args: tail === undefined ? scan.positionals : [...scan.positionals, '--verify', ...tail],
+      raw: scan.flags['--raw'],
       complexity,
-      forceNew,
+      forceNew: scan.flags['--force-new'],
       name,
     },
   }

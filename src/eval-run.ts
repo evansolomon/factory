@@ -32,7 +32,11 @@ export type EvalCase = z.infer<typeof EvalCaseSchema>
 
 export type LoadedEvalCase = { file: string; case: EvalCase }
 
-export async function listEvalCases(repoStateDir: string): Promise<LoadedEvalCase[]> {
+export async function listEvalCases(
+  repoStateDir: string,
+  opts: { onSkip?: (message: string) => void } = {}
+): Promise<LoadedEvalCase[]> {
+  const onSkip = opts.onSkip ?? ((message: string) => log.warn(message))
   const dir = `${repoStateDir}/eval-candidates`
   let entries: string[] = []
   try {
@@ -47,10 +51,10 @@ export async function listEvalCases(repoStateDir: string): Promise<LoadedEvalCas
       if (parsed.success) {
         out.push({ file: entry, case: parsed.data })
       } else {
-        log.warn(`eval case skipped (${entry}): ${parsed.error.issues[0]?.message}`)
+        onSkip(`eval case skipped (${entry}): ${parsed.error.issues[0]?.message}`)
       }
     } catch (err) {
-      log.warn(`eval case skipped (${entry}): ${err instanceof Error ? err.message : err}`)
+      onSkip(`eval case skipped (${entry}): ${err instanceof Error ? err.message : err}`)
     }
   }
   return out

@@ -286,7 +286,7 @@ const ActivityEvent = z.object({
 })
 
 // Step names with a persisted activity log in the task dir.
-async function activitySteps(task: Task): Promise<string[]> {
+export async function activitySteps(task: Task): Promise<string[]> {
   try {
     return (await readdir(task.dir))
       .filter((f) => f.endsWith('.activity.jsonl'))

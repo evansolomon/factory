@@ -1,3 +1,5 @@
+import { scanArgs } from './args.ts'
+import { MESSAGE_OPTIONS } from './commands.ts'
 import { composeInEditor } from './editor.ts'
 
 // Shared argument handling for the human-input commands (answer/retry/feedback).
@@ -14,35 +16,25 @@ export type ParsedInput =
 // inline value from -m/--message; an absent flag (null) is resolved later from
 // $EDITOR or stdin by resolveMessage. Repeated -m: last value wins.
 export function parseInputArgs(args: string[], usage: string): ParsedInput {
-  let message: string | null = null
-  let edit = false
-  const positionals: string[] = []
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? ''
-    if (arg === '-m' || arg === '--message') {
-      const next = args[i + 1]
-      if (next === undefined) {
-        return { ok: false, error: usage }
-      }
-      message = next
-      i++
-    } else if (arg.startsWith('--message=')) {
-      message = arg.slice('--message='.length)
-    } else if (arg === '--edit') {
-      edit = true
-    } else if (arg.startsWith('--') || (arg.startsWith('-') && arg !== '-')) {
-      return { ok: false, error: `unknown option ${arg}\n${usage}` }
-    } else {
-      positionals.push(arg)
+  const scan = scanArgs(MESSAGE_OPTIONS, args, { unknown: 'error' })
+  if (!scan.ok) {
+    if (scan.error.kind === 'unknown-option') {
+      return { ok: false, error: `unknown option ${scan.error.option}\n${usage}` }
     }
+    return { ok: false, error: usage }
   }
-  if (positionals.length > 1) {
+  if (scan.positionals.length > 1) {
     return {
       ok: false,
       error: `${usage}\nthe message is set with -m/--message or composed in $EDITOR`,
     }
   }
-  return { ok: true, taskQuery: positionals[0] ?? null, message, edit }
+  return {
+    ok: true,
+    taskQuery: scan.positionals[0] ?? null,
+    message: scan.flags['--message'].at(-1) ?? null,
+    edit: scan.flags['--edit'],
+  }
 }
 
 // Resolve the free-text message from the parsed flags. 'required' commands

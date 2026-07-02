@@ -65,24 +65,31 @@ describe('auto-upgrade eligibility', () => {
   test('uses the normal-command allow-list from command metadata', () => {
     const expected = [
       'add',
-      'backlog',
       'run',
-      'answer',
-      'feedback',
       'retry',
-      'resume',
+      'feedback',
       'correct',
+      'close',
+      'backlog',
+      'dispatch',
+      'config',
       'status',
       'ask',
       'session',
       'codex',
       'claude',
-      'config',
       'show',
       'deck',
-      'lessons',
+      'delivery',
       'report',
-    ]
+      'harvest',
+      'gc',
+      'skills',
+      'evals',
+      'lessons',
+      'answer',
+      'resume',
+    ] as const
 
     expect(AUTO_UPGRADE_COMMAND_NAMES).toEqual(expected)
 
@@ -99,6 +106,7 @@ describe('auto-upgrade eligibility', () => {
       '--version',
       'upgrade',
       'completion',
+      '__complete',
       'wat',
     ]) {
       expect(isAutoUpgradeCommand(command)).toBe(false)
@@ -461,6 +469,7 @@ describe('cli auto-upgrade placement', () => {
         completion: () => 0,
       })
     ).toBe(0)
+    expect(await main({ argv: ['__complete'], autoUpgrade })).toBe(0)
     expect(autoCalls).toBe(0)
   })
 
