@@ -7,6 +7,7 @@ import { type AddRouteTask, selectAddRoute } from './add-route.ts'
 import { openAgentSession } from './agent-session.ts'
 import { agentLabel, runAgent } from './agents.ts'
 import { askFactory } from './ask.ts'
+import { type AlertState, createAttentionTracker } from './attention.ts'
 import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
 import { addBacklog, type BacklogEntry, loadBacklog, removeBacklog } from './backlog.ts'
 import { runCompletion } from './completion.ts'
@@ -370,7 +371,6 @@ async function maybeSharpen(
   return sharpen({ root, agent, reviewer, hooks, intent: base.intent, verify: base.verify })
 }
 
-type AlertState = 'blocked' | 'needs-input' | 'done'
 type ParseTaskTargetResult =
   | { ok: true; args: string[]; taskQuery: string | null }
   | { ok: false; message: string }
@@ -665,8 +665,7 @@ async function taskDelivery(ctx: WorkContext, args: string[]): Promise<number> {
 
 // The queue's most-important state for attention and the idle label:
 // blocked > needs-input > all-done > nothing.
-async function queueState(ctx: WorkContext): Promise<AlertState | null> {
-  const tasks = await loadTasks(ctx)
+function queueState(tasks: Task[]): AlertState | null {
   const has = (s: string) => tasks.some((t) => t.meta.status === s)
   const allDone = tasks.length > 0 && tasks.every((t) => t.meta.status === 'done')
   return has('blocked') ? 'blocked' : has('needs-input') ? 'needs-input' : allDone ? 'done' : null
@@ -786,7 +785,13 @@ async function queueNewTask(
 const STALE_AFTER_MS = 24 * 60 * 60 * 1000
 const staleSignaled = new Set<string>()
 
-async function tendParkedTasks(ctx: WorkContext): Promise<void> {
+// noteAttention keeps the run loop's attention dedup in sync with the direct
+// re-nudge emit below: without it, a later setAlert('none') at task start can
+// no-op and strand hook consumers on needs-input while factory is running.
+async function tendParkedTasks(
+  ctx: WorkContext,
+  noteAttention: (state: AlertState) => void
+): Promise<void> {
   const autoAcceptMs = ctx.config.autoAcceptAfterMinutes
     ? ctx.config.autoAcceptAfterMinutes * 60_000
     : null
@@ -821,7 +826,10 @@ async function tendParkedTasks(ctx: WorkContext): Promise<void> {
             task.meta.note = `likely moot: ${summary} — close with: factory close ${task.id}`
             task.meta.updatedAt = new Date().toISOString()
             await saveMeta(task)
+            // Direct emit, bypassing setAlert's dedup on purpose: this is the
+            // long-horizon re-nudge for an already-surfaced question.
             await emit(ctx.root, ctx.config.hooks, 'attention', { state: 'needs-input' })
+            noteAttention('needs-input')
             log.warn(`${task.id}: likely MOOT — ${summary}`)
             log.info(`  close it with: factory close ${task.id} -m "already landed"`)
           }
@@ -1156,10 +1164,12 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       startPromptWorker(ctx)
     }
 
-    // The attention hook means "factory is stopped, waiting on you" — so it is
-    // raised only when the loop has no runnable work left, never while it's
-    // actively churning other tasks. Dedup by last-emitted state so a long idle
-    // wait doesn't repeatedly notify hook consumers on every poll.
+    // The attention hook means "something new is parked since you last heard
+    // from me" — raised only when the loop has no runnable work left, never
+    // while it's actively churning other tasks, and once per parked episode of
+    // each task (the tracker decides WHETHER to alert; setAlert still dedups
+    // identical consecutive emits so a long idle wait doesn't repeatedly notify
+    // hook consumers on every poll).
     let alerted: AlertState | 'none' | null = null
     const setAlert = async (state: AlertState | 'none') => {
       if (state === alerted) {
@@ -1168,6 +1178,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       alerted = state
       await emit(ctx.root, ctx.config.hooks, 'attention', { state })
     }
+    const attention = createAttentionTracker()
 
     // Long-lived by default: when no task is ready, wait and poll so tasks added
     // later (factory add), unblocked later (factory retry), or due for an
@@ -1176,20 +1187,33 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     while (true) {
       const task = await nextRunnable(ctx)
       if (!task) {
-        // Nothing runnable: the loop is now genuinely waiting on you. Drive
-        // attention from what's left — blocked/needs-input/done are meaningful to
-        // hook consumers, an empty/all-other queue clears it. This is the only
-        // place the run loop raises attention, so consumers never see "waiting on
-        // you" while factory is actively working other tasks. Label the window the
-        // same way via loop.idle.
-        const remaining = await queueState(ctx)
-        await setAlert(remaining ?? 'none')
+        // Nothing runnable: the loop is now genuinely waiting on you. The
+        // tracker alerts once per parked episode of each task — a null means
+        // only already-surfaced questions remain, so HOLD the current alert
+        // (this branch runs every poll; emitting 'none' here would clear a
+        // fresh alert after one poll interval). This is the only place the run
+        // loop raises attention, so consumers never see "waiting on you" while
+        // factory is actively working other tasks. loop.idle still labels the
+        // window with the real whole-queue state on every poll.
+        const tasks = await loadTasks(ctx)
+        const remaining = queueState(tasks)
+        const parked = tasks.flatMap((t) =>
+          t.meta.status === 'needs-input' || t.meta.status === 'blocked'
+            ? [{ id: t.id, status: t.meta.status }]
+            : []
+        )
+        const next = attention.observeIdle(parked, remaining === 'done')
+        if (next !== null) {
+          await setAlert(next)
+        }
         if (once || drain) {
           break
         }
         await emit(ctx.root, ctx.config.hooks, 'loop.idle', { state: remaining ?? 'idle' })
         try {
-          await tendParkedTasks(ctx)
+          await tendParkedTasks(ctx, (state) => {
+            alerted = state
+          })
         } catch (err) {
           log.warn(`parked-task housekeeping failed: ${err instanceof Error ? err.message : err}`)
         }
@@ -1198,7 +1222,9 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       }
 
       log.step(`running ${task.id}`)
-      // Actively working — clear any waiting alert, announce the start.
+      // Actively working — clear any waiting alert, end this task's parked
+      // episode (a re-park after this run alerts fresh), announce the start.
+      attention.taskStarted(task.id)
       await setAlert('none')
       await emit(ctx.root, ctx.config.hooks, 'task.start', { task: task.id })
       // Isolate the task: any unhandled error blocks just this task (logged

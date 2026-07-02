@@ -172,8 +172,25 @@ export function parseFormattedQuestions(text: string): { preamble: string; quest
   return { preamble: preamble.join('\n\n').trim(), questions }
 }
 
-function ask(rl: Interface, question: string): Promise<string> {
-  return new Promise((resolve) => rl.question(question, resolve))
+// Ctrl-C at a prompt resolves null (treated as /cancel by callers) instead of
+// killing the process: readline forwards SIGINT to the process default when the
+// interface has no listener, which would skip the finally cleanup and strand
+// the attention hook at needs-input.
+function ask(rl: Interface, question: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (answer: string | null): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      rl.off('SIGINT', onInterrupt)
+      resolve(answer)
+    }
+    const onInterrupt = (): void => finish(null)
+    rl.once('SIGINT', onInterrupt)
+    rl.question(question, finish)
+  })
 }
 
 type Reply = { kind: 'cancel' } | { kind: 'done' } | { kind: 'text'; text: string }
@@ -183,7 +200,11 @@ type Reply = { kind: 'cancel' } | { kind: 'done' } | { kind: 'text'; text: strin
 // An empty /edit re-prompts without re-running the agent.
 async function readReply(rl: Interface): Promise<Reply> {
   while (true) {
-    const input = (await ask(rl, 'you> ')).trim()
+    const raw = await ask(rl, 'you> ')
+    if (raw === null) {
+      return { kind: 'cancel' }
+    }
+    const input = raw.trim()
     if (input === '/cancel') {
       return { kind: 'cancel' }
     }
@@ -215,7 +236,11 @@ async function readQuestionAnswers(
     if (rec) {
       log.info(`  recommend: ${rec}`)
     }
-    const input = (await waitingForInput(opts, () => ask(rl, 'you> '))).trim()
+    const raw = await waitingForInput(opts, () => ask(rl, 'you> '))
+    if (raw === null) {
+      return { kind: 'cancel' }
+    }
+    const input = raw.trim()
     if (input === '/cancel') {
       return { kind: 'cancel' }
     }
