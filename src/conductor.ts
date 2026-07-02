@@ -1772,7 +1772,7 @@ async function selectTaskDelivery(
   verify: string | null
 ): Promise<TaskOutcome | null> {
   await refreshMeta(task)
-  const skills = await listDeliverySkills(ctx.root)
+  const skills = await listDeliverySkills(ctx.root, ctx.repoStateDir)
   const resumeOnPause = task.meta.commit !== null || (await readPlan(task)) !== null
   if (task.meta.deliveryProposal) {
     if (!task.meta.deliveryProposalAt) {

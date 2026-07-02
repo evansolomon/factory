@@ -237,3 +237,45 @@ describe('parseDeliverySelection', () => {
     expect(parsed.delivery.source).toBe('fallback')
   })
 })
+
+import { mkdir as mkdirSkills, mkdtemp } from 'node:fs/promises'
+import { tmpdir as osTmpdir } from 'node:os'
+import { listDeliverySkills } from '../src/delivery.ts'
+
+describe('delivery skill layers', () => {
+  test('repo .skills > repo-keyed skills > global, merged by name', async () => {
+    const previous = process.env['FACTORY_HOME']
+    const home = await mkdtemp(`${osTmpdir()}/factory-skills-home-`)
+    process.env['FACTORY_HOME'] = home
+    try {
+      const root = await mkdtemp(`${osTmpdir()}/factory-skills-root-`)
+      const repoState = await mkdtemp(`${osTmpdir()}/factory-skills-state-`)
+      const write = async (dir: string, name: string, desc: string) => {
+        await mkdirSkills(`${dir}/${name}`, { recursive: true })
+        await Bun.write(
+          `${dir}/${name}/SKILL.md`,
+          `---\nname: ${name}\ndescription: ${desc}\n---\n`
+        )
+      }
+      await write(`${root}/.skills`, 'ship', 'repo ship')
+      await write(`${repoState}/skills`, 'ship', 'repo-keyed ship (shadowed)')
+      await write(`${repoState}/skills`, 'pr', 'repo-keyed pr')
+      await write(`${home}/skills`, 'pr', 'global pr (shadowed)')
+      await write(`${home}/skills`, 'deploy', 'global deploy')
+
+      const skills = await listDeliverySkills(root, repoState)
+
+      expect(skills.map((s) => `${s.name}:${s.description}`)).toEqual([
+        'deploy:global deploy',
+        'pr:repo-keyed pr',
+        'ship:repo ship',
+      ])
+    } finally {
+      if (previous === undefined) {
+        delete process.env['FACTORY_HOME']
+      } else {
+        process.env['FACTORY_HOME'] = previous
+      }
+    }
+  })
+})

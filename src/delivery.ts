@@ -193,16 +193,35 @@ async function skillsInDir(dir: string): Promise<DeliverySkill[]> {
   }
 }
 
-// Repo skills (.skills/) plus GLOBAL skills ($FACTORY_HOME/skills/). Real usage
-// showed 7 of 8 delivery selections choosing "none" solely because no skills
-// were registered in that repo — stranding 33-hour tasks at unadvertised local
-// commits. Machine-wide ship/pr skills make delivery the default everywhere;
-// a repo skill with the same name overrides the global one.
-export async function listDeliverySkills(root: string): Promise<DeliverySkill[]> {
-  const repo = await skillsInDir(`${root}/.skills`)
-  const global = await skillsInDir(globalSkillsDir())
-  const names = new Set(repo.map((s) => s.name.toLowerCase()))
-  const merged = [...repo, ...global.filter((s) => !names.has(s.name.toLowerCase()))]
+// Three skill layers, most specific wins by name:
+//   1. the repo's committed `.skills/` (travels with the repo)
+//   2. repo-keyed uncommitted skills at `<repoStateDir>/skills/` — per-repo
+//      behavior shared by ALL of that repo's worktrees and kept out of the repo
+//      itself (repoStateDir is keyed by origin, so every clone resolves here)
+//   3. machine-global `$FACTORY_HOME/skills/`
+// Real usage showed 7 of 8 delivery selections choosing "none" solely because no
+// skills were registered in that repo — stranding finished work at unadvertised
+// local commits. Layers 2 and 3 make delivery available everywhere.
+export async function listDeliverySkills(
+  root: string,
+  repoStateDir?: string | null
+): Promise<DeliverySkill[]> {
+  const layers = [
+    await skillsInDir(`${root}/.skills`),
+    repoStateDir ? await skillsInDir(`${repoStateDir}/skills`) : [],
+    await skillsInDir(globalSkillsDir()),
+  ]
+  const names = new Set<string>()
+  const merged: DeliverySkill[] = []
+  for (const layer of layers) {
+    for (const skill of layer) {
+      const key = skill.name.toLowerCase()
+      if (!names.has(key)) {
+        names.add(key)
+        merged.push(skill)
+      }
+    }
+  }
   return merged.sort((a, b) => a.name.localeCompare(b.name))
 }
 

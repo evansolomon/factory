@@ -626,7 +626,10 @@ async function taskDelivery(ctx: WorkContext, args: string[]): Promise<number> {
     const task = await inferTaskTarget(ctx, parsed.taskQuery)
     const value = parsed.args.join(' ').trim()
     if (value) {
-      await setTaskDelivery(task, parseManualDelivery(value, await listDeliverySkills(ctx.root)))
+      await setTaskDelivery(
+        task,
+        parseManualDelivery(value, await listDeliverySkills(ctx.root, ctx.repoStateDir))
+      )
       log.ok(`${task.id}: delivery set to ${deliveryLabel(task.meta.delivery)}`)
       return 0
     }
@@ -721,7 +724,10 @@ async function queueNewTask(
   // piped input all skip that sharpen pre-stage — and a declared complexity also
   // skips runtime triage.
   const skipSharpen = options.raw || options.complexity !== null || !process.stdin.isTTY
-  const directed = extractDeliveryDirective(base.intent, await listDeliverySkills(ctx.root))
+  const directed = extractDeliveryDirective(
+    base.intent,
+    await listDeliverySkills(ctx.root, ctx.repoStateDir)
+  )
   // An explicit --name skips the namer model call: the spawner already named
   // this workstream and the worktree, so a second AI-chosen name is pure cost.
   const suggestedSlug = options.name ?? (await suggestTaskSlug(ctx, directed.intent))

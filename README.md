@@ -562,9 +562,11 @@ Fields:
   stages so you can confirm or override it. Explicit directives, manual
   `factory delivery ...` choices, and selected `none` do not pause — and with
   `autoShip` configured, earned telemetry waives the pause mechanically.
-  Delivery skills are discovered in the repo's `.skills/` **and** the global
-  `$FACTORY_HOME/skills/`, so machine-wide `$pr`/`$ship` skills exist in every
-  repo (a repo skill with the same name wins).
+  Delivery skills are discovered in three layers, most specific name winning:
+  the repo's committed `.skills/`, repo-keyed uncommitted skills at
+  `$FACTORY_HOME/repos/<repo-key>/skills/` (per-repo behavior shared by all of
+  that repo's worktrees, kept out of the repo), and the machine-global
+  `$FACTORY_HOME/skills/`.
 
   Interactive `factory run` prompts inline; pressing Enter accepts the recommended
   delivery. Non-interactive runs answer through the normal state-aware path, for
