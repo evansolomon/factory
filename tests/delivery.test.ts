@@ -89,6 +89,13 @@ describe('delivery decisions', () => {
       confidence: 'high',
       reason: 'User manually requested /ship.',
     })
+    expect(parseManualDelivery('pr', skills)).toEqual({
+      mode: 'skill',
+      skill: 'pr',
+      source: 'manual',
+      confidence: 'high',
+      reason: 'User manually requested pr.',
+    })
     expect(parseManualDelivery('$missing', skills)).toEqual({
       mode: 'policy',
       policy: '$missing',
