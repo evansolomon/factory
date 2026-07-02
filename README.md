@@ -266,6 +266,8 @@ factory correct [task-id] [-m "<note>" | --edit]   # record your manual fix of a
 factory backlog [add|rm] ...                       # repo-level backlog, drained by dispatch
 factory dispatch [--limit N] [--dry-run]           # spawn one workstream per backlog item (dispatch.spawn)
 factory evals [list|run [case] [--keep]]           # replay harvested eval cases against this build
+factory harvest [task-id] [--all]                  # post-ship human rework + MR discussion -> feedback signal
+factory close [task-id] [-m <reason>]              # terminally close a parked/superseded task
 factory gc [--dry-run]                             # prune session state for torn-down worktrees
 factory delivery [--task <id>] [none|'$skill'|/skill|"<policy...>"]  # inspect/override delivery
 factory status                                     # catch-up dashboard
@@ -803,6 +805,17 @@ Prompt blocks include the lesson id so bad guidance can be found and corrected.
 Use `factory lessons list`, `factory lessons show <id>`,
 `factory lessons rm <id>`, and `factory lessons edit <id>` to inspect, remove, or
 fix records. Removal is a soft delete.
+
+Three more loops close here. **Post-ship harvesting** (`factory harvest`): ship
+records the branch and MR URL, so human rework commits (anything after factory's
+recorded commit on that branch) and MR discussion become lesson candidates
+instead of vanishing. **Moot detection**: a needs-input task parked past the
+staleness window gets one read-only check of whether its intent already landed
+through other work; likely-moot tasks are flagged for `factory close`, never
+auto-closed. **Question-bar calibration**: every answer is classified
+accept-vs-override, and the rolling accept rate is injected into the sharpen and
+reconcile prompts — a repo where recommendations keep getting rubber-stamped
+tells the asker to raise its bar, measured rather than hand-tuned.
 
 Lessons now carry an outcome record: every terminal run increments
 `applied`/`wins`/`losses` for the lessons that were actually injected, and a

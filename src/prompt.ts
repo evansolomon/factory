@@ -49,7 +49,7 @@ async function run(
       await Bun.sleep(POLL_MS)
       continue
     }
-    await promptTask(task, deferred)
+    await promptTask(ctx, task, deferred)
   }
 }
 
@@ -58,7 +58,7 @@ async function nextNeedsInput(ctx: WorkContext, deferred: Set<string>): Promise<
   return tasks.find((t) => t.meta.status === 'needs-input' && !deferred.has(t.id)) ?? null
 }
 
-async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
+async function promptTask(ctx: WorkContext, task: Task, deferred: Set<string>): Promise<void> {
   const questionsFile = Bun.file(`${task.dir}/questions.md`)
   const questionsText = (await questionsFile.exists()) ? (await questionsFile.text()).trim() : ''
   const parsed = questionsText ? parseFormattedQuestions(questionsText) : null
@@ -106,7 +106,7 @@ async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
       log.info(`  deferred — answer later with: factory add "…"`)
       return
     }
-    await answerTask(task, reply.text)
+    await answerTask(task, reply.text, { repoStateDir: ctx.repoStateDir })
     setActivePrompt(null)
     log.ok(`${task.id}: answered, back in queue`)
   } finally {

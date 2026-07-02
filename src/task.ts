@@ -3,6 +3,7 @@ import { mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { z } from 'zod'
 import { type WorkContext, writeWorktreeMarker } from './config.ts'
 import { type TaskDelivery, TaskDeliverySchema } from './delivery.ts'
+import { classifyAnswer, recordAnswerVerdict } from './question-stats.ts'
 
 // A task is a directory under <dir>/tasks/<id>/ containing:
 //   task.md   — human-owned intent (free-form markdown; what sharpening enriches)
@@ -29,6 +30,9 @@ export const StatusSchema = z.enum([
   'retrying',
   'done',
   'blocked',
+  // Terminal without a commit: abandoned or superseded (e.g. the intent landed
+  // through other work). `factory close` sets it; nothing reopens it.
+  'closed',
 ])
 export type Status = z.infer<typeof StatusSchema>
 
@@ -48,7 +52,7 @@ export type TaskComplexity = z.infer<typeof TaskComplexitySchema>
 // once, which made it a black hole — never runnable, never reclaimed. Real tasks
 // fossilized there. Treating it as stranded lets the loop recover it like an
 // interrupted sharpening stage.
-const SETTLED: readonly Status[] = ['ready', 'needs-input', 'retrying', 'done', 'blocked']
+const SETTLED: readonly Status[] = ['ready', 'needs-input', 'retrying', 'done', 'blocked', 'closed']
 
 // A task left in a live stage with no loop on it: its run-loop was killed mid-stage
 // (Ctrl-C / crash) and never transitioned the status. Safe to reclaim because the
@@ -107,6 +111,12 @@ const MetaSchema = z.object({
   deliveryProposal: TaskDeliverySchema.optional(),
   deliveryProposalAt: z.string().nullable().default(null),
   userFacing: z.boolean().optional(),
+  // Where the work went: the branch delivery pushed and the MR/PR it opened.
+  // This is what post-ship harvesting keys on — commits appearing after
+  // meta.commit on shipBranch are human rework, pure feedback signal.
+  shipBranch: z.string().nullable().default(null),
+  shipUrl: z.string().nullable().default(null),
+  harvestedAt: z.string().nullable().default(null),
   // Interruption accounting: how many question rounds this task raised, and how
   // many were absorbed by auto-accepted recommendations. This is the raw data
   // for tuning the asking bar — every interruption should be measurable.
@@ -237,6 +247,9 @@ export async function addTask(
     deliveryProposal: undefined,
     deliveryProposalAt: null,
     userFacing: undefined,
+    shipBranch: null,
+    shipUrl: null,
+    harvestedAt: null,
     questionRounds: 0,
     autoAcceptedRounds: 0,
     feedbackCount: 0,
@@ -494,7 +507,20 @@ export async function appendAnswer(task: Task, text: string): Promise<void> {
 // question used to trigger a full pipeline re-run that cost millions of tokens
 // and then hit the identical wall. Pre-plan pauses (sharpen, reconcile) still
 // re-enter the planning path, where the answer genuinely changes the outcome.
-export async function answerTask(task: Task, text: string): Promise<void> {
+export async function answerTask(
+  task: Task,
+  text: string,
+  opts: { repoStateDir?: string; verdict?: 'auto-accept' } = {}
+): Promise<void> {
+  if (opts.repoStateDir) {
+    try {
+      const questions = (await readArtifact(task, 'questions.md')) ?? ''
+      const verdict = opts.verdict ?? classifyAnswer(questions, text)
+      await recordAnswerVerdict(opts.repoStateDir, task.id, verdict)
+    } catch {
+      // Telemetry is best-effort; answering must never fail on it.
+    }
+  }
   await appendAnswer(task, text)
   if (await readPlan(task)) {
     task.meta.resume = true

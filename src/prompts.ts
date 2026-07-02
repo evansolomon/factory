@@ -353,7 +353,8 @@ export function reconcilePrompt(
   plans: Labeled[],
   critiques: Labeled[],
   answers: string | null,
-  guidance: string | null
+  guidance: string | null,
+  askCalibration: string | null = null
 ): string {
   const critiqueSection = critiques.length ? `\n\n${labeledBlocks('Critique', critiques)}` : ''
   return `Decide whether this task is clear enough to implement autonomously, or must pause for the human. You have the task, the plan(s), and any critiques (which may raise open questions).
@@ -361,7 +362,7 @@ export function reconcilePrompt(
 Default to PROCEED. Pause only for a genuine blocker: the requirement is ambiguous in a way that changes what gets built, the work is destructive/irreversible, or no reasonable default exists. Test each candidate question — would a competent engineer also have to ask, or could they pick a sensible default and move on? If they'd proceed, so do you: state the assumption instead of asking. Drop anything already answered below or answerable from the codebase, and consolidate duplicates.
 
 ## Task
-${intent}${answersBlock(answers)}${learnedLessonsBlock(guidance)}
+${intent}${answersBlock(answers)}${learnedLessonsBlock(guidance)}${askCalibration ? `\n\n${askCalibration}` : ''}
 
 ${labeledBlocks('Plan', plans)}${critiqueSection}
 
@@ -666,7 +667,8 @@ ${branch}
 ## Task
 ${intent}
 
-When done, output on the FINAL line exactly one of:
+When done, output as the FINAL lines:
+URL: <the MR/PR url, when one exists>
 SHIP: OK
 SHIP: FAILED <one-line reason>`
 }
@@ -1330,6 +1332,26 @@ VERDICT: PASS
 VERDICT: FAIL`
 }
 
+// Moot check for a long-parked needs-input task: did the intent already land
+// through other work while the task sat waiting? Real usage showed humans
+// routing around parked questions (hand-building the feature within the hour,
+// re-spawning the task in another worktree) while the original rotted forever.
+export function mootCheckPrompt(intent: string, questions: string, createdAt: string): string {
+  return `A task in an autonomous coding loop has been PARKED waiting for human answers since ${createdAt}. Before it waits longer, check whether it has become MOOT: the intent may have already landed through other work (a human built it manually, another worktree shipped it, or the surrounding code changed so the task no longer applies).
+
+Investigate with read-only git/repo commands: \`git log --all --oneline --since="${createdAt}"\` and targeted searches for the feature the task describes. Judge whether the CURRENT state of the repo already satisfies the task's intent.
+
+## Task intent
+${intent}
+
+## The questions it is parked on
+${questions}
+
+Output, as the FINAL lines:
+SUMMARY: <one sentence: what you found — cite commits/files when moot>
+MOOT: YES | NO`
+}
+
 // One bounded pass applying the consolidator's "Quick fixes" — cheap, safe,
 // mechanical advisory items — after a PASS verdict. Not a design pass: shipped
 // advisories kept bouncing back as external review blocks, so this is the cheap
@@ -1360,7 +1382,11 @@ Make the edits, then output a one-line summary per item: applied or skipped (why
 // instead of answering questions the repo could answer.
 // `transcript` is the running human/agent
 // conversation; when `finalize`, emit the spec immediately.
-export function sharpenPrompt(transcript: string, finalize: boolean): string {
+export function sharpenPrompt(
+  transcript: string,
+  finalize: boolean,
+  askCalibration: string | null = null
+): string {
   // The spec is goal-shaped: what/why/success/constraints, not an implementation
   // plan. The downstream planner chooses the approach. Shown in both modes so
   // finalize has the format too.
@@ -1473,7 +1499,7 @@ Rules:
 ${ending}
 
 ## Conversation so far
-${transcript}`
+${transcript}${askCalibration ? `\n\n${askCalibration}` : ''}`
 }
 
 export function sharpenReviewPrompt(

@@ -116,3 +116,21 @@ describe('gate repair and failure clipping', () => {
     expect(clipFailureOutput('short output')).toBe('short output')
   })
 })
+
+import { parseMoot, parseShipUrl } from '../src/markers.ts'
+
+describe('moot and ship-url markers', () => {
+  test('parses MOOT verdicts', () => {
+    expect(parseMoot('checked git log\nSUMMARY: landed in 422169b\nMOOT: YES')).toBe(true)
+    expect(parseMoot('SUMMARY: still relevant\nMOOT: NO')).toBe(false)
+    expect(parseMoot('no verdict')).toBeNull()
+  })
+
+  test('parses ship URLs and rejects non-urls', () => {
+    expect(
+      parseShipUrl('opened MR\nURL: https://gitlab.com/yc/yc/-/merge_requests/1\nSHIP: OK')
+    ).toBe('https://gitlab.com/yc/yc/-/merge_requests/1')
+    expect(parseShipUrl('URL: not-a-url\nSHIP: OK')).toBeNull()
+    expect(parseShipUrl('SHIP: OK')).toBeNull()
+  })
+})

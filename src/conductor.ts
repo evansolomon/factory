@@ -47,6 +47,7 @@ import {
   parseRemedy,
   parseReviewVerdict,
   parseShip,
+  parseShipUrl,
   parseTriage,
 } from './markers.ts'
 import { recentFirstPassYield, recordRun, type StageStat } from './metrics.ts'
@@ -95,6 +96,7 @@ import {
   writePrototypeFallback,
   writePrototypeOutput,
 } from './prototype.ts'
+import { readAskStats, renderAskCalibration } from './question-stats.ts'
 import {
   formatQuestions,
   parseQuestions,
@@ -1106,6 +1108,10 @@ export function extractQuickFixes(consolidated: string): string | null {
   return body
 }
 
+async function conductorAskCalibration(ctx: WorkContext): Promise<string | null> {
+  return renderAskCalibration(await readAskStats(ctx.repoStateDir))
+}
+
 function markerText(text: string, marker: string): string | null {
   return new RegExp(`^${marker}:\\s*(.+)$`, 'im').exec(text)?.[1]?.trim() ?? null
 }
@@ -1517,7 +1523,8 @@ async function planEnsemble(
         labeled(plans),
         critiquesForReconcile,
         answers,
-        stageGuidance('reconcile')
+        stageGuidance('reconcile'),
+        renderAskCalibration(await readAskStats(ctx.repoStateDir))
       ),
       access: 'read',
       outFile: `${task.dir}/reconcile.md`,
@@ -1610,7 +1617,7 @@ async function finalizeSharpen(
     agentLabel(ctx.agents.implementer),
     runAgent(ctx.agents.implementer, {
       root: ctx.root,
-      prompt: sharpenPrompt(transcript(turns), true),
+      prompt: sharpenPrompt(transcript(turns), true, await conductorAskCalibration(ctx)),
       access: 'read',
       outFile: `${task.dir}/sharpen.final.md`,
     })
@@ -1679,7 +1686,7 @@ async function runSharpenStage(
     agentLabel(ctx.agents.implementer),
     runAgent(ctx.agents.implementer, {
       root: ctx.root,
-      prompt: sharpenPrompt(transcript(turns), false),
+      prompt: sharpenPrompt(transcript(turns), false, await conductorAskCalibration(ctx)),
       access: 'read',
       outFile: `${task.dir}/sharpen.md`,
     })
@@ -2872,13 +2879,14 @@ async function shipAndFinish(
       )
     }
     // Delivery may append commits (CI fixes, review responses); keep meta.commit
-    // pointing at the true HEAD instead of the pre-ship commit.
+    // pointing at the true HEAD instead of the pre-ship commit. Record where the
+    // work went (branch + MR/PR url) — post-ship harvesting keys on these.
     try {
       const head = await headSha(ctx.root)
-      if (task.meta.commit !== head) {
-        task.meta.commit = head
-        await saveMeta(task)
-      }
+      task.meta.commit = head
+      task.meta.shipBranch = branch
+      task.meta.shipUrl = parseShipUrl(shipOut)
+      await saveMeta(task)
     } catch (err) {
       log.warn(`post-ship commit refresh failed for ${task.id}: ${formatErr(err)}`)
     }

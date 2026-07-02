@@ -52,13 +52,15 @@ import {
   listGuidance,
   scopeForContext,
 } from './guidance.ts'
+import { harvestTask, logHarvest } from './harvest.ts'
 import { emit, type Hooks } from './hooks.ts'
 import { parseInputArgs, resolveMessage } from './input.ts'
 import { readCandidates, readLessons } from './lessons.ts'
 import { acquireRunLock, RunLockError, runLockHolder } from './lock.ts'
 import { log } from './log.ts'
+import { parseMoot } from './markers.ts'
 import { startPromptWorker } from './prompt.ts'
-import { taskNamePrompt } from './prompts.ts'
+import { mootCheckPrompt, taskNamePrompt } from './prompts.ts'
 import { parseFormattedQuestions, sharpen } from './sharpen.ts'
 import {
   addTask,
@@ -185,6 +187,15 @@ COMMANDS
       throwaway worktree + isolated FACTORY_HOME, scoring outcome + touched-file
       overlap vs the captured reference. The regression gate for prompt/policy
       changes and for changes to factory itself.
+
+  factory harvest [task-id] [--all]
+      Post-ship feedback: find human rework commits (anything after factory's
+      recorded commit on the shipped branch) and MR discussion (gh/glab,
+      best-effort) for done tasks; writes harvest.md + lesson candidates.
+
+  factory close [task-id] [-m <reason> | --edit]
+      Terminally close a parked task without a commit — abandoned or superseded
+      (the loop flags likely-moot tasks whose intent already landed elsewhere).
 
   factory gc [--dry-run]
       Prune per-worktree session state whose worktree no longer exists (spawned
@@ -784,6 +795,33 @@ async function tendParkedTasks(ctx: WorkContext): Promise<void> {
         task: task.id,
         state: task.meta.status,
       })
+      // One read-only moot check per parked task per loop run: parked intents
+      // routinely land through other work (a hand-built feature, a re-spawned
+      // worktree) while the original task rots. Detection only — closing is the
+      // human's call via `factory close`.
+      if (task.meta.status === 'needs-input') {
+        try {
+          const questions = (await readArtifact(task, 'questions.md')) ?? '(none recorded)'
+          const intent = await Bun.file(`${task.dir}/task.md`).text()
+          const out = await runAgent(ctx.agents.implementer, {
+            root: ctx.root,
+            prompt: mootCheckPrompt(intent.trim(), questions, task.meta.createdAt),
+            access: 'read',
+            outFile: `${task.dir}/moot.md`,
+          })
+          if (parseMoot(out.text) === true) {
+            const summary = /SUMMARY:\s*(.+)/i.exec(out.text)?.[1]?.trim() ?? 'see moot.md'
+            task.meta.note = `likely moot: ${summary} — close with: factory close ${task.id}`
+            task.meta.updatedAt = new Date().toISOString()
+            await saveMeta(task)
+            await emit(ctx.root, ctx.config.hooks, 'attention', { state: 'needs-input' })
+            log.warn(`${task.id}: likely MOOT — ${summary}`)
+            log.info(`  close it with: factory close ${task.id} -m "already landed"`)
+          }
+        } catch (err) {
+          log.warn(`moot check failed for ${task.id}: ${err instanceof Error ? err.message : err}`)
+        }
+      }
     }
     if (task.meta.status !== 'needs-input' || autoAcceptMs === null || waited < autoAcceptMs) {
       continue
@@ -802,7 +840,8 @@ async function tendParkedTasks(ctx: WorkContext): Promise<void> {
       'Proceed with your recommended answers for all questions. ' +
         `(auto-accepted after ${Math.round(waited / 60_000)} minutes by ` +
         'config.autoAcceptAfterMinutes; treat each recommendation as an explicit ' +
-        'assumption and record it in the spec)'
+        'assumption and record it in the spec)',
+      { repoStateDir: ctx.repoStateDir, verdict: 'auto-accept' }
     )
     log.warn(`${task.id}: auto-accepted recommended answers after ${Math.round(waited / 60_000)}m`)
   }
@@ -891,7 +930,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     }
     const task = findLoadedTask(tasks, route.taskId)
     if (route.kind === 'answer') {
-      await answerTask(task, base.intent)
+      await answerTask(task, base.intent, { repoStateDir: ctx.repoStateDir })
       log.ok(`${task.id}: routed as answer — ${route.reason}`)
       return 0
     }
@@ -1212,7 +1251,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       log.fail(usage)
       return 1
     }
-    await answerTask(task, text)
+    await answerTask(task, text, { repoStateDir: ctx.repoStateDir })
     log.ok(`${task.id}: answered, back in queue`)
     return 0
   }
@@ -1480,6 +1519,65 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     log.info(
       `${dryRun ? 'would dispatch' : 'dispatched'} ${spawned} item${spawned === 1 ? '' : 's'}`
     )
+    return 0
+  }
+
+  if (cmd === 'harvest') {
+    // Post-ship feedback harvesting: human rework and MR discussion on shipped
+    // tasks. --all re-checks previously harvested tasks too.
+    const ctx = await loadContext(process.cwd())
+    const all = rest.includes('--all')
+    const query = rest.find((a) => !a.startsWith('--'))
+    const tasks = await loadTasks(ctx)
+    const targets = query
+      ? tasks.filter((t) => t.id.includes(query))
+      : tasks.filter((t) => t.meta.status === 'done' && (all || !t.meta.harvestedAt))
+    if (targets.length === 0) {
+      log.info(
+        query ? `no task matching ${query}` : 'no unharvested done tasks (use --all to re-check)'
+      )
+      return 0
+    }
+    let reworked = 0
+    for (const task of targets) {
+      const result = await harvestTask(ctx, task)
+      logHarvest(result)
+      if (result.reworkCommits.length > 0) {
+        reworked++
+      }
+    }
+    log.info(
+      `harvested ${targets.length} task${targets.length === 1 ? '' : 's'} · ${reworked} with human rework`
+    )
+    return 0
+  }
+
+  if (cmd === 'close') {
+    // Terminal close without a commit: the task is abandoned or superseded
+    // (typically flagged moot — the intent already landed through other work).
+    const usage = 'usage: factory close [task-id] [-m <reason> | --edit]'
+    const ctx = await loadContext(process.cwd())
+    const parsed = parseInputArgs(rest, usage)
+    if (!parsed.ok) {
+      log.fail(parsed.error)
+      return 1
+    }
+    const task = parsed.taskQuery
+      ? await findTask(ctx, parsed.taskQuery)
+      : await latestTask(ctx, ['needs-input', 'blocked', 'retrying'])
+    if (!task) {
+      log.fail(
+        parsed.taskQuery ? `no task matching ${parsed.taskQuery}` : 'no parked task to close'
+      )
+      return 1
+    }
+    if (task.meta.status === 'done' || task.meta.status === 'closed') {
+      log.fail(`${task.id} is already ${task.meta.status}`)
+      return 1
+    }
+    const reason = (await resolveMessage(parsed, 'optional')) || 'closed by the human'
+    await setStatus(task, 'closed', reason)
+    log.ok(`${task.id}: closed — ${reason}`)
     return 0
   }
 

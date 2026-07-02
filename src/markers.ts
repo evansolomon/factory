@@ -57,6 +57,16 @@ export type RemedyVerdict =
   | 'GATE-MISCONFIGURED'
   | null
 
+export function parseShipUrl(text: string): string | null {
+  const value = lastMarkerMatch(text, /^URL:\s*(\S+)\s*$/i)?.[1] ?? null
+  return value && /^https?:\/\//.test(value) ? value : null
+}
+
+export function parseMoot(text: string): boolean | null {
+  const value = lastMarkerMatch(text, /^MOOT:\s*(YES|NO)\s*$/i)?.[1]?.toUpperCase()
+  return value === 'YES' ? true : value === 'NO' ? false : null
+}
+
 export function parseGateFix(text: string): string | null {
   return lastMarkerMatch(text, /^GATE-FIX:\s*(.+)$/i)?.[1]?.trim() ?? null
 }
