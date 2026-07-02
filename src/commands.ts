@@ -64,6 +64,18 @@ const lessonsSubcommands = [
   { name: 'show', description: 'Show a learned lesson' },
   { name: 'rm', description: 'Remove a learned lesson' },
   {
+    name: 'curate',
+    description: 'Drain recurring lesson candidates through the eval gate',
+    options: [
+      { name: '--dry-run', description: 'Inspect curation without writing' },
+      { name: '--min-cluster', description: 'Minimum similar candidates before promotion' },
+      { name: '--min-cluster=', description: 'Minimum similar candidates before promotion' },
+      { name: '--eval-case', description: 'Gate with matching eval case files only' },
+      { name: '--eval-case=', description: 'Gate with matching eval case files only' },
+      { name: '--keep-evals', description: 'Keep throwaway eval replay worktrees' },
+    ],
+  },
+  {
     name: 'edit',
     description: 'Edit a learned lesson',
     options: [

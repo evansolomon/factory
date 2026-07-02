@@ -409,7 +409,7 @@ export function guidanceSimilarity(a: string, b: string): number {
   return shared / (ta.size + tb.size - shared)
 }
 
-const DUPLICATE_SIMILARITY = 0.55
+export const DUPLICATE_SIMILARITY = 0.55
 
 // Record that a set of lessons rode along on a finished run, and what happened.
 // Retire lessons with a sustained losing record: enough exposure to judge, and

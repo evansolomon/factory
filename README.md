@@ -277,7 +277,7 @@ factory session [--agent codex|claude] [task-id]   # realtime agent tweak sessio
 factory deck [task-id] [--url]                      # open the visual one-page brief for a done task
 factory show [task-id] [step]                       # drill into one task / a step's activity
 factory report                                     # telemetry roll-up (manage by numbers)
-factory lessons [list|show|rm|edit] ...           # inspect and manage learned lessons
+factory lessons [list|show|rm|edit|curate] ...   # inspect, manage, and curate learned lessons
 factory config [edit ...]                           # show/edit effective config defaults
 factory version | --version                         # print the current CLI version
 factory upgrade                                     # install the latest GitHub Release
@@ -807,7 +807,9 @@ prototype, implementation/fix, review experts, consolidation, remediation, and p
 Prompt blocks include the lesson id so bad guidance can be found and corrected.
 Use `factory lessons list`, `factory lessons show <id>`,
 `factory lessons rm <id>`, and `factory lessons edit <id>` to inspect, remove, or
-fix records. Removal is a soft delete.
+fix records. Removal is a soft delete. `factory lessons curate` drains recurring
+raw candidates into structured guidance after replaying eval candidates with and
+without the proposed guidance; `--dry-run` shows the curation plan without writes.
 
 Three more loops close here. **Post-ship harvesting** (`factory harvest`): ship
 records the branch and MR URL, so human rework commits (anything after factory's
@@ -833,8 +835,9 @@ prompt/policy changes and for factory's changes to itself.
 `LESSONS.md` remains legacy curated repo guidance at the repo-level state root,
 keyed by the main worktree, and is still read into planning and critique.
 `LESSONS.candidates.md` remains the raw human-curation queue for blocked runs,
-needs-input events, postmortems, and manual corrections. Eval replay/scoring and
-dynamic workflow DAGs are still out of scope.
+needs-input events, postmortems, and manual corrections. `factory lessons curate`
+uses eval replay as the promotion gate for recurring raw candidates. Dynamic
+workflow DAGs are still out of scope.
 
 ## Intent sharpening (`factory run`)
 
