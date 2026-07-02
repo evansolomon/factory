@@ -275,4 +275,44 @@ describe('settled human answers', () => {
     expect(prompt).toContain('## Human answers (settled decisions for this task)')
     expect(prompt).toContain('never re-ask one of them')
   })
+
+  test('blocking-capable review lenses thread answers as constraints', () => {
+    const prompts = [
+      reviewPrompt('Task', null, 'Plan', 'diff', null, null, answers),
+      securityPrompt('Task', 'Plan', 'diff', null, null, answers),
+      uxReviewPrompt('Task', 'Plan', 'diff', null, null, answers),
+      deploySafetyPrompt('Task', 'Plan', 'diff', null, null, answers),
+    ]
+    for (const prompt of prompts) {
+      expect(prompt).toContain('## Human answers (settled decisions for this task)')
+      expect(prompt).toContain('We do want to sync inbound changes.')
+      expect(prompt).toContain('constraints, not review targets')
+    }
+    expect(reviewPrompt('Task', null, 'Plan', 'diff', null, null)).not.toContain('## Human answers')
+  })
+})
+
+describe('prior review round memory', () => {
+  const prior = '## Blocking\n1. `hour_slot.rb:547` — auth boundary\n\nVERDICT: FAIL'
+
+  test('gating lenses thread the prior consolidated verdict on fix passes', () => {
+    const prompts = [
+      reviewPrompt('Task', null, 'Plan', 'diff', null, null, null, prior),
+      securityPrompt('Task', 'Plan', 'diff', null, null, null, prior),
+      uxReviewPrompt('Task', 'Plan', 'diff', null, null, null, prior),
+    ]
+    for (const prompt of prompts) {
+      expect(prompt).toContain('## Prior review round')
+      expect(prompt).toContain('auth boundary')
+      expect(prompt).toContain('REVERSAL:')
+    }
+    expect(reviewPrompt('Task', null, 'Plan', 'diff', null, null)).not.toContain(
+      '## Prior review round'
+    )
+  })
+
+  test('consolidatePrompt carries the reversal rule', () => {
+    const prompt = consolidatePrompt('Task', 'Plan', 'diff', [], null, null)
+    expect(prompt).toContain('reverses guidance a prior review round gave')
+  })
 })
