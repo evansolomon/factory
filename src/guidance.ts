@@ -49,8 +49,14 @@ export const GuidanceRecordSchema = z.object({
   tags: z.array(z.string()).default([]),
   text: z.string().min(1),
   rationale: z.string().nullable().default(null),
-  status: z.enum(['active', 'deleted']).default('active'),
+  status: z.enum(['active', 'deleted', 'retired']).default('active'),
   deletedAt: z.string().nullable().default(null),
+  // Outcome tracking: how many runs this lesson was injected into, and how many
+  // of those ended done vs blocked. A lesson that keeps riding failing runs is
+  // auto-retired — guidance must earn its context window.
+  applied: z.number().int().nonnegative().default(0),
+  wins: z.number().int().nonnegative().default(0),
+  losses: z.number().int().nonnegative().default(0),
 })
 
 export type GuidanceRecord = z.infer<typeof GuidanceRecordSchema>
@@ -158,7 +164,10 @@ function scopeLabel(scope: GuidanceScope): string {
   return scope.kind
 }
 
-export function renderGuidanceBlock(records: GuidanceRecord[]): string | null {
+export function renderGuidanceBlock(
+  records: GuidanceRecord[],
+  usedIds?: Set<string>
+): string | null {
   const seen = new Set<string>()
   const rendered: GuidanceRecord[] = []
   let deduped = 0
@@ -171,6 +180,7 @@ export function renderGuidanceBlock(records: GuidanceRecord[]): string | null {
     seen.add(normalized)
     if (rendered.length < RENDER_LIMIT) {
       rendered.push(record)
+      usedIds?.add(record.id)
     }
   }
   const capped = Math.max(0, seen.size - rendered.length)
@@ -353,6 +363,99 @@ export function parseGuidanceCapture(text: string): GuidanceCapture | null {
   return parsed.success ? parsed.data : null
 }
 
+// Cheap semantic dedup: token-set Jaccard similarity. Near-duplicate lessons
+// ("re-run tapioca with --no-regen when it OOMs" captured four separate times in
+// real usage) accrue as separate records under exact-text dedup and crowd out
+// the render cap.
+const SIMILARITY_STOPWORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'when',
+  'that',
+  'this',
+  'from',
+  'into',
+  'gets',
+  'using',
+  'always',
+  'never',
+  'should',
+])
+
+export function guidanceSimilarity(a: string, b: string): number {
+  // Tokens are truncated to a 5-char prefix as a cheap stemmer, so
+  // "regeneration"/"regen" and "killed"/"kills" count as the same concept.
+  const tokens = (text: string) =>
+    new Set(
+      text
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((t) => t.length > 2 && !SIMILARITY_STOPWORDS.has(t))
+        .map((t) => t.slice(0, 5))
+    )
+  const ta = tokens(a)
+  const tb = tokens(b)
+  if (ta.size === 0 || tb.size === 0) {
+    return 0
+  }
+  let shared = 0
+  for (const t of ta) {
+    if (tb.has(t)) {
+      shared++
+    }
+  }
+  return shared / (ta.size + tb.size - shared)
+}
+
+const DUPLICATE_SIMILARITY = 0.55
+
+// Record that a set of lessons rode along on a finished run, and what happened.
+// Retire lessons with a sustained losing record: enough exposure to judge, and
+// present in failing runs far more than passing ones.
+const RETIRE_MIN_APPLIED = 8
+const RETIRE_MAX_WIN_RATE = 0.25
+
+export async function recordGuidanceOutcome(
+  ids: Iterable<string>,
+  outcome: 'done' | 'blocked'
+): Promise<void> {
+  for (const id of ids) {
+    try {
+      const raw: unknown = await Bun.file(itemPath(id)).json()
+      const parsed = GuidanceRecordSchema.safeParse(raw)
+      if (!parsed.success) {
+        continue
+      }
+      const record = parsed.data
+      record.applied += 1
+      if (outcome === 'done') {
+        record.wins += 1
+      } else {
+        record.losses += 1
+      }
+      record.updatedAt = new Date().toISOString()
+      if (
+        record.status === 'active' &&
+        record.applied >= RETIRE_MIN_APPLIED &&
+        record.wins / record.applied <= RETIRE_MAX_WIN_RATE
+      ) {
+        record.status = 'retired'
+        log.warn(
+          `guidance ${record.id} auto-retired: ${record.wins}/${record.applied} runs succeeded ` +
+            'while it was applied'
+        )
+      }
+      await writeRecord(record)
+    } catch (err) {
+      log.warn(
+        `guidance outcome record failed for ${id}: ${err instanceof Error ? err.message : err}`
+      )
+    }
+  }
+}
+
 export async function createGuidanceFromDistillation(
   ctx: WorkContext,
   input: {
@@ -360,13 +463,26 @@ export async function createGuidanceFromDistillation(
     text: string
     distillation: string
   }
-): Promise<'created' | 'not-actionable' | 'invalid'> {
+): Promise<'created' | 'duplicate' | 'not-actionable' | 'invalid'> {
   const capture = parseGuidanceCapture(input.distillation)
   if (!capture) {
     return 'invalid'
   }
   if (!capture.actionable) {
     return 'not-actionable'
+  }
+  // Near-duplicate of an existing active lesson → refresh that record instead of
+  // accumulating another copy of the same knowledge.
+  const existing = (await loadGuidance()).find(
+    (record) =>
+      record.status === 'active' &&
+      guidanceSimilarity(record.text, input.text) >= DUPLICATE_SIMILARITY
+  )
+  if (existing) {
+    existing.updatedAt = new Date().toISOString()
+    await writeRecord(existing)
+    log.info(`guidance duplicate of ${existing.id} — refreshed instead of creating a new record`)
+    return 'duplicate'
   }
   await createGuidanceRecord(ctx, {
     source: input.source,

@@ -14,6 +14,9 @@ export type AddRoute =
   | { kind: 'answer'; taskId: string; reason: string }
   | { kind: 'retry'; taskId: string; reason: string }
   | { kind: 'feedback'; taskId: string; reason: string }
+  // Record feedback on a task a live run loop is working RIGHT NOW: append
+  // only, no requeue — the loop consumes it on its next pass.
+  | { kind: 'feedback-live'; taskId: string; reason: string }
   | { kind: 'follow-up'; taskId: string; reason: string; recordOnSource: boolean }
   | { kind: 'new-task' }
 
@@ -25,7 +28,11 @@ function latest(tasks: AddRouteTask[]): AddRouteTask | null {
   return tasks.reduce((a, b) => (stamp(b) > stamp(a) ? b : a))
 }
 
-export function selectAddRoute(tasks: AddRouteTask[], hasWorktreeDiff: boolean): AddRoute {
+export function selectAddRoute(
+  tasks: AddRouteTask[],
+  hasWorktreeDiff: boolean,
+  loopActive: boolean
+): AddRoute {
   const needsInput = latest(tasks.filter((task) => task.status === 'needs-input'))
   if (needsInput) {
     return { kind: 'answer', taskId: needsInput.id, reason: 'task needs input' }
@@ -58,12 +65,21 @@ export function selectAddRoute(tasks: AddRouteTask[], hasWorktreeDiff: boolean):
     return { kind: 'retry', taskId: current.id, reason: `task is ${current.status}` }
   }
   if (isStranded(current.status)) {
-    return {
-      kind: 'follow-up',
-      taskId: current.id,
-      reason: `task is currently ${current.status}`,
-      recordOnSource: false,
-    }
+    // A live-stage status means either "a loop is working it right now" or
+    // "abandoned by a killed loop" — the run lock tells them apart. Live work
+    // gets feedback appended without touching its status; abandoned work is
+    // requeued as a resume with the message as its note, exactly like blocked.
+    return loopActive
+      ? {
+          kind: 'feedback-live',
+          taskId: current.id,
+          reason: `a run loop is actively working this task (${current.status})`,
+        }
+      : {
+          kind: 'retry',
+          taskId: current.id,
+          reason: `task was interrupted during ${current.status}`,
+        }
   }
   return {
     kind: 'feedback',

@@ -258,12 +258,17 @@ for your answer and picks the task back up.
 `factory` is the CLI binary.
 
 ```bash
-factory add [--raw] [--trivial | --complexity trivial|complex] "<intent...>" [--verify "<cmd...>"]   # tell this workstream something
-factory run [--once|--drain]                       # process the workstream
+factory add [--raw] [--trivial | --complexity trivial|complex] [--force-new] [--name <slug>] "<intent...>" [--verify "<cmd...>"]   # tell this workstream something
+factory run [--once|--drain|--until-done]          # process the workstream (one lock-enforced loop per worktree)
 factory retry [task-id] [-m "<note>" | --edit]     # pick a blocked task back up where it left off
 factory feedback [task-id] [-m "<feedback>" | --edit]  # critique existing progress, generalized on next pass
 factory correct [task-id] [-m "<note>" | --edit]   # record your manual fix of a blocked task as a lesson
-factory backlog [add|rm] ...                       # experimental repo-level backlog
+factory backlog [add|rm] ...                       # repo-level backlog, drained by dispatch
+factory dispatch [--limit N] [--dry-run]           # spawn one workstream per backlog item (built-in or dispatch.spawn)
+factory evals [list|run [case] [--keep]]           # replay harvested eval cases against this build
+factory harvest [task-id] [--all]                  # post-ship human rework + MR discussion -> feedback signal
+factory close [task-id] [-m <reason>]              # terminally close a parked/superseded task
+factory gc [--dry-run]                             # prune session state for torn-down worktrees
 factory delivery [--task <id>] [none|'$skill'|/skill|"<policy...>"]  # inspect/override delivery
 factory status                                     # catch-up dashboard
 factory ask [task-id] ["<question...>"]            # interactive Q&A over saved task state
@@ -349,13 +354,16 @@ factory completion zsh                              # print the zsh completion s
 ### Recovery & auto-resume
 
 A gate failure first runs the in-run auto-fix loop. Each attempt's failure is
-appended to a persisted log (`failures.jsonl`, spanning resumes), and after each
-one a **convergence judge** reads the whole history and decides whether to keep
-going: *CONTINUE* while failures are genuinely new ground (fixing one thing
-surfacing the next real problem is progress), *STUCK* when the same root cause
-recurs or it's oscillating among problems already seen. `config.retries` (default
-10) is only the hard-cap backstop. The history also feeds the next fixer ("these
-approaches already failed — don't repeat them").
+appended to a persisted log (`failures.jsonl`, timestamped, with a failure
+fingerprint and a worktree-diff hash, spanning resumes), and after each one a
+**convergence judge** reads the whole history and decides whether to keep going.
+Two bounds are **mechanical, not judged**: a byte-identical failure with an
+unchanged worktree is never re-run (the loop asks the human instead of guessing
+again), and `config.retries` (default 10) is a REAL cap — at the cap the judge's
+CONTINUE is overridden and the human is asked with the failure attached. The
+history also feeds the next fixer ("these approaches already failed — don't
+repeat them"), and failure detail keeps both the head and tail of gate output so
+the fixer actually sees the assertion diffs.
 
 A **verify** failure is triaged before any of that. A full-access doctor
 (`remediate` config, default on) reads the failure and classifies it: a genuine
@@ -372,8 +380,14 @@ gate:
 
 - **verify / ship** (transient — env, CI, network) → the task is set **aside**
   (status `retrying`, no attention event) and the loop **auto-resumes** it on a
-  growing backoff (2m → 5m → 15m → 30m → 60m), up to a cap (5). An env flake
-  recovers with no action from you. Only after the cap does it escalate to `blocked`.
+  growing backoff (2m → 5m → 15m → 30m → 60m), up to a cap (5); past it the judge
+  may approve more retries only up to an absolute ceiling (10), after which the
+  human is asked. The verify doctor can also rule **GATE-MISCONFIGURED**: the
+  verify command itself is broken (nonexistent script, mangled quoting) — it
+  supplies a corrected command, which is persisted and re-run, instead of the
+  loop dying against a gate that could never pass. VERIFY commands are also
+  sanitized at parse time (markdown backticks around a command became a command
+  substitution under `bash -lc` and killed two real tasks).
 - **review panel** (the code or rollout safety was judged bad — re-running churns
   code without new input) → straight to `blocked` and emits attention once no
   runnable work is left. You look (`factory show <id> review`), then
@@ -469,9 +483,18 @@ Fields:
     + `hooks/`.
   `<worktree-key>` is the worktree's path with `/`→`-`. The default keeps runtime
   state out of repos; the tradeoff is plans/proof don't travel with the branch.
-- **`retries`** — hard-cap backstop on auto-fix iterations after a failed gate
-  (review-panel/verify). The convergence judge normally decides when the loop
-  is stuck; this only bounds runaway fixing. Default `10`; `0` disables auto-fix.
+  **Repo-level state is keyed by repo identity, not path**: the normalized origin
+  URL (e.g. `github.com/evansolomon/factory` → `github.com-evansolomon-factory`)
+  under `<base>/repos/<repo-key>/` — so all clones and hosts of one repo share one
+  body of lessons, metrics, eval candidates, and delivery history. Repos with no
+  origin fall back to the path key. Machine-specific knowledge (the environment
+  playbook) lives in a per-host layer at `repos/<repo-key>/env/<host>.md`.
+- **`retries`** — hard cap on auto-fix iterations after a failed gate
+  (review-panel/verify), **enforced mechanically**: at the cap the judge's
+  CONTINUE is overridden and the human is asked. Two more mechanical bounds ride
+  with it: a byte-identical failure with an unchanged worktree is never re-run
+  (stuck → ask), and judge-approved auto-retries stop at an absolute ceiling.
+  Default `10`; `0` disables auto-fix.
 - **`triage`** — classify each task first; trivial ones skip the whole plan
   ensemble (research/plan/critique/reconcile/revise/select) and go straight to
   implement, still reviewed + verified (default `true`; `false` always runs the
@@ -508,6 +531,30 @@ Fields:
   same auto-fix loop. Text-grounded only — no rendering/screenshots.
 - **`plansDir`** — where the clean final plan per task is written, one file per
   task, no meta (default `.coding-agent-plans/`, committed as docs; `null` off).
+- **`implementerAccess`** — `full` (default) or `write`: full access lets the
+  implement/fix stages run the repo's real checks (services, sockets, DBs) during
+  implementation, so failures are discovered at the cheap stage instead of the
+  verify gate. Factory already assumes a trusted repo (remediation and delivery
+  run unsandboxed); set `write` to keep the OS sandbox on implementation anyway.
+- **`autoAcceptAfterMinutes`** — opt-in: when a needs-input task's questions ALL
+  carry recommended answers and nobody replies within the window, proceed with
+  the recommendations (recorded as a normal, auditable answer). Default `null`
+  (never): asking is a quality instrument; opt in deliberately.
+- **`autoShip`** — the earned-autonomy dial: `{ "minFirstPassYield": 0.8,
+  "minTasks": 10 }` lets an auto-selected side-effecting delivery skip the
+  confirmation pause when the repo's rolling telemetry clears the bar — and
+  reverts to confirming the moment the numbers dip. Default `null` (always
+  confirm).
+- **`dispatch`** — optional override for `factory dispatch`. The zero-config
+  default spawns each backlog item as a sibling worktree on a `factory/<name>`
+  branch running a detached `factory run --until-done` (logs under
+  `$FACTORY_HOME/logs/`). Set `{ "spawn": "<command>" }` to route through your
+  own tooling instead (tmux windows, custom worktree layout): one backlog item
+  per spawn, `FACTORY_INTENT`/`FACTORY_NAME`/`FACTORY_VERIFY` in its env, exit 0
+  removes the item. Factory never queues tasks internally or manages lanes.
+- **Config cascade note:** `agents` and `specialists` **merge per key** across the
+  cascade (a worktree override of one role no longer silently resets its
+  siblings); `hooks` concatenates; everything else is closest-wins.
 - **Delivery** is task-local, not static config. After sharpen/triage clarifies the
   task, factory chooses whether a completed task should stop after the local
   commit, run a named delivery skill, or follow a one-off policy. The selector
@@ -518,7 +565,13 @@ Fields:
   when one exists. When the selector auto-selects a side-effecting action (`skill`
   or `policy`), the task pauses at `needs-input` before the plan/implementation
   stages so you can confirm or override it. Explicit directives, manual
-  `factory delivery ...` choices, and selected `none` do not pause.
+  `factory delivery ...` choices, and selected `none` do not pause — and with
+  `autoShip` configured, earned telemetry waives the pause mechanically.
+  Delivery skills are discovered in three layers, most specific name winning:
+  the repo's committed `.skills/`, repo-keyed uncommitted skills at
+  `$FACTORY_HOME/repos/<repo-key>/skills/` (per-repo behavior shared by all of
+  that repo's worktrees, kept out of the repo), and the machine-global
+  `$FACTORY_HOME/skills/`.
 
   Interactive `factory run` prompts inline; pressing Enter accepts the recommended
   delivery. Non-interactive runs answer through the normal state-aware path, for
@@ -642,6 +695,7 @@ Events and their payloads:
 | `task.blocked` | escalated to blocked | `task, reason` |
 | `task.retrying` | set aside for auto-retry | `task, reason, retryAt` |
 | `task.done` | committed/shipped | `task, commit` |
+| `task.stale` | parked (needs-input/blocked) past 24h | `task, state` |
 | `loop.idle` | queue drained | `state` |
 
 `attention.state = needs-input` means factory is waiting at an intentional human
@@ -666,8 +720,10 @@ or jump-target behavior you want.
 ```
 <state-dir>/tasks/<slug>[-N]/
   task.md                # human-owned intent/spec
+  task.original.md       # the raw intent as first written — never overwritten
   meta.json              # machine-owned status, verify, sharpen, optional complexity, timestamps, resume/retry state
   meter.json             # live token/stage counts for the current pass
+  meters.jsonl           # append-only per-pass meter history (true multi-pass cost)
   sharpen.md             # run-loop intent sharpening output
   sharpen.review.md      # reviewer gate for the sharpened spec
   sharpen.final.md       # final sharpen synthesis, when needed
@@ -677,7 +733,8 @@ or jump-target behavior you want.
   critique.<planner>.md  # cross-critique output
   ux.plan.md             # user-facing information architecture critique
   reconcile.md           # proceed vs ask decision
-  questions.md           # open questions when status = needs-input
+  questions.md           # open questions when status = needs-input (current round)
+  questions.history.md   # superseded question rounds
   answers.md             # your answers, appended by factory add or the inline prompt
   human-feedback.md      # post-progress human feedback, appended by factory add/feedback
   human-feedback.analysis.md  # latest root-cause/sibling-case analysis of pending feedback
@@ -700,6 +757,8 @@ or jump-target behavior you want.
   converge.md            # latest convergence-judge output
   failures.jsonl         # persisted gate-failure history
   verify.log             # latest verify output
+  verify.history.log     # superseded verify attempts
+  quickfix.log.md        # post-PASS quick-fix pass output, when it runs
   remediate[.N].md       # verify-failure doctor: diagnosis + env repair, when it runs
   proof.md               # pass proof written before commit
   commit-message.md      # final commit subject synthesized from diff + author/repo history
@@ -749,6 +808,27 @@ Prompt blocks include the lesson id so bad guidance can be found and corrected.
 Use `factory lessons list`, `factory lessons show <id>`,
 `factory lessons rm <id>`, and `factory lessons edit <id>` to inspect, remove, or
 fix records. Removal is a soft delete.
+
+Three more loops close here. **Post-ship harvesting** (`factory harvest`): ship
+records the branch and MR URL, so human rework commits (anything after factory's
+recorded commit on that branch) and MR discussion become lesson candidates
+instead of vanishing. **Moot detection**: a needs-input task parked past the
+staleness window gets one read-only check of whether its intent already landed
+through other work; likely-moot tasks are flagged for `factory close`, never
+auto-closed. **Question-bar calibration**: every answer is classified
+accept-vs-override, and the rolling accept rate is injected into the sharpen and
+reconcile prompts — a repo where recommendations keep getting rubber-stamped
+tells the asker to raise its bar, measured rather than hand-tuned.
+
+Lessons now carry an outcome record: every terminal run increments
+`applied`/`wins`/`losses` for the lessons that were actually injected, and a
+lesson with a sustained losing record auto-retires. New lessons are deduped
+semantically (near-duplicates refresh the existing record instead of
+accumulating). And the eval corpus finally has its consumer: **`factory evals
+run`** replays harvested candidates against the current build in a throwaway
+worktree with an isolated `FACTORY_HOME`, scoring outcome-match and
+touched-file overlap against the captured reference — the regression gate for
+prompt/policy changes and for factory's changes to itself.
 
 `LESSONS.md` remains legacy curated repo guidance at the repo-level state root,
 keyed by the main worktree, and is still read into planning and critique.
@@ -905,6 +985,12 @@ needs `runAgent(agent, {prompt, access}) → {text, usage}`. But each CLI has it
 own flags, output format, sandbox model, and usage reporting, so a new one is an
 **adapter** (a `runX` in `agents.ts` wired into `runAgent` + added to the `cli`
 enum), not a config string. `codex` and `claude` are the two built-in adapters.
+
+**Marker parsing** follows ONE convention everywhere: a marker is a whole line,
+found anywhere in the output, last match wins — tolerant of model preamble and
+trailing prose. Residual nulls fail toward safety: an unparseable reconcile is
+treated as ASK (the valve fails closed), an unparseable convergence judgment asks
+the human instead of terminating the task.
 
 Each stage prints a completion line with elapsed time and token usage, plus a
 per-task total (tokens + wall time). Usage parsing is lenient (`safeParse`) — if

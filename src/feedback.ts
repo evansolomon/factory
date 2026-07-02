@@ -39,11 +39,16 @@ export type FeedbackRouteInput = {
   hasWorktreeDiff: boolean
   hasCommit: boolean
   pendingFeedback: boolean
+  // Whether a run loop currently holds this worktree's lock — distinguishes a
+  // task being actively worked from one abandoned mid-stage.
+  loopActive: boolean
 }
 
 export type FeedbackRoute =
   | { kind: 'resume' }
   | { kind: 'follow-up' }
+  // Append feedback only: a live loop owns the task's status right now.
+  | { kind: 'record' }
   | { kind: 'reject'; message: string }
 
 export function decideFeedbackRoute(input: FeedbackRouteInput): FeedbackRoute {
@@ -71,16 +76,29 @@ export function decideFeedbackRoute(input: FeedbackRouteInput): FeedbackRoute {
         }
   }
   if (input.status === 'sharpening' || input.status === 'planning') {
-    return {
-      kind: 'reject',
-      message: `task is still ${input.status}; wait for progress or use factory add for new work`,
-    }
+    return input.loopActive
+      ? {
+          kind: 'reject',
+          message: `task is still ${input.status}; wait for progress or use factory add for new work`,
+        }
+      : {
+          kind: 'reject',
+          message: `task was interrupted during ${input.status} with no reviewable progress; use factory retry`,
+        }
   }
   if (isStranded(input.status)) {
-    return {
-      kind: 'reject',
-      message: `task was interrupted during ${input.status}; use factory retry first`,
+    // Aligned with `factory add` routing: live work takes feedback without a
+    // requeue; abandoned work with progress resumes with the feedback pending.
+    if (input.loopActive) {
+      return { kind: 'record' }
     }
+    const hasProgress = input.hasPlan || input.hasWorktreeDiff || input.pendingFeedback
+    return hasProgress
+      ? { kind: 'resume' }
+      : {
+          kind: 'reject',
+          message: `task was interrupted during ${input.status} with no progress; use factory retry`,
+        }
   }
   return {
     kind: 'reject',
@@ -104,13 +122,19 @@ export function latestFeedbackTarget(
   return eligible.reduce((a, b) => (stamp(b) > stamp(a) ? b : a))
 }
 
-export function feedbackRouteInput(task: Task, hasPlan: boolean, hasWorktreeDiff: boolean) {
+export function feedbackRouteInput(
+  task: Task,
+  hasPlan: boolean,
+  hasWorktreeDiff: boolean,
+  loopActive: boolean
+) {
   return {
     status: task.meta.status,
     hasPlan,
     hasWorktreeDiff,
     hasCommit: task.meta.commit !== null,
     pendingFeedback: pendingFeedbackCount(task) > 0,
+    loopActive,
   }
 }
 

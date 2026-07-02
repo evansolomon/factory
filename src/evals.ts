@@ -25,7 +25,7 @@ export async function captureCorrectionGuidance(
     lesson: string
     distillation: string
   }
-): Promise<'created' | 'not-actionable' | 'invalid'> {
+): Promise<'created' | 'duplicate' | 'not-actionable' | 'invalid'> {
   return createGuidanceFromDistillation(ctx, {
     source: { kind: 'correction', taskId: input.taskId, detail: input.category },
     text: input.lesson,

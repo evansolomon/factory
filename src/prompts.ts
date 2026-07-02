@@ -353,7 +353,8 @@ export function reconcilePrompt(
   plans: Labeled[],
   critiques: Labeled[],
   answers: string | null,
-  guidance: string | null
+  guidance: string | null,
+  askCalibration: string | null = null
 ): string {
   const critiqueSection = critiques.length ? `\n\n${labeledBlocks('Critique', critiques)}` : ''
   return `Decide whether this task is clear enough to implement autonomously, or must pause for the human. You have the task, the plan(s), and any critiques (which may raise open questions).
@@ -361,7 +362,7 @@ export function reconcilePrompt(
 Default to PROCEED. Pause only for a genuine blocker: the requirement is ambiguous in a way that changes what gets built, the work is destructive/irreversible, or no reasonable default exists. Test each candidate question — would a competent engineer also have to ask, or could they pick a sensible default and move on? If they'd proceed, so do you: state the assumption instead of asking. Drop anything already answered below or answerable from the codebase, and consolidate duplicates.
 
 ## Task
-${intent}${answersBlock(answers)}${learnedLessonsBlock(guidance)}
+${intent}${answersBlock(answers)}${learnedLessonsBlock(guidance)}${askCalibration ? `\n\n${askCalibration}` : ''}
 
 ${labeledBlocks('Plan', plans)}${critiqueSection}
 
@@ -517,7 +518,7 @@ Do NOT commit — leave the changes in the working tree.
 ${intent}
 
 ## Plan
-${finalPlan}${riskBlock(riskAssessment)}${prototypeBlock(prototypeContext)}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. Make sure it passes.` : ''}${uxBuildNote(userFacing)}`
+${finalPlan}${riskBlock(riskAssessment)}${prototypeBlock(prototypeContext)}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. RUN it (or the most scoped subset of it that covers your change) before you finish, and iterate until it passes. If your sandbox cannot execute it (permission/socket/service errors), say exactly what failed to run — do not guess that the change works. Discovering failures here is dramatically cheaper than discovering them at the verify gate.` : ''}${uxBuildNote(userFacing)}`
 }
 
 export function prototypePrompt(
@@ -559,10 +560,12 @@ ${finalPlan}${riskBlock(riskAssessment)}${learnedLessonsBlock(guidance)}`
 export function triagePrompt(intent: string, verify: string | null): string {
   return `Classify the task below on two axes. Look at the repo briefly if it helps.
 
-COMPLEXITY:
-TRIVIAL — a small, mechanical, low-risk change you could describe in one sentence: a one-to-few-line edit, a rename, deleting files, a config/dependency bump, an obvious localized fix.
-COMPLEX — needs design choices, touches multiple components, is ambiguous, security/data-sensitive, or otherwise risky.
-When in doubt, choose COMPLEX.
+COMPLEXITY — decides whether the full planning ensemble (research, two competing plans, cross-critique, reconcile, revise, select) runs before implementation. That ensemble costs real money and ~20+ minutes; it earns its cost ONLY when there are genuine design choices to compare. TRIVIAL tasks skip straight to implementation and are STILL fully reviewed by the expert panel and verified — trivial is a routing decision, not a safety decision.
+
+TRIVIAL — a competent engineer would just start typing: the change is mechanical or obvious once stated, however many lines it touches. One-to-few-line edits, renames, deletions, flag/config/dependency changes, adding an option that mirrors an existing one, an obvious localized fix, updating text or docs.
+COMPLEX — a competent engineer would sketch a design first: real alternatives exist and choosing wrong is costly; or the task is ambiguous, spans multiple components with coupling decisions, changes a data model or API contract, or is security/data-sensitive.
+
+Calibration: over-classifying as COMPLEX has been this system's dominant failure (dozens of real tasks, zero classified TRIVIAL — including adding a single build flag). Do not use COMPLEX as a hedge; the review panel and verify gate are the safety net either way. Genuinely torn AFTER thinking it through → COMPLEX.
 
 USER-FACING:
 YES — the change alters something an end user sees or interacts with: UI, a page/screen/component, styling, layout, copy/labels, or an interaction flow.
@@ -572,8 +575,12 @@ Examples:
 - "Bump the eslint version in package.json" → TRIVIAL, NO
 - "Fix the typo on the login button" → TRIVIAL, YES
 - "Rename \`foo\` to \`userId\` in cache.ts" → TRIVIAL, NO
+- "Make the release binaries smaller, e.g. try --minify" → TRIVIAL, NO
+- "Amend the last commit message; it's malformed" → TRIVIAL, NO
+- "Add a --force flag that skips the confirmation prompt" → TRIVIAL, NO
 - "Add a settings page for notification preferences" → COMPLEX, YES
 - "Add pagination to the transactions API" → COMPLEX, NO
+- "Sync RSVP state between the two calendar systems" → COMPLEX, NO
 
 ## Task
 ${intent}${verifyBlock(verify)}
@@ -652,13 +659,16 @@ export function shipPrompt(
   return `The task below has been implemented, reviewed, verified, and committed on the current branch. ${how}
 Use whatever tools and skills the repo provides — open a merge request / PR, iterate on CI until green, respond to review. The commit is already made; push as needed.
 
+WAITING RULE — this matters for cost: waiting on CI/pipelines must happen INSIDE single long-running shell commands, never as you polling in short turns. Use one blocking wait per check when the platform has one (\`gh pr checks --watch\`, \`glab ci status --live\`), otherwise a single shell loop like \`for i in $(seq 60); do <status cmd> && break; sleep 60; done\` with the LONGEST timeout your shell tool allows, re-invoked as needed. Every short poll turn re-reads your entire context; measured runs burned tens of millions of tokens on "still waiting" turns. Between waits, do nothing unless the state changed.
+
 ## Branch
 ${branch}
 
 ## Task
 ${intent}
 
-When done, output on the FINAL line exactly one of:
+When done, output as the FINAL lines:
+URL: <the MR/PR url, when one exists>
 SHIP: OK
 SHIP: FAILED <one-line reason>`
 }
@@ -809,10 +819,14 @@ export function remediatePrompt(
   verify: string,
   failure: string,
   priorRemedies: string[],
-  guidance: string | null
+  guidance: string | null,
+  envPlaybook: string | null = null
 ): string {
   const tried = priorRemedies.length
     ? `\n\n## Environment fixes already applied this gate (verify STILL failed after each — don't just repeat them)\n${priorRemedies.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+    : ''
+  const playbook = envPlaybook
+    ? `\n\n## Environment playbook (this repo, THIS machine — known quirks and their fixes; check here FIRST)\n${envPlaybook}`
     : ''
   return `You are the verify-gate doctor for an autonomous coding loop. The task below was implemented and the working tree's verify command was run to prove it — but verify FAILED. Diagnose WHY, and when the cause is the ENVIRONMENT rather than the code, fix the environment so the check can run. You have full access: install dependencies and tools, run build/codegen/setup steps, start services, set up local config — whatever a developer would do to make this repo's checks runnable.
 
@@ -822,11 +836,13 @@ Classify the failure as exactly one of:
 - ENV-BLOCKED — an environment/setup problem you could NOT fix autonomously (needs credentials, network you lack, a human decision, or infrastructure you can't provision).
 - CODE — a genuine defect in the code or tests under verification (an assertion failure, a type error, a lint violation, a real bug). The environment is fine; the code must change. Do NOT change any code yourself — report CODE and the fixer will handle it.
 - FLAKE — a transient or external failure unrelated to this change (a network blip, a race, a timeout, a port already in use). Retrying later will likely pass.
+- GATE-MISCONFIGURED — the verify COMMAND ITSELF is broken: it references a file/script that does not exist, has broken quoting or escaping, targets the wrong path, or otherwise cannot succeed regardless of the code. Put the corrected command on a GATE-FIX line (see output format). The corrected command must check the SAME thing the original intended — never a weaker check, never an unconditional pass.
 
 Rules:
 - NEVER edit the project's source code or tests, and never weaken, skip, or hard-code around a check to make verify pass. Environment-only changes are in scope; changing what is being tested is not.
 - When torn between CODE and ENV, prefer CODE — re-implementing is safer than masking a real defect with environment churn.
 - Be economical: if it's plainly a code/test failure, don't touch the environment — just report CODE.
+- GATE-MISCONFIGURED is for a broken gate, not a failing one: if the command runs the intended check and that check fails, classify it as CODE/ENV/FLAKE instead.
 
 ## Task
 ${intent}
@@ -835,11 +851,12 @@ ${intent}
 \`${verify}\`
 
 ## Verify failure
-${failure}${tried}${learnedLessonsBlock(guidance)}
+${failure}${tried}${playbook}${learnedLessonsBlock(guidance)}
 
-Output, as the FINAL two lines:
+Output, as the FINAL lines:
 SUMMARY: <one sentence: the root cause and, if you fixed it, what you changed>
-VERDICT: ENV-FIXED | ENV-BLOCKED | CODE | FLAKE`
+GATE-FIX: <the corrected verify command — ONLY with VERDICT: GATE-MISCONFIGURED>
+VERDICT: ENV-FIXED | ENV-BLOCKED | CODE | FLAKE | GATE-MISCONFIGURED`
 }
 
 // The convergence judge: after a failed gate or safety-fuse hit, decides the next
@@ -1307,9 +1324,53 @@ Output in EXACTLY this structure:
 ## Advisory
 <numbered list of non-blocking improvements — or "none">
 
+## Quick fixes
+<the subset of Advisory items that are CHEAP and SAFE to apply mechanically right now — small, local, can't change behavior beyond the finding, no design judgment needed (e.g. delete a dead method, fix a label, add a missing null check the tests cover). Number them with the concrete edit. Or "none". Shipped-over advisories have repeatedly bounced back as external review blocks — this list is the cheap moment to catch them.>
+
 Then, on the FINAL line, output exactly one of (FAIL if and only if the Blocking list is non-empty):
 VERDICT: PASS
 VERDICT: FAIL`
+}
+
+// Moot check for a long-parked needs-input task: did the intent already land
+// through other work while the task sat waiting? Real usage showed humans
+// routing around parked questions (hand-building the feature within the hour,
+// re-spawning the task in another worktree) while the original rotted forever.
+export function mootCheckPrompt(intent: string, questions: string, createdAt: string): string {
+  return `A task in an autonomous coding loop has been PARKED waiting for human answers since ${createdAt}. Before it waits longer, check whether it has become MOOT: the intent may have already landed through other work (a human built it manually, another worktree shipped it, or the surrounding code changed so the task no longer applies).
+
+Investigate with read-only git/repo commands: \`git log --all --oneline --since="${createdAt}"\` and targeted searches for the feature the task describes. Judge whether the CURRENT state of the repo already satisfies the task's intent.
+
+## Task intent
+${intent}
+
+## The questions it is parked on
+${questions}
+
+Output, as the FINAL lines:
+SUMMARY: <one sentence: what you found — cite commits/files when moot>
+MOOT: YES | NO`
+}
+
+// One bounded pass applying the consolidator's "Quick fixes" — cheap, safe,
+// mechanical advisory items — after a PASS verdict. Not a design pass: shipped
+// advisories kept bouncing back as external review blocks, so this is the cheap
+// moment to clear them without re-running the panel.
+export function quickFixPrompt(intent: string, quickFixes: string, diff: string): string {
+  return `The review panel PASSED this change and listed a few quick fixes — cheap, safe, mechanical advisory items. Apply EXACTLY these items to the worktree and nothing else: no refactors, no scope growth, no design changes. If an item turns out to be non-trivial or risky once you look, SKIP it and say so; never let a quick fix destabilize a passing change.
+
+## Task
+${intent}
+
+## Quick fixes to apply
+${quickFixes}
+
+## Current diff (context)
+\`\`\`diff
+${diff}
+\`\`\`
+
+Make the edits, then output a one-line summary per item: applied or skipped (why).`
 }
 
 // The sharpen step turns a rough human intent into a self-contained,
@@ -1321,7 +1382,11 @@ VERDICT: FAIL`
 // instead of answering questions the repo could answer.
 // `transcript` is the running human/agent
 // conversation; when `finalize`, emit the spec immediately.
-export function sharpenPrompt(transcript: string, finalize: boolean): string {
+export function sharpenPrompt(
+  transcript: string,
+  finalize: boolean,
+  askCalibration: string | null = null
+): string {
   // The spec is goal-shaped: what/why/success/constraints, not an implementation
   // plan. The downstream planner chooses the approach. Shown in both modes so
   // finalize has the format too.
@@ -1434,7 +1499,7 @@ Rules:
 ${ending}
 
 ## Conversation so far
-${transcript}`
+${transcript}${askCalibration ? `\n\n${askCalibration}` : ''}`
 }
 
 export function sharpenReviewPrompt(

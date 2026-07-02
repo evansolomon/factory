@@ -63,8 +63,8 @@ const CodexTurn = z.object({
   }),
 })
 
-function parseCodexUsage(stdout: string): Usage {
-  let usage: Usage = ZERO_USAGE
+function parseCodexUsage(label: string, stdout: string): Usage {
+  let usage: Usage | null = null
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed) {
@@ -83,6 +83,12 @@ function parseCodexUsage(stdout: string): Usage {
         outputTokens: result.data.usage.output_tokens,
       }
     }
+  }
+  if (!usage) {
+    // Degrading to zero is deliberate (usage must never break the loop), but it
+    // must not be silent: zeroed rows systematically understate telemetry.
+    log.warn(`${label}: no turn.completed usage in codex stream; recording zero usage`)
+    return ZERO_USAGE
   }
   return usage
 }
@@ -194,8 +200,22 @@ async function runCodex(agent: Agent, opts: AgentRun): Promise<AgentResult> {
   if (!opts.outFile) {
     await rm(out, { force: true })
   }
-  return { text, usage: parseCodexUsage(res.stdout) }
+  return { text, usage: parseCodexUsage(agentLabel(agent), res.stdout) }
 }
+
+// Pipeline stages run unattended, but the claude CLI still loads the USER'S
+// interactive CLAUDE.md — whose rules ("ask before running tests", "ask before
+// git actions") assume a human is present. In real runs, autonomous implementers
+// sat waiting to ask an absent human for permission. This preamble re-scopes
+// those rules for the pipeline context; it does not touch repo AGENTS.md
+// conventions, which remain binding.
+const UNATTENDED_PREAMBLE =
+  '[Unattended pipeline stage] You are one stage of an autonomous coding pipeline. ' +
+  'No human is present and nothing can answer questions mid-stage. Interactive-session ' +
+  'rules from user-level CLAUDE.md (asking permission to run tests/commands, pausing for ' +
+  'approval) do NOT apply here — the pipeline itself gates side effects. Never read ' +
+  'files outside this repository (private memory/config dirs) unless they are standard ' +
+  'toolchain files needed to run the repo.\n\n'
 
 async function runClaude(agent: Agent, opts: AgentRun): Promise<AgentResult> {
   // read/research disallow Claude's dedicated edit tools, but Bash remains
@@ -221,7 +241,7 @@ async function runClaude(agent: Agent, opts: AgentRun): Promise<AgentResult> {
   ]
   const res = await runWithRetry(agentLabel(agent), cmd, {
     cwd: opts.root,
-    stdin: opts.prompt,
+    stdin: `${UNATTENDED_PREAMBLE}${opts.prompt}`,
     streamTo: opts.outFile ? activityPath(opts.outFile) : undefined,
   })
   if (res.code !== 0) {

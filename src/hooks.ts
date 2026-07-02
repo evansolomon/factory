@@ -21,6 +21,7 @@ export type HookEvent =
   | 'task.blocked' // escalated to blocked
   | 'task.retrying' // set aside for an auto-retry
   | 'task.done' // completed (committed / shipped)
+  | 'task.stale' // parked (needs-input/blocked) past the staleness window
   | 'loop.idle' // queue drained, loop waiting
 
 const HOOK_TIMEOUT_MS = 10_000

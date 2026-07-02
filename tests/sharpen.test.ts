@@ -52,3 +52,23 @@ describe('formatted sharpen questions', () => {
     ).toBe(['Q: Which scope should apply?', 'A: No preference.'].join('\n'))
   })
 })
+
+import { sanitizeVerifyCommand } from '../src/sharpen.ts'
+
+describe('sanitizeVerifyCommand', () => {
+  test('strips markdown code fences and quotes wrapping the whole command', () => {
+    expect(sanitizeVerifyCommand('`bun test`')).toBe('bun test')
+    expect(sanitizeVerifyCommand('```bun run test```')).toBe('bun run test')
+    expect(sanitizeVerifyCommand('"yc rspec spec/foo_spec.rb"')).toBe('yc rspec spec/foo_spec.rb')
+    expect(sanitizeVerifyCommand("  'bun test'  ")).toBe('bun test')
+  })
+
+  test('leaves interior backticks and unbalanced wrappers alone', () => {
+    expect(sanitizeVerifyCommand('echo `date` > out.txt')).toBe('echo `date` > out.txt')
+    expect(sanitizeVerifyCommand('bun test')).toBe('bun test')
+    expect(sanitizeVerifyCommand('`bun test')).toBe('`bun test')
+    expect(sanitizeVerifyCommand("bash -c 'echo hi'")).toBe("bash -c 'echo hi'")
+    // Quotes that are part of the command, not decoration.
+    expect(sanitizeVerifyCommand("'a' && 'b'")).toBe("'a' && 'b'")
+  })
+})

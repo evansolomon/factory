@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { z } from 'zod'
-import type { WorkContext } from './config.ts'
+import { type WorkContext, writeWorktreeMarker } from './config.ts'
 import { type TaskDelivery, TaskDeliverySchema } from './delivery.ts'
+import { classifyAnswer, recordAnswerVerdict } from './question-stats.ts'
 
 // A task is a directory under <dir>/tasks/<id>/ containing:
 //   task.md   — human-owned intent (free-form markdown; what sharpening enriches)
@@ -29,6 +30,9 @@ export const StatusSchema = z.enum([
   'retrying',
   'done',
   'blocked',
+  // Terminal without a commit: abandoned or superseded (e.g. the intent landed
+  // through other work). `factory close` sets it; nothing reopens it.
+  'closed',
 ])
 export type Status = z.infer<typeof StatusSchema>
 
@@ -44,14 +48,11 @@ export type TaskComplexity = z.infer<typeof TaskComplexitySchema>
 // status is a live stage the conductor sets while working a task. Deriving the
 // complement (rather than listing the stages) means a newly-added stage is covered
 // automatically — the same heuristic factory_prompt uses for "in-progress".
-const SETTLED: readonly Status[] = [
-  'ready',
-  'needs-input',
-  'grilling',
-  'retrying',
-  'done',
-  'blocked',
-]
+// 'grilling' (the legacy interactive sharpen) is deliberately NOT settled: it was
+// once, which made it a black hole — never runnable, never reclaimed. Real tasks
+// fossilized there. Treating it as stranded lets the loop recover it like an
+// interrupted sharpening stage.
+const SETTLED: readonly Status[] = ['ready', 'needs-input', 'retrying', 'done', 'blocked', 'closed']
 
 // A task left in a live stage with no loop on it: its run-loop was killed mid-stage
 // (Ctrl-C / crash) and never transitioned the status. Safe to reclaim because the
@@ -78,6 +79,12 @@ const MetaSchema = z.object({
   updatedAt: z.string().nullable().default(null),
   // Short SHA recorded when the task's work is committed.
   commit: z.string().nullable().default(null),
+  // Set just before `git commit` runs and cleared once the SHA is recorded. A
+  // crash between the two used to leave the commit in git and the task looking
+  // unstarted — the resume then re-implemented on a clean tree and blocked with
+  // "no changes" while the real work sat committed. With this flag, a resume
+  // that finds a clean tree adopts HEAD as the task's commit instead.
+  commitStartedAt: z.string().nullable().default(null),
   // Short human-facing note on the current status: a block reason, or a pointer
   // to questions.md when awaiting input.
   note: z.string().nullable().default(null),
@@ -104,6 +111,17 @@ const MetaSchema = z.object({
   deliveryProposal: TaskDeliverySchema.optional(),
   deliveryProposalAt: z.string().nullable().default(null),
   userFacing: z.boolean().optional(),
+  // Where the work went: the branch delivery pushed and the MR/PR it opened.
+  // This is what post-ship harvesting keys on — commits appearing after
+  // meta.commit on shipBranch are human rework, pure feedback signal.
+  shipBranch: z.string().nullable().default(null),
+  shipUrl: z.string().nullable().default(null),
+  harvestedAt: z.string().nullable().default(null),
+  // Interruption accounting: how many question rounds this task raised, and how
+  // many were absorbed by auto-accepted recommendations. This is the raw data
+  // for tuning the asking bar — every interruption should be measurable.
+  questionRounds: z.number().int().nonnegative().default(0),
+  autoAcceptedRounds: z.number().int().nonnegative().default(0),
   // Human feedback recorded after progress exists. Counted separately from answers
   // so the conductor can consume feedback only after a verified commit.
   feedbackCount: z.number().int().nonnegative().default(0),
@@ -186,6 +204,7 @@ export async function addTask(
   options: AddTaskOptions = {}
 ): Promise<Task> {
   await mkdir(ctx.tasksDir, { recursive: true })
+  await writeWorktreeMarker(ctx.stateDir, ctx.root)
   // Descriptive, number-free id; disambiguate same-named tasks with a -N suffix.
   // Claim the directory atomically so parallel `factory add`s cannot choose the
   // same id after racing through a list-then-create window.
@@ -215,6 +234,7 @@ export async function addTask(
     createdAt: now,
     updatedAt: now,
     commit: null,
+    commitStartedAt: null,
     note: null,
     sharpen: options.sharpen ?? 'done',
     resume: false,
@@ -227,12 +247,21 @@ export async function addTask(
     deliveryProposal: undefined,
     deliveryProposalAt: null,
     userFacing: undefined,
+    shipBranch: null,
+    shipUrl: null,
+    harvestedAt: null,
+    questionRounds: 0,
+    autoAcceptedRounds: 0,
     feedbackCount: 0,
     feedbackConsumed: 0,
     feedbackSourceTaskId: options.feedbackSourceTaskId ?? null,
   }
 
   await Bun.write(`${dir}/task.md`, `${intent.trim()}\n`)
+  // The raw intent as the human wrote it, never touched again — sharpening
+  // replaces task.md with the refined spec, and losing the original makes
+  // sharpening fidelity unauditable (and eval candidates untrustworthy).
+  await Bun.write(`${dir}/task.original.md`, `${intent.trim()}\n`)
   await writeMeta(dir, meta)
   return { id, dir, meta }
 }
@@ -244,6 +273,15 @@ export async function readySharpenedTask(
   intent: string,
   verify: string | null
 ): Promise<void> {
+  // Tasks created before task.original.md existed: preserve the pre-sharpen
+  // intent now, before it's overwritten.
+  const original = Bun.file(`${task.dir}/task.original.md`)
+  if (!(await original.exists())) {
+    const current = Bun.file(`${task.dir}/task.md`)
+    if (await current.exists()) {
+      await Bun.write(original, await current.text())
+    }
+  }
   await Bun.write(`${task.dir}/task.md`, `${intent.trim()}\n`)
   task.meta.verify = verify
   task.meta.sharpen = 'done'
@@ -320,7 +358,7 @@ async function resumeRun(task: Task, kind: 'manual' | 'auto-retry' | 'stranded')
 // Early planning has no durable selected plan yet, so restart it from the original
 // intent. Once plan.md exists, the selected design is a resumable boundary.
 async function recoverStranded(task: Task): Promise<Task> {
-  if (task.meta.status === 'sharpening') {
+  if (task.meta.status === 'sharpening' || task.meta.status === 'grilling') {
     task.meta.resume = false
     task.meta.resumeKind = null
     task.meta.retryAt = null
@@ -414,6 +452,14 @@ const FailureSchema = z.object({
   // Backoff failures are transient verify/env/ship records. They are useful
   // history, but they must not consume the implementation fix budget.
   remediation: FailureRemediationSchema.default('code-fix'),
+  // When the failure was recorded. Optional so pre-existing history lines parse.
+  at: z.string().optional(),
+  // Mechanical loop detection: a hash of the normalized failure text and of the
+  // worktree diff at failure time. An identical (fingerprint, diffHash) pair on
+  // consecutive failures of the same gate means the fix attempt was a no-op —
+  // re-running is forbidden by code, not discouraged by prompt.
+  fingerprint: z.string().optional(),
+  diffHash: z.string().optional(),
 })
 export type FailureRemediation = z.infer<typeof FailureRemediationSchema>
 export type Failure = z.infer<typeof FailureSchema>
@@ -438,7 +484,8 @@ export async function readFailures(task: Task): Promise<Failure[]> {
 export async function appendFailure(task: Task, failure: Failure): Promise<void> {
   const file = Bun.file(`${task.dir}/failures.jsonl`)
   const existing = (await file.exists()) ? await file.text() : ''
-  await Bun.write(file, `${existing}${JSON.stringify(failure)}\n`)
+  const stamped: Failure = { ...failure, at: failure.at ?? new Date().toISOString() }
+  await Bun.write(file, `${existing}${JSON.stringify(stamped)}\n`)
 }
 
 // Accumulated human answers for this task. Threaded into the pre-implementation
@@ -452,6 +499,35 @@ export async function appendAnswer(task: Task, text: string): Promise<void> {
   const existing = (await readAnswers(task)) ?? ''
   const entry = `## Answer (${new Date().toISOString()})\n${text.trim()}\n`
   await Bun.write(`${task.dir}/answers.md`, existing ? `${existing}\n\n${entry}` : entry)
+}
+
+// Apply a human answer to a needs-input task and requeue it. A task that paused
+// MID-LOOP (it already has a selected plan) resumes at the gates with the answer
+// as fix context, instead of replanning from scratch — answering a one-line
+// question used to trigger a full pipeline re-run that cost millions of tokens
+// and then hit the identical wall. Pre-plan pauses (sharpen, reconcile) still
+// re-enter the planning path, where the answer genuinely changes the outcome.
+export async function answerTask(
+  task: Task,
+  text: string,
+  opts: { repoStateDir?: string; verdict?: 'auto-accept' } = {}
+): Promise<void> {
+  if (opts.repoStateDir) {
+    try {
+      const questions = (await readArtifact(task, 'questions.md')) ?? ''
+      const verdict = opts.verdict ?? classifyAnswer(questions, text)
+      await recordAnswerVerdict(opts.repoStateDir, task.id, verdict)
+    } catch {
+      // Telemetry is best-effort; answering must never fail on it.
+    }
+  }
+  await appendAnswer(task, text)
+  if (await readPlan(task)) {
+    task.meta.resume = true
+    task.meta.resumeKind = 'manual'
+    task.meta.resumeNote = text.trim()
+  }
+  await setStatus(task, 'ready')
 }
 
 type AnswerEntry = {
@@ -584,6 +660,68 @@ export async function writeLiveMeter(task: Task, meter: LiveMeter): Promise<void
   const tmpPath = `${task.dir}/.meter.${process.pid}.${randomUUID()}.tmp`
   await Bun.write(tmpPath, `${JSON.stringify(meter, null, 2)}\n`)
   await rename(tmpPath, finalPath)
+}
+
+// One line per completed (or interrupted) pass in meters.jsonl, so multi-pass
+// costs survive — meter.json alone holds only the current pass and historically
+// undercounted true task cost by 2-5x. Entries are deduped by startedAt: an
+// outcome append and a later interrupted-meter sweep of the same pass are the
+// same entry, and the outcome-labeled version wins only if it got there first.
+const PassMeterSchema = LiveMeterSchema.extend({
+  outcome: z.string(),
+})
+export type PassMeter = z.infer<typeof PassMeterSchema>
+
+export async function readPassMeters(task: Task): Promise<PassMeter[]> {
+  const file = Bun.file(`${task.dir}/meters.jsonl`)
+  if (!(await file.exists())) {
+    return []
+  }
+  const out: PassMeter[] = []
+  for (const line of (await file.text()).split('\n')) {
+    if (!line.trim()) {
+      continue
+    }
+    try {
+      out.push(PassMeterSchema.parse(JSON.parse(line)))
+    } catch {}
+  }
+  return out
+}
+
+export async function appendPassMeter(
+  task: Task,
+  meter: LiveMeter,
+  outcome: string
+): Promise<void> {
+  const existing = await readPassMeters(task)
+  if (existing.some((m) => m.startedAt === meter.startedAt)) {
+    return
+  }
+  const file = Bun.file(`${task.dir}/meters.jsonl`)
+  const text = (await file.exists()) ? await file.text() : ''
+  const entry: PassMeter = { ...meter, outcome }
+  await Bun.write(file, `${text}${JSON.stringify(entry)}\n`)
+}
+
+// Preserve an artifact that is about to be overwritten in place (questions.md per
+// ask round, verify.log per attempt): the current content is appended to a
+// sibling history file with a timestamp header, so "latest" stays cheap to read
+// while nothing is lost.
+export async function rollArtifactHistory(task: Task, name: string): Promise<void> {
+  const current = Bun.file(`${task.dir}/${name}`)
+  if (!(await current.exists())) {
+    return
+  }
+  const content = (await current.text()).trim()
+  if (!content) {
+    return
+  }
+  const historyPath = `${task.dir}/${name.replace(/(\.[^.]+)$/, '')}.history${name.match(/(\.[^.]+)$/)?.[1] ?? ''}`
+  const history = Bun.file(historyPath)
+  const existing = (await history.exists()) ? await history.text() : ''
+  const entry = `--- ${name} (superseded ${new Date().toISOString()}) ---\n${content}\n`
+  await Bun.write(history, existing ? `${existing}\n${entry}` : entry)
 }
 
 export async function writeArtifact(task: Task, name: string, content: string): Promise<void> {

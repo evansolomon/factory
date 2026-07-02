@@ -22,13 +22,14 @@ describe('selectAddRoute', () => {
           task('blocked', { status: 'blocked', updatedAt: '2026-01-03T00:00:00.000Z' }),
           task('question', { status: 'needs-input', updatedAt: '2026-01-02T00:00:00.000Z' }),
         ],
+        false,
         false
       )
     ).toEqual({ kind: 'answer', taskId: 'question', reason: 'task needs input' })
   })
 
   test('retries blocked and retrying tasks', () => {
-    expect(selectAddRoute([task('blocked', { status: 'blocked' })], false)).toEqual({
+    expect(selectAddRoute([task('blocked', { status: 'blocked' })], false, false)).toEqual({
       kind: 'retry',
       taskId: 'blocked',
       reason: 'task is blocked',
@@ -37,7 +38,7 @@ describe('selectAddRoute', () => {
 
   test('queues a follow-up when stopped work already has a commit', () => {
     expect(
-      selectAddRoute([task('ship-failed', { status: 'retrying', hasCommit: true })], false)
+      selectAddRoute([task('ship-failed', { status: 'retrying', hasCommit: true })], false, false)
     ).toEqual({
       kind: 'follow-up',
       taskId: 'ship-failed',
@@ -47,19 +48,26 @@ describe('selectAddRoute', () => {
   })
 
   test('routes ready tasks with progress to feedback', () => {
-    expect(selectAddRoute([task('progress', { hasPlan: true })], false)).toEqual({
+    expect(selectAddRoute([task('progress', { hasPlan: true })], false, false)).toEqual({
       kind: 'feedback',
       taskId: 'progress',
       reason: 'task has existing progress',
     })
   })
 
-  test('queues a follow-up for a currently running task', () => {
-    expect(selectAddRoute([task('running', { status: 'implementing' })], false)).toEqual({
-      kind: 'follow-up',
+  test('records live feedback when a run loop is actively working the task', () => {
+    expect(selectAddRoute([task('running', { status: 'implementing' })], false, true)).toEqual({
+      kind: 'feedback-live',
       taskId: 'running',
-      reason: 'task is currently implementing',
-      recordOnSource: false,
+      reason: 'a run loop is actively working this task (implementing)',
+    })
+  })
+
+  test('retries a task abandoned mid-stage when no loop is running', () => {
+    expect(selectAddRoute([task('running', { status: 'implementing' })], false, false)).toEqual({
+      kind: 'retry',
+      taskId: 'running',
+      reason: 'task was interrupted during implementing',
     })
   })
 
@@ -70,18 +78,20 @@ describe('selectAddRoute', () => {
           task('blocked', { status: 'blocked', updatedAt: '2026-01-02T00:00:00.000Z' }),
           task('running', { status: 'implementing', updatedAt: '2026-01-03T00:00:00.000Z' }),
         ],
+        false,
         false
       )
     ).toEqual({
-      kind: 'follow-up',
+      kind: 'retry',
       taskId: 'running',
-      reason: 'task is currently implementing',
-      recordOnSource: false,
+      reason: 'task was interrupted during implementing',
     })
   })
 
   test('queues a recorded follow-up for completed work', () => {
-    expect(selectAddRoute([task('done', { status: 'done', hasCommit: true })], false)).toEqual({
+    expect(
+      selectAddRoute([task('done', { status: 'done', hasCommit: true })], false, false)
+    ).toEqual({
       kind: 'follow-up',
       taskId: 'done',
       reason: 'latest task is done',
@@ -90,7 +100,7 @@ describe('selectAddRoute', () => {
   })
 
   test('creates a new task when there is no current work', () => {
-    expect(selectAddRoute([], false)).toEqual({ kind: 'new-task' })
-    expect(selectAddRoute([task('fresh')], false)).toEqual({ kind: 'new-task' })
+    expect(selectAddRoute([], false, false)).toEqual({ kind: 'new-task' })
+    expect(selectAddRoute([task('fresh')], false, false)).toEqual({ kind: 'new-task' })
   })
 })
