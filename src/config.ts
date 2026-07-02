@@ -184,14 +184,15 @@ const ConfigSchema = z.object({
   // Run a read-only rescue strategist before a terminal block. It may authorize
   // one sharper code-fix attempt, ask the human, retry later, or accept the block.
   rescue: z.boolean().default(true),
-  // Filesystem/network reach of the implement/fix stages. 'write' (default) is
-  // the sandboxed workspace-write mode; 'full' removes the sandbox so the
-  // implementer can run the repo's real checks (daemonized services, sockets,
-  // DBs) DURING implementation. In sandbox-restricted repos the implementer
-  // shipped blind and every failure was discovered at the expensive verify
-  // gate — the structural cause of the worst fix loops. Only set 'full' in
-  // repos you trust factory to run unattended anyway.
-  implementerAccess: z.enum(['write', 'full']).default('write'),
+  // Filesystem/network reach of the implement/fix stages. 'full' (default)
+  // removes the sandbox so the implementer can run the repo's real checks
+  // (daemonized services, sockets, DBs) DURING implementation — in
+  // sandbox-restricted repos the implementer shipped blind and every failure
+  // was discovered at the expensive verify gate, the structural cause of the
+  // worst fix loops. Factory's threat model already assumes a trusted repo
+  // (remediation and delivery run unsandboxed); set 'write' to keep the
+  // workspace-write sandbox on implementation anyway.
+  implementerAccess: z.enum(['write', 'full']).default('full'),
   // OPTIONAL override for how `factory dispatch` turns a backlog item into a
   // live workstream. The built-in default needs no config: it creates a sibling
   // worktree on a factory/<name> branch and starts a detached

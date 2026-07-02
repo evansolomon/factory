@@ -531,11 +531,11 @@ Fields:
   same auto-fix loop. Text-grounded only — no rendering/screenshots.
 - **`plansDir`** — where the clean final plan per task is written, one file per
   task, no meta (default `.coding-agent-plans/`, committed as docs; `null` off).
-- **`implementerAccess`** — `write` (default, sandboxed) or `full`: let the
+- **`implementerAccess`** — `full` (default) or `write`: full access lets the
   implement/fix stages run the repo's real checks (services, sockets, DBs) during
   implementation, so failures are discovered at the cheap stage instead of the
-  verify gate. Only use `full` in repos you already trust factory to run
-  unattended.
+  verify gate. Factory already assumes a trusted repo (remediation and delivery
+  run unsandboxed); set `write` to keep the OS sandbox on implementation anyway.
 - **`autoAcceptAfterMinutes`** — opt-in: when a needs-input task's questions ALL
   carry recommended answers and nobody replies within the window, proceed with
   the recommendations (recorded as a normal, auditable answer). Default `null`
