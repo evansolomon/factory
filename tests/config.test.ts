@@ -297,3 +297,36 @@ describe('cascade deep-merge for agents and specialists', () => {
     })
   })
 })
+
+import { repoConfigFile } from '../src/config.ts'
+
+describe('repo-identity config layer', () => {
+  test('repo config.json sits between global and .factory.json in the cascade', async () => {
+    await withFactoryHome(async (home) => {
+      const base = await tempDir('repo-layer')
+      const root = `${base}/repo`
+      await mkdir(root, { recursive: true })
+      await $`git -C ${root} init`.quiet()
+      await $`git -C ${root} remote add origin git@github.com:evansolomon/factory.git`.quiet()
+
+      await writeJson(`${home}/config.json`, { retries: 1, security: false })
+      const repoPath = await repoConfigFile(root)
+      expect(repoPath).toBe(`${home}/repos/github.com-evansolomon-factory/config.json`)
+      await mkdir(`${home}/repos/github.com-evansolomon-factory`, { recursive: true })
+      await writeJson(repoPath ?? '', { retries: 2, implementerAccess: 'full' })
+      await writeJson(`${root}/.factory.json`, { retries: 3 })
+
+      const config = await loadConfig(root)
+
+      expect(config.retries).toBe(3) // worktree still wins
+      expect(config.implementerAccess).toBe('full') // repo layer applies
+      expect(config.security).toBe(false) // global base survives
+    })
+  })
+
+  test('non-git directories have no repo layer', async () => {
+    await withFactoryHome(async () => {
+      expect(await repoConfigFile(await tempDir('plain'))).toBeNull()
+    })
+  })
+})

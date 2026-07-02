@@ -16,9 +16,11 @@ import {
   ConfigError,
   dispatchLogsDir,
   globalConfigFile,
+  globalSkillsDir,
   loadContext,
   loadRepoContext,
   type RepoContext,
+  repoConfigFile,
   sessionsDir,
   type WorkContext,
   worktreeMarkerPath,
@@ -210,7 +212,7 @@ COMMANDS
                              across the repo: first-pass yield, escalation/blocked rate.
   factory lessons [list|show|rm|edit] ...
                              Learned lessons, legacy lessons, and raw candidates.
-  factory config [edit [--global|--worktree|--repo-parent|--dir <dir>]]
+  factory config [edit [--global|--repo|--worktree|--repo-parent|--dir <dir>]]
                            Show effective config + where it's set; edit opens the
                            global config by default; flags target another layer.
   factory version | --version    Print the current CLI version.
@@ -284,8 +286,11 @@ CONFIG (.factory.json — cascades up the dir tree, closest wins)
             payload arrives as JSON on stdin + FACTORY_* env vars; best-effort.
             This is how tmux (or notifications) integrate — factory stays agnostic.
   config edit defaults to ~/.factory/config.json (or $FACTORY_HOME/config.json).
-  Use --worktree for the current repo, --repo-parent for all sibling worktrees in
-  a parent-dir fleet, or --dir <dir> for a specific cascade layer. Full design:
+  Use --repo for the repo-identity layer (all worktrees of this repo, this
+  machine, nothing committed), --worktree for the current worktree, --repo-parent
+  for a parent-dir fleet, or --dir <dir> for a specific cascade layer.
+  factory skills [list | edit <name> [--repo|--global|--committed]] manages
+  delivery skills the same way — --repo is the same repo-identity layer. Full design:
   factory/README.md.
 `
 
@@ -1732,6 +1737,20 @@ export async function main(opts: MainOptions = {}): Promise<number> {
         return 1
       }
       const legacyDir = rest[1] && !rest[1].startsWith('--') ? rest[1] : null
+      if (rest.includes('--repo')) {
+        const repoPath = await repoConfigFile(ctx.root)
+        if (!repoPath) {
+          log.fail('not in a git repo — the --repo config layer is keyed by repo identity')
+          return 1
+        }
+        await mkdir(dirname(repoPath), { recursive: true })
+        if (!(await Bun.file(repoPath).exists())) {
+          await Bun.write(repoPath, '{}\n')
+        }
+        log.info(`editing ${repoPath} (repo layer: all worktrees of this repo, this machine)`)
+        await openEditor(repoPath)
+        return 0
+      }
       const target = rest.includes('--worktree')
         ? ctx.root
         : rest.includes('--repo-parent')
@@ -1751,6 +1770,51 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     }
     await printConfig(ctx)
     return 0
+  }
+
+  if (cmd === 'skills') {
+    const ctx = await loadContext(process.cwd())
+    const sub = rest[0] ?? 'list'
+    const repoLayerDir = `${ctx.repoStateDir}/skills`
+    if (sub === 'list') {
+      const effective = await listDeliverySkills(ctx.root, ctx.repoStateDir)
+      if (effective.length === 0) {
+        log.info('no delivery skills registered')
+      }
+      for (const skill of effective) {
+        log.log(`${skill.name} — ${skill.description ?? '(no description)'}`)
+      }
+      log.info(
+        `layers (most specific wins): ${ctx.root}/.skills → ${repoLayerDir} → ${globalSkillsDir()}`
+      )
+      log.info('edit: factory skills edit <name> [--repo|--global|--committed]')
+      return 0
+    }
+    if (sub === 'edit') {
+      const name = rest[1]
+      if (!name || name.startsWith('--')) {
+        log.fail('usage: factory skills edit <name> [--repo|--global|--committed]')
+        return 1
+      }
+      const layer = rest.includes('--global')
+        ? globalSkillsDir()
+        : rest.includes('--committed')
+          ? `${ctx.root}/.skills`
+          : repoLayerDir
+      const path = `${layer}/${name}/SKILL.md`
+      await mkdir(dirname(path), { recursive: true })
+      if (!(await Bun.file(path).exists())) {
+        await Bun.write(
+          path,
+          `---\nname: ${name}\ndescription: <one line the delivery selector reads>\n---\n\nInstructions the delivery agent follows to run \`$${name}\`.\n`
+        )
+      }
+      log.info(`editing ${path}`)
+      await openEditor(path)
+      return 0
+    }
+    log.fail('usage: factory skills [list | edit <name> [--repo|--global|--committed]]')
+    return 1
   }
 
   if (cmd === 'show') {

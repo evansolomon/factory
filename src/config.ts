@@ -348,14 +348,30 @@ export async function writeWorktreeMarker(stateDir: string, root: string): Promi
   }
 }
 
-// Candidate config files in priority order, lowest first: the global base, then
-// each ancestor from the filesystem root down to the worktree (closest wins).
-function configCandidates(root: string): string[] {
+// The repo-identity config layer: per-repo, machine-local, outside the repo —
+// e.g. "implementerAccess: full for yc-code on this box" without committing
+// anything or repeating it per worktree. Sits between the global base and the
+// .factory.json cascade. null outside a git repo.
+export async function repoConfigFile(root: string): Promise<string | null> {
+  try {
+    const origin = await originUrl(root)
+    const mainRoot = await mainWorktreeRoot(root)
+    return `${factoryHome()}/repos/${repoKey(origin, mainRoot)}/config.json`
+  } catch {
+    return null
+  }
+}
+
+// Candidate config files in priority order, lowest first: the global base, the
+// repo-identity layer, then each ancestor from the filesystem root down to the
+// worktree (closest wins).
+async function configCandidates(root: string): Promise<string[]> {
   const global = globalConfigFile()
+  const repo = await repoConfigFile(root)
   const ancestors = ancestorDirs(root)
     .reverse()
     .map((dir) => `${dir}/${CONFIG_NAME}`)
-  return global ? [global, ...ancestors] : ancestors
+  return [...(global ? [global] : []), ...(repo ? [repo] : []), ...ancestors]
 }
 
 // Hooks CONCATENATE across the cascade (deduped) instead of closest-wins, so a
@@ -397,7 +413,7 @@ function mergeObjectKey(base: unknown, incoming: unknown, nestedMergeKeys: strin
 // The config files that actually exist, closest (highest priority) first.
 export async function configSources(root: string): Promise<string[]> {
   const found: string[] = []
-  for (const path of configCandidates(root)) {
+  for (const path of await configCandidates(root)) {
     if (await Bun.file(path).exists()) {
       found.push(path)
     }
@@ -411,7 +427,7 @@ export async function loadConfig(root: string): Promise<Config> {
   // are skipped, not fatal.
   let merged: Record<string, unknown> = {}
   const sources: string[] = []
-  for (const path of configCandidates(root)) {
+  for (const path of await configCandidates(root)) {
     if (!(await Bun.file(path).exists())) {
       continue
     }
