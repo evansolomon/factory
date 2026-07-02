@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   consolidatePrompt,
+  convergePrompt,
   correctionPrompt,
   critiquePrompt,
   deploySafetyPrompt,
@@ -12,6 +13,7 @@ import {
   prototypePrompt,
   reconcilePrompt,
   remediatePrompt,
+  rescuePrompt,
   reviewPrompt,
   securityPrompt,
   uxReviewPrompt,
@@ -224,5 +226,53 @@ describe('lesson capture prompt markers', () => {
     expect(prompt).toContain('ACTIONABLE: YES|NO')
     expect(prompt).toContain('SCOPE: GLOBAL|REPO')
     expect(prompt).toContain('STAGES:')
+  })
+})
+
+describe('settled human answers', () => {
+  const answers = '## Answer (2026-07-02T06:55:01.620Z)\nWe do want to sync inbound changes.'
+
+  test('convergePrompt threads answers as settled decisions', () => {
+    const prompt = convergePrompt('Task', [], 'review failed', answers)
+    expect(prompt).toContain('## Human answers (settled decisions for this task)')
+    expect(prompt).toContain('We do want to sync inbound changes.')
+    expect(prompt).toContain('do not ASK_HUMAN it again')
+    expect(convergePrompt('Task', [], 'review failed', null)).not.toContain('## Human answers')
+  })
+
+  test('consolidatePrompt and fixPrompt thread answers', () => {
+    const consolidated = consolidatePrompt('Task', 'Plan', 'diff', [], null, null, answers)
+    expect(consolidated).toContain('## Human answers (settled decisions for this task)')
+    expect(consolidated).toContain('never demand it be reversed')
+
+    const fix = fixPrompt(
+      'Task',
+      'Plan',
+      'Failed',
+      [],
+      'diff',
+      false,
+      null,
+      null,
+      null,
+      null,
+      answers
+    )
+    expect(fix).toContain('## Human answers (settled decisions for this task)')
+  })
+
+  test('rescuePrompt threads answers', () => {
+    const prompt = rescuePrompt({
+      intent: 'Task',
+      finalPlan: 'Plan',
+      verify: null,
+      currentDiff: 'diff',
+      failures: [],
+      latestFailure: 'review failed',
+      guidance: null,
+      answers,
+    })
+    expect(prompt).toContain('## Human answers (settled decisions for this task)')
+    expect(prompt).toContain('never re-ask one of them')
   })
 })

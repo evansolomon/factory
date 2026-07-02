@@ -3,6 +3,7 @@ import { mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { z } from 'zod'
 import { type WorkContext, writeWorktreeMarker } from './config.ts'
 import { type TaskDelivery, TaskDeliverySchema } from './delivery.ts'
+import { DUPLICATE_SIMILARITY, guidanceSimilarity } from './guidance.ts'
 import { classifyAnswer, recordAnswerVerdict } from './question-stats.ts'
 
 // A task is a directory under <dir>/tasks/<id>/ containing:
@@ -589,6 +590,88 @@ export function latestAnswerValueAfter(answers: string, after: string | null): s
     })
     .at(-1)
   return latest ? answerValue(latest) : null
+}
+
+// The fixed first line of every mid-loop question round (converge/rescue
+// ASK_HUMAN). Exported so answered-question matching can strip it before
+// comparing question text.
+export const NEEDS_INPUT_PREAMBLE = 'Factory needs human input before it can continue:'
+
+export type AnsweredQuestion = { question: string; answer: string; answeredAt: string }
+
+// Pair each human answer with the question round it responded to. Rounds live in
+// questions.history.md (each stamped with the time the NEXT round superseded it)
+// plus the still-current questions.md; an answer given at time T belongs to the
+// earliest round superseded after T, or to the current round when none is.
+export function answeredQuestionRounds(
+  history: string | null,
+  current: string | null,
+  answers: string | null
+): AnsweredQuestion[] {
+  if (!answers) {
+    return []
+  }
+  const rounds: Array<{ supersededAt: number; text: string }> = []
+  if (history) {
+    const starts = [...history.matchAll(/^--- questions\.md \(superseded ([^)]+)\) ---\n/gm)]
+    for (const [i, match] of starts.entries()) {
+      const supersededAt = Date.parse(match[1] ?? '')
+      const text = history.slice(match.index + match[0].length, starts[i + 1]?.index).trim()
+      if (Number.isFinite(supersededAt) && text) {
+        rounds.push({ supersededAt, text })
+      }
+    }
+  }
+  if (current?.trim()) {
+    rounds.push({ supersededAt: Number.POSITIVE_INFINITY, text: current.trim() })
+  }
+  rounds.sort((a, b) => a.supersededAt - b.supersededAt)
+  const answered: AnsweredQuestion[] = []
+  for (const entry of answerEntries(answers)) {
+    const answeredAt = Date.parse(entry.timestamp)
+    if (!Number.isFinite(answeredAt)) {
+      continue
+    }
+    const round = rounds.find((r) => r.supersededAt > answeredAt)
+    const answer = entry.text.replace(/^## Answer \([^)]+\)(?:\n|$)/, '').trim()
+    if (round && answer) {
+      answered.push({ question: round.text, answer, answeredAt: entry.timestamp })
+    }
+  }
+  return answered
+}
+
+// Does a proposed question re-ask something the human already answered (possibly
+// reworded)? Token-similarity match against every answered round; returns the
+// best match at or above the shared near-duplicate threshold.
+export function matchAnsweredQuestion(
+  rounds: AnsweredQuestion[],
+  question: string
+): AnsweredQuestion | null {
+  const normalize = (text: string) => text.replace(NEEDS_INPUT_PREAMBLE, '').trim()
+  const target = normalize(question)
+  let best: { round: AnsweredQuestion; score: number } | null = null
+  for (const round of rounds) {
+    const score = guidanceSimilarity(normalize(round.question), target)
+    if (score >= DUPLICATE_SIMILARITY && (!best || score > best.score)) {
+      best = { round, score }
+    }
+  }
+  return best?.round ?? null
+}
+
+export async function findAnsweredQuestion(
+  task: Task,
+  question: string
+): Promise<AnsweredQuestion | null> {
+  return matchAnsweredQuestion(
+    answeredQuestionRounds(
+      await readArtifact(task, 'questions.history.md'),
+      await readArtifact(task, 'questions.md'),
+      await readAnswers(task)
+    ),
+    question
+  )
 }
 
 export function pendingFeedbackCount(task: Task): number {

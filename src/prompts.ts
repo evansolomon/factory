@@ -774,6 +774,13 @@ ${input.intent}${verifyLine}${optionalFeedbackBlock('Final plan', input.finalPla
 )}`
 }
 
+// Standing human decisions for the task (the accumulated answers.md). Threaded
+// into every mid-loop judgment and fix stage — not just the first pass after a
+// resume — so an already-made decision is never re-asked or relitigated.
+function humanAnswersBlock(answers: string | null): string {
+  return answers ? `\n\n## Human answers (settled decisions for this task)\n${answers}` : ''
+}
+
 // Used on a retry after a gate (review or verify) failed: feed the failure and
 // current diff back so the implementer fixes it in place.
 export function fixPrompt(
@@ -786,7 +793,8 @@ export function fixPrompt(
   riskAssessment: string | null,
   guidance: string | null,
   feedbackAnalysis: string | null = null,
-  prototypeContext: string | null = null
+  prototypeContext: string | null = null,
+  answers: string | null = null
 ): string {
   const tried = history.length
     ? `\n\n## Already attempted (these fixes did NOT work — do not repeat them)\n${history.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
@@ -797,7 +805,7 @@ export function fixPrompt(
 ${intent}
 
 ## Plan
-${finalPlan}
+${finalPlan}${humanAnswersBlock(answers)}
 
 ## What failed (most recent)
 ${failure}${tried}
@@ -866,7 +874,8 @@ VERDICT: ENV-FIXED | ENV-BLOCKED | CODE | FLAKE | GATE-MISCONFIGURED`
 export function convergePrompt(
   intent: string,
   priorSummaries: string[],
-  latestFailure: string
+  latestFailure: string,
+  answers: string | null = null
 ): string {
   const history = priorSummaries.length
     ? priorSummaries.map((s, i) => `${i + 1}. ${s}`).join('\n')
@@ -880,6 +889,8 @@ export function convergePrompt(
 
 Bias toward autonomy: a wrong TERMINAL abandons a task that may be nearly done. Use TERMINAL only when you can explain why neither code changes nor retrying later can help. When the same root cause recurs, prefer CONTINUE_CODE_FIX if the next fixer can try a clearly different strategy; otherwise choose ASK_HUMAN or TERMINAL.
 
+Human answers, when present below, are SETTLED decisions. If the latest failure hinges on a question those answers already resolve — even reworded — do not ASK_HUMAN it again: treat the answer as binding and decide between the other verdicts on the remaining technical merits.
+
 ## Task
 ${intent}
 
@@ -887,7 +898,7 @@ ${intent}
 ${history}
 
 ## Latest failure (full)
-${latestFailure}
+${latestFailure}${humanAnswersBlock(answers)}
 
 Output exactly two lines:
 SUMMARY: <one sentence naming the latest failure's root cause; for ASK_HUMAN, make this the exact question to ask>
@@ -902,6 +913,7 @@ export function rescuePrompt(input: {
   failures: string[]
   latestFailure: string
   guidance: string | null
+  answers?: string | null
 }): string {
   const history =
     input.failures.length > 0
@@ -926,7 +938,7 @@ Verdicts:
 
 Rules:
 - Be skeptical of CONTINUE_CODE_FIX after repeated same-root-cause failures. If you choose it, NEXT must be a specific fix strategy the implementer can follow.
-- If you choose ASK_HUMAN, NEXT must be exactly the question to ask.
+- If you choose ASK_HUMAN, NEXT must be exactly the question to ask. Human answers, when present below, are settled decisions — never re-ask one of them, even reworded.
 - If you choose RETRY_LATER, NEXT must name the external/transient condition.
 - If you choose TERMINAL, NEXT must explain why no autonomous move should continue.
 
@@ -934,7 +946,7 @@ Rules:
 ${input.intent}${verifyBlock(input.verify)}
 
 ## Final plan
-${input.finalPlan}
+${input.finalPlan}${humanAnswersBlock(input.answers ?? null)}
 
 ## Current diff
 \`\`\`diff
@@ -1293,7 +1305,8 @@ export function consolidatePrompt(
   diff: string,
   reports: Labeled[],
   baselineDiff: string | null,
-  guidance: string | null
+  guidance: string | null,
+  answers: string | null = null
 ): string {
   return `You are the lead engineer consolidating several independent expert reviews of the diff below into a single decision. Each report is one expert's findings; they overlap, sometimes conflict, and may include nits. Produce ONE verdict and ONE prioritized fix list — do not re-review from scratch.
 
@@ -1302,12 +1315,13 @@ Do this:
 - Drop non-issues: style nits, subjective polish, speculative concerns, or anything not grounded in the actual diff. Manufacturing work just drives churn.
 - Resolve conflicts by this priority (higher wins): correctness > security > deploy safety > test integrity (tests must have teeth) > the task's stated requirements > consistency with the codebase > simplicity > performance > UX polish > docs.
 - Classify each surviving finding as BLOCKING (a correctness, security, deploy-safety, requirements, or test-integrity defect that must be fixed before this ships) or ADVISORY (a real but non-blocking improvement). The experts' own BLOCKING/ADVISORY tags are hints, not votes — you own this call. Block on genuine defects, including concrete unsafe rollout, migration, compatibility, config, or rollback hazards. Treat general risk scores as context, not a veto; when a finding is borderline or a matter of degree, prefer ADVISORY so good work ships.
+- Human answers, when present below, are settled decisions: do not block on whether a decided approach is the right call, and never demand it be reversed. A finding about a decided approach stays BLOCKING only when it is a genuine defect within that decision — e.g. the decided behavior is implemented unsafely when a safe implementation exists.
 
 ## Task
 ${intent}
 
 ## Agreed plan
-${finalPlan}
+${finalPlan}${humanAnswersBlock(answers)}
 
 ## Diff
 \`\`\`diff
