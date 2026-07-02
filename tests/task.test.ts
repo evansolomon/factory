@@ -5,11 +5,13 @@ import { addBacklog, loadBacklog, removeBacklog } from '../src/backlog.ts'
 import type { Config, RepoContext, RoleAgents, WorkContext } from '../src/config.ts'
 import {
   addTask,
+  answeredQuestionRounds,
   appendFeedback,
   latestAnswerValue,
   latestAnswerValueAfter,
   loadTasks,
   markFeedbackConsumed,
+  matchAnsweredQuestion,
   nextRunnable,
   pendingFeedbackCount,
   readArtifact,
@@ -658,5 +660,76 @@ describe('phase-0 measurement contracts', () => {
     expect(history).toContain('Round 2 questions')
     expect(history).not.toContain('Round 3 questions')
     expect(await readArtifact(task, 'questions.md')).toBe('Round 3 questions')
+  })
+})
+
+describe('answered question rounds', () => {
+  // Mirrors a real incident: the converge judge asked the same security question
+  // three times, reworded, after the human had answered it twice.
+  const HISTORY = [
+    '--- questions.md (superseded 2026-07-02T06:53:22.614Z) ---',
+    'Should we re-key all read flags onto the host?',
+    '  Recommended: Yes — key all three flag checks on the host.',
+    '',
+    '--- questions.md (superseded 2026-07-02T07:12:03.501Z) ---',
+    'Factory needs human input before it can continue:',
+    '',
+    'Should inbound sync persist Google Calendar slot edits only after we switch to a per-host/app-mediated edit source that can prove the editor is the slot host, or should this task disable inbound persistence for the shared office_hours calendar?',
+  ].join('\n')
+  const CURRENT = [
+    'Factory needs human input before it can continue:',
+    '',
+    'Should inbound sync persist Google Calendar slot edits only after we can prove the editor is authorized for that slot, or should inbound persistence remain disabled for the shared office_hours calendar?',
+  ].join('\n')
+  const ANSWERS = [
+    '## Answer (2026-07-02T04:03:21.165Z)',
+    'Yes — key all three flag checks on the host.',
+    '',
+    '## Answer (2026-07-02T06:55:01.620Z)',
+    'We do want to sync inbound changes. Try to do it in the safest way possible. If there are unavoidable risks, call them out in the commit message and MR description.',
+    '',
+    '## Answer (2026-07-02T07:13:51.355Z)',
+    'go with your best idea',
+  ].join('\n')
+
+  test('pairs each answer with the round it responded to', () => {
+    const rounds = answeredQuestionRounds(HISTORY, CURRENT, ANSWERS)
+    expect(rounds).toHaveLength(3)
+    expect(rounds[0]?.question).toContain('re-key all read flags')
+    expect(rounds[0]?.answer).toContain('key all three flag checks')
+    expect(rounds[1]?.question).toContain('per-host/app-mediated edit source')
+    expect(rounds[1]?.answer).toContain('sync inbound changes')
+    expect(rounds[2]?.question).toContain('authorized for that slot')
+    expect(rounds[2]?.answer).toBe('go with your best idea')
+  })
+
+  test('a reworded variant of an answered question matches', () => {
+    const rounds = answeredQuestionRounds(HISTORY, CURRENT, ANSWERS)
+    const reasked =
+      'Factory needs human input before it can continue:\n\n' +
+      'Should inbound sync persist Google Calendar slot edits only after verified host attribution/audit-log authorization exists, or should inbound persistence be disabled for the shared office_hours calendar?'
+    const match = matchAnsweredQuestion(rounds, reasked)
+    // Best-similarity wins: either inbound-sync round is a legitimate standing
+    // answer; the unrelated flag-keying round must not be the match.
+    expect(match).not.toBeNull()
+    expect(match?.question).toContain('inbound sync persist')
+  })
+
+  test('an unrelated question does not match', () => {
+    const rounds = answeredQuestionRounds(HISTORY, CURRENT, ANSWERS)
+    const unrelated =
+      'Factory needs human input before it can continue:\n\n' +
+      'Which Postgres version should the new analytics warehouse target, and do we need a read replica?'
+    expect(matchAnsweredQuestion(rounds, unrelated)).toBeNull()
+  })
+
+  test('no answers means no rounds', () => {
+    expect(answeredQuestionRounds(HISTORY, CURRENT, null)).toEqual([])
+    expect(matchAnsweredQuestion([], 'anything at all?')).toBeNull()
+  })
+
+  test('an answer with no open round is dropped', () => {
+    const rounds = answeredQuestionRounds(null, null, ANSWERS)
+    expect(rounds).toEqual([])
   })
 })

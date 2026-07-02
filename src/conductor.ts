@@ -110,9 +110,11 @@ import {
   appendFailure,
   appendPassMeter,
   type Failure,
+  findAnsweredQuestion,
   type LiveMeter,
   latestAnswerValueAfter,
   markFeedbackConsumed,
+  NEEDS_INPUT_PREAMBLE,
   pendingFeedbackCount,
   readAnswers,
   readArtifact,
@@ -864,7 +866,7 @@ async function judgeFailure(
     agentLabel(ctx.agents.reviewer),
     runAgent(ctx.agents.reviewer, {
       root: ctx.root,
-      prompt: convergePrompt(intent, priorSummaries, failureForJudge),
+      prompt: convergePrompt(intent, priorSummaries, failureForJudge, await readAnswers(task)),
       access: 'read',
       outFile: `${task.dir}/converge.md`,
     })
@@ -877,14 +879,34 @@ async function judgeFailure(
       return { action: { kind: 'continue' }, summary }
     case 'RETRY_LATER':
       return { action: { kind: 'retry', reason: summary }, summary }
-    case 'ASK_HUMAN':
+    case 'ASK_HUMAN': {
+      // Mechanical backstop for the settled-decisions prompt rule: a judge that
+      // re-derives an already-answered question (one real task asked the same
+      // security question three times, reworded) does not get to pause the task.
+      // The standing answer rides the failure history; the fixer also sees the
+      // full answers.md. Fail-safe: at the attempt cap this continue is still
+      // overridden into a (differently-worded, non-matching) stuck question.
+      const answered = await findAnsweredQuestion(task, summary)
+      if (answered) {
+        log.warn(
+          `${task.id}: converge re-asked a question the human answered at ` +
+            `${answered.answeredAt}; continuing with the standing answer instead of pausing`
+        )
+        return {
+          action: { kind: 'continue' },
+          summary:
+            `re-derived an already-answered question; the standing answer applies: ` +
+            `${firstLine(answered.answer).slice(0, 200)}`,
+        }
+      }
       return {
         action: {
           kind: 'needs-input',
-          questions: `Factory needs human input before it can continue:\n\n${summary}`,
+          questions: `${NEEDS_INPUT_PREAMBLE}\n\n${summary}`,
         },
         summary,
       }
+    }
     case 'TERMINAL':
       return { action: { kind: 'terminal' }, summary }
     default:
@@ -1147,6 +1169,7 @@ async function rescueTerminalFailure(input: {
         failures: input.failures.map((f) => `${f.gate}: ${f.summary}`),
         latestFailure: input.latestFailure,
         guidance: input.guidance,
+        answers: await readAnswers(input.task),
       }),
       access: 'read',
       outFile: `${input.task.dir}/rescue.md`,
@@ -1170,11 +1193,31 @@ async function rescueTerminalFailure(input: {
     }
     case 'RETRY_LATER':
       return { kind: 'retry', reason: next }
-    case 'ASK_HUMAN':
+    case 'ASK_HUMAN': {
+      // Same backstop as the converge judge: an already-answered question is not
+      // a reason to pause — convert it into one more fix pass carrying the answer.
+      const answered = await findAnsweredQuestion(input.task, next)
+      if (answered) {
+        log.warn(
+          `${input.task.id}: rescue re-asked a question the human answered at ` +
+            `${answered.answeredAt}; continuing with the standing answer instead of pausing`
+        )
+        const entry: Failure = {
+          attempt: input.attempt,
+          gate: 'rescue',
+          summary: `re-derived an already-answered question; the standing answer applies`,
+          detail: `The human already answered this question (${answered.answeredAt}):\n${answered.answer}\n\nOriginal terminal failure:\n${input.latestFailure}`,
+          remediation: 'code-fix',
+        }
+        input.failures.push(entry)
+        await appendFailure(input.task, entry)
+        return { kind: 'continue' }
+      }
       return {
         kind: 'needs-input',
-        questions: `Factory needs human input before it can continue:\n\n${next}`,
+        questions: `${NEEDS_INPUT_PREAMBLE}\n\n${next}`,
       }
+    }
     case 'TERMINAL':
       return { kind: 'terminal' }
     default:
@@ -1959,6 +2002,11 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   let classifiedUserFacing = task.meta.userFacing
   let triageClassifiedUserFacing = false
 
+  // Standing human answers, read on BOTH paths: a resumed run re-enters at the
+  // gates, and the gate stages (consolidate, fix) need the settled decisions too —
+  // the one-shot resumeNote alone let the loop re-ask answered questions.
+  const answers = await readAnswers(task)
+
   // RESUME — reuse the saved plan + the existing worktree and pick up where the
   // task left off, skipping the (expensive) planning ensemble. The marker + any
   // human note are consumed here, so a later re-run starts fresh again.
@@ -1982,7 +2030,6 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       `${task.id}: resuming — reusing plan + existing work${resumeNote ? ' (with your note)' : ''}`
     )
   } else {
-    const answers = await readAnswers(task)
     const lessons = await readLessons(ctx)
 
     // 0. TRIAGE — classify the task; trivial ones skip the whole plan ensemble.
@@ -2259,7 +2306,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             riskAssessment,
             stageGuidance('fix'),
             feedbackContext?.analysis ?? null,
-            prototype
+            prototype,
+            answers
           )
         : implementPrompt(
             intent,
@@ -2501,7 +2549,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           diff,
           reports,
           baselineHasChanges ? baselineDiff : null,
-          stageGuidance('consolidate')
+          stageGuidance('consolidate'),
+          answers
         ),
         access: 'read',
         outFile: `${task.dir}/consolidated.md`,
