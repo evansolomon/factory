@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readdir, rm, stat } from 'node:fs/promises'
+import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { type ParsedAddOptions, parseAddOptions } from './add-options.ts'
@@ -8,15 +8,17 @@ import { openAgentSession } from './agent-session.ts'
 import { agentLabel, runAgent } from './agents.ts'
 import { askFactory } from './ask.ts'
 import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
-import { addBacklog, loadBacklog, removeBacklog } from './backlog.ts'
+import { addBacklog, type BacklogEntry, loadBacklog, removeBacklog } from './backlog.ts'
 import { runCompletion } from './completion.ts'
 import { AUTO_CAP, runTask, type TaskOutcome } from './conductor.ts'
 import {
   type Agent,
   ConfigError,
+  dispatchLogsDir,
   globalConfigFile,
   loadContext,
   loadRepoContext,
+  type RepoContext,
   sessionsDir,
   type WorkContext,
   worktreeMarkerPath,
@@ -30,7 +32,7 @@ import {
   type TaskDelivery,
 } from './delivery.ts'
 import { composeInEditor, openEditor } from './editor.ts'
-import { appendEvalResult, listEvalCases, runEvalCase } from './eval-run.ts'
+import { appendEvalResult, factoryInvocation, listEvalCases, runEvalCase } from './eval-run.ts'
 import { captureCorrection, captureEvalCase } from './evals.ts'
 import { run } from './exec.ts'
 import {
@@ -847,6 +849,71 @@ async function tendParkedTasks(ctx: WorkContext): Promise<void> {
   }
 }
 
+async function spawnViaCommand(
+  ctx: RepoContext,
+  entry: BacklogEntry,
+  spawn: string
+): Promise<boolean> {
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) {
+      env[key] = value
+    }
+  }
+  env['FACTORY_INTENT'] = entry.intent
+  env['FACTORY_NAME'] = entry.id
+  env['FACTORY_VERIFY'] = entry.verify ?? ''
+  const res = await run(['bash', '-lc', spawn], { cwd: ctx.mainRoot, stdin: '', env })
+  if (res.code !== 0) {
+    log.fail(
+      `spawn failed for ${entry.id} (exit ${res.code}): ${(res.stderr || res.stdout).slice(0, 300)}`
+    )
+    return false
+  }
+  return true
+}
+
+// The zero-config spawner: sibling worktree on a factory/<name> branch, task
+// queued with the backlog's name/intent/verify, and a detached
+// `factory run --until-done` whose output goes to $FACTORY_HOME/logs/<name>.log.
+// No tmux, no custom layout — configure dispatch.spawn to route through your own
+// tooling when you want those.
+async function spawnBuiltin(ctx: RepoContext, entry: BacklogEntry): Promise<boolean> {
+  const dir = `${ctx.mainRoot}-${entry.id}`
+  const branch = `factory/${entry.id}`
+  const wt = await run(['git', '-C', ctx.mainRoot, 'worktree', 'add', '-b', branch, dir], {
+    cwd: ctx.mainRoot,
+    stdin: '',
+  })
+  if (wt.code !== 0) {
+    log.fail(`worktree add failed for ${entry.id}: ${(wt.stderr || wt.stdout).slice(0, 300)}`)
+    return false
+  }
+  const invoke = factoryInvocation()
+  const addArgs = ['add', '--name', entry.id, entry.intent]
+  if (entry.verify) {
+    addArgs.push('--verify', entry.verify)
+  }
+  const added = await run([...invoke, ...addArgs], { cwd: dir, stdin: '' })
+  if (added.code !== 0) {
+    log.fail(`factory add failed for ${entry.id}: ${(added.stderr || added.stdout).slice(0, 300)}`)
+    return false
+  }
+  await mkdir(dispatchLogsDir(), { recursive: true })
+  const logFile = `${dispatchLogsDir()}/${entry.id}.log`
+  const quoted = invoke.map((part) => `'${part.replaceAll("'", `'\\''`)}'`).join(' ')
+  const detach = await run(
+    ['bash', '-lc', `nohup ${quoted} run --until-done --no-prompt >> '${logFile}' 2>&1 & disown`],
+    { cwd: dir, stdin: '' }
+  )
+  if (detach.code !== 0) {
+    log.fail(`could not start the run loop for ${entry.id}`)
+    return false
+  }
+  log.info(`  worktree ${dir} · branch ${branch} · log ${logFile}`)
+  return true
+}
+
 async function repoRootOrNull(cwd: string): Promise<string | null> {
   try {
     return await repoRoot(cwd)
@@ -1465,13 +1532,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     // by the spawner tool). Factory hands the item over; it does not queue
     // tasks internally or manage lanes.
     const ctx = await loadRepoContext(process.cwd())
-    const spawn = ctx.config.dispatch?.spawn
-    if (!spawn) {
-      log.fail(
-        'no dispatch.spawn command configured (set it in .factory.json or the global config)'
-      )
-      return 1
-    }
+    const spawn = ctx.config.dispatch?.spawn ?? null
     const dryRun = rest.includes('--dry-run')
     const limitIdx = rest.indexOf('--limit')
     const limit = limitIdx !== -1 ? Number(rest[limitIdx + 1]) : Number.POSITIVE_INFINITY
@@ -1495,20 +1556,8 @@ export async function main(opts: MainOptions = {}): Promise<number> {
         continue
       }
       log.step(`dispatching ${entry.id}`)
-      const env: Record<string, string> = {}
-      for (const [key, value] of Object.entries(process.env)) {
-        if (value !== undefined) {
-          env[key] = value
-        }
-      }
-      env['FACTORY_INTENT'] = entry.intent
-      env['FACTORY_NAME'] = entry.id
-      env['FACTORY_VERIFY'] = entry.verify ?? ''
-      const res = await run(['bash', '-lc', spawn], { cwd: ctx.mainRoot, stdin: '', env })
-      if (res.code !== 0) {
-        log.fail(
-          `spawn failed for ${entry.id} (exit ${res.code}): ${(res.stderr || res.stdout).slice(0, 300)}`
-        )
+      const ok = spawn ? await spawnViaCommand(ctx, entry, spawn) : await spawnBuiltin(ctx, entry)
+      if (!ok) {
         log.info('stopping dispatch; the item stays in the backlog')
         return 1
       }

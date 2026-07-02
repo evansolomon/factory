@@ -192,13 +192,14 @@ const ConfigSchema = z.object({
   // gate — the structural cause of the worst fix loops. Only set 'full' in
   // repos you trust factory to run unattended anyway.
   implementerAccess: z.enum(['write', 'full']).default('write'),
-  // The dispatcher's spawn command: how a backlog item becomes a live
-  // workstream. Factory does NOT manage lanes or worktrees itself — the spawner
-  // tool (e.g. a bootstrap script creating tmux window + worktree + factory run)
-  // owns that. The command runs once per dispatched item via `bash -lc` with
+  // OPTIONAL override for how `factory dispatch` turns a backlog item into a
+  // live workstream. The built-in default needs no config: it creates a sibling
+  // worktree on a factory/<name> branch and starts a detached
+  // `factory run --until-done` in it, logging under $FACTORY_HOME/logs/. Set a
+  // custom spawn command to route through your own tooling instead (tmux
+  // windows, custom worktree layout): it runs once per item via `bash -lc` with
   // FACTORY_INTENT / FACTORY_NAME / FACTORY_VERIFY in its environment; exit 0
-  // removes the item from the backlog. null (default) = `factory dispatch` is
-  // unavailable.
+  // removes the item from the backlog.
   dispatch: z
     .object({
       spawn: z.string().min(1),
@@ -322,6 +323,11 @@ export function sessionsDir(): string {
 // entries override same-named globals).
 export function globalSkillsDir(): string {
   return `${factoryHome()}/skills`
+}
+
+// Where the built-in dispatcher writes each spawned workstream's run output.
+export function dispatchLogsDir(): string {
+  return `${factoryHome()}/logs`
 }
 
 // Each session (per-worktree) state dir records which worktree it belongs to,

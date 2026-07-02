@@ -105,7 +105,7 @@ export type EvalResult = {
 
 // How factory re-invokes itself: the compiled binary IS the entrypoint; a
 // source run needs `bun <cli.ts>`.
-function factoryInvocation(): string[] {
+export function factoryInvocation(): string[] {
   const script = process.argv[1]
   return script && /\.(ts|js|mjs)$/.test(script) ? [process.execPath, script] : [process.execPath]
 }
