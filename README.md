@@ -583,8 +583,10 @@ Fields:
 
   Inspect or override a task with `factory delivery`: `factory delivery`, `factory
   delivery none`, `factory delivery '$ship'`, or `factory delivery "open a PR and
-  do not merge"`. Delivery failure is treated like a transient gate failure: the task
-  is set aside for auto-retry and only blocks after the auto-retry cap is spent.
+  do not merge"`. With no active task, the command targets the latest completed
+  task; choosing a side-effecting delivery for that task runs delivery immediately.
+  Delivery failure is treated like a transient gate failure: the task is set aside
+  for auto-retry and only blocks after the auto-retry cap is spent.
 
 Successful pipeline-completed tasks also get local completion artifacts after
 optional delivery: `feedback.md` for the concise markdown handoff, and best-effort

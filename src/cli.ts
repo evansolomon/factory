@@ -11,7 +11,7 @@ import { type AlertState, createAttentionTracker } from './attention.ts'
 import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
 import { addBacklog, type BacklogEntry, loadBacklog, removeBacklog } from './backlog.ts'
 import { runCompletion } from './completion.ts'
-import { AUTO_CAP, runTask, type TaskOutcome } from './conductor.ts'
+import { AUTO_CAP, deliverTask, runTask, type TaskOutcome } from './conductor.ts'
 import {
   type Agent,
   ConfigError,
@@ -28,6 +28,7 @@ import {
 } from './config.ts'
 import { openDeck } from './deck.ts'
 import {
+  deliveryAction,
   deliveryLabel,
   extractDeliveryDirective,
   listDeliverySkills,
@@ -425,7 +426,9 @@ async function inferTaskTarget(ctx: WorkContext, taskQuery: string | null): Prom
     return task
   }
 
-  const tasks = (await loadTasks(ctx)).filter((task) => task.meta.status !== 'done')
+  const tasks = (await loadTasks(ctx)).filter(
+    (task) => task.meta.status !== 'done' && task.meta.status !== 'closed'
+  )
   if (tasks.length === 0) {
     throw new Error('no active task in this factory')
   }
@@ -442,6 +445,31 @@ async function inferTaskTarget(ctx: WorkContext, taskQuery: string | null): Prom
 
   const choices = tasks.map((task) => `${task.id} (${task.meta.status})`).join(', ')
   throw new Error(`multiple active tasks; retry with --task <id>\nactive tasks: ${choices}`)
+}
+
+async function inferDeliveryTaskTarget(
+  ctx: WorkContext,
+  taskQuery: string | null
+): Promise<{ task: Task; wasDone: boolean }> {
+  if (taskQuery) {
+    const task = await inferTaskTarget(ctx, taskQuery)
+    return { task, wasDone: task.meta.status === 'done' }
+  }
+
+  try {
+    const task = await inferTaskTarget(ctx, null)
+    return { task, wasDone: false }
+  } catch (err) {
+    if (!(err instanceof Error) || err.message !== 'no active task in this factory') {
+      throw err
+    }
+  }
+
+  const done = await latestTask(ctx, ['done'])
+  if (!done) {
+    throw new Error('no active or completed task in this factory')
+  }
+  return { task: done, wasDone: true }
 }
 
 function guidanceScopeText(record: GuidanceRecord): string {
@@ -832,7 +860,7 @@ async function taskDelivery(ctx: WorkContext, args: string[]): Promise<number> {
     return 1
   }
   try {
-    const task = await inferTaskTarget(ctx, parsed.taskQuery)
+    const { task, wasDone } = await inferDeliveryTaskTarget(ctx, parsed.taskQuery)
     const value = parsed.args.join(' ').trim()
     if (value) {
       await setTaskDelivery(
@@ -840,6 +868,62 @@ async function taskDelivery(ctx: WorkContext, args: string[]): Promise<number> {
         parseManualDelivery(value, await listDeliverySkills(ctx.root, ctx.repoStateDir))
       )
       log.ok(`${task.id}: delivery set to ${deliveryLabel(task.meta.delivery)}`)
+      if (wasDone && deliveryAction(task.meta.delivery)) {
+        let outcome: TaskOutcome
+        try {
+          outcome = await deliverTask(ctx, task)
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err)
+          await setStatus(task, 'blocked', reason)
+          await captureEvalCase(ctx, task, 'blocked', reason)
+          await emit(ctx.root, ctx.config.hooks, 'task.blocked', {
+            task: task.id,
+            reason,
+          })
+          log.fail(`${task.id}: blocked — ${reason}`)
+          return 1
+        } finally {
+          await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+        }
+        if (outcome.ok) {
+          await setStatus(task, 'done')
+          await emit(ctx.root, ctx.config.hooks, 'task.done', {
+            task: task.id,
+            commit: task.meta.commit,
+          })
+          log.ok(`${task.id}: delivered`)
+        } else if (outcome.kind === 'needs-input') {
+          await setStatus(task, 'needs-input', 'awaiting answer — see questions.md')
+          await emit(ctx.root, ctx.config.hooks, 'task.needs_input', { task: task.id })
+          log.warn(`${task.id}: needs input — run: factory add "..."`)
+          return 1
+        } else if (outcome.kind === 'retrying') {
+          task.meta.autoRetries = outcome.autoRetries
+          task.meta.retryAt = outcome.retryAt
+          await setStatus(task, 'retrying', outcome.reason)
+          await emit(ctx.root, ctx.config.hooks, 'task.retrying', {
+            task: task.id,
+            reason: outcome.reason,
+            retryAt: outcome.retryAt,
+          })
+          const retryCount =
+            outcome.autoRetries <= AUTO_CAP
+              ? `${outcome.autoRetries}/${AUTO_CAP}`
+              : `${outcome.autoRetries} (past cap; judge approved)`
+          const retryTime = new Date(outcome.retryAt).toLocaleTimeString()
+          log.warn(`${task.id}: ${outcome.reason} — auto-retry ${retryCount} at ${retryTime}`)
+          return 1
+        } else {
+          await setStatus(task, 'blocked', outcome.reason)
+          await captureEvalCase(ctx, task, 'blocked', outcome.reason)
+          await emit(ctx.root, ctx.config.hooks, 'task.blocked', {
+            task: task.id,
+            reason: outcome.reason,
+          })
+          log.fail(`${task.id}: blocked — ${outcome.reason}`)
+          return 1
+        }
+      }
       return 0
     }
     log.log(`task: ${task.id}`)

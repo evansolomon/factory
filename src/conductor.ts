@@ -676,6 +676,14 @@ export function resumeUserFacing(
   return uxEnabled && (persisted ?? diffUserFacing)
 }
 
+async function stageGuidanceForRun(ctx: WorkContext, meter: Meter): Promise<StageGuidance> {
+  const guidance = await loadGuidance().catch((err) => {
+    log.warn(`guidance load failed: ${err instanceof Error ? err.message : err}`)
+    return []
+  })
+  return (stage) => renderGuidanceBlock(applicableGuidance(guidance, ctx, stage), meter.guidanceIds)
+}
+
 // Persist one telemetry record for this pass. Best-effort: recordRun never throws,
 // so a telemetry failure can't break the task.
 function recordTask(
@@ -1981,12 +1989,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   await persistLiveMeter(meter)
   const lead = ctx.agents.implementer
   const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null }
-  const guidance = await loadGuidance().catch((err) => {
-    log.warn(`guidance load failed: ${err instanceof Error ? err.message : err}`)
-    return []
-  })
-  const stageGuidance: StageGuidance = (stage) =>
-    renderGuidanceBlock(applicableGuidance(guidance, ctx, stage), meter.guidanceIds)
+  const stageGuidance = await stageGuidanceForRun(ctx, meter)
 
   const baselineDiff = await worktreeDiff(ctx.root)
   const baselineHasChanges = await hasChanges(ctx.root)
@@ -2951,6 +2954,15 @@ async function shipAndFinish(
   logTotal(meter)
   recordTask(ctx, task, meter, 'done', stats)
   return { ok: true }
+}
+
+export async function deliverTask(ctx: WorkContext, task: Task): Promise<TaskOutcome> {
+  const intent = await readIntent(task)
+  await sweepInterruptedMeter(task)
+  const meter = newMeter(task)
+  await persistLiveMeter(meter)
+  const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null }
+  return shipAndFinish(ctx, task, intent, meter, stats, await stageGuidanceForRun(ctx, meter))
 }
 
 async function synthesizeCommitMessage(

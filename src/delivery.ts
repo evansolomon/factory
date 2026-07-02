@@ -78,6 +78,17 @@ export function parseManualDelivery(value: string, skills: DeliverySkill[]): Tas
     }
   }
 
+  const namedSkill = skills.find((skill) => skill.name.toLowerCase() === lower)
+  if (namedSkill) {
+    return {
+      mode: 'skill',
+      skill: namedSkill.name,
+      source: 'manual',
+      confidence: 'high',
+      reason: `User manually requested ${namedSkill.name}.`,
+    }
+  }
+
   const explicit = extractDeliveryDirective(trimmed, skills).delivery
   if (explicit?.mode === 'skill') {
     return { ...explicit, source: 'manual', reason: `User manually requested ${trimmed}.` }
