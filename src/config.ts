@@ -1,6 +1,7 @@
+import { hostname } from 'node:os'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import { mainWorktreeRoot, repoRoot } from './git.ts'
+import { mainWorktreeRoot, originUrl, repoRoot } from './git.ts'
 import { log } from './log.ts'
 
 const ReasoningEffortSchema = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh'])
@@ -183,6 +184,47 @@ const ConfigSchema = z.object({
   // Run a read-only rescue strategist before a terminal block. It may authorize
   // one sharper code-fix attempt, ask the human, retry later, or accept the block.
   rescue: z.boolean().default(true),
+  // Filesystem/network reach of the implement/fix stages. 'write' (default) is
+  // the sandboxed workspace-write mode; 'full' removes the sandbox so the
+  // implementer can run the repo's real checks (daemonized services, sockets,
+  // DBs) DURING implementation. In sandbox-restricted repos the implementer
+  // shipped blind and every failure was discovered at the expensive verify
+  // gate — the structural cause of the worst fix loops. Only set 'full' in
+  // repos you trust factory to run unattended anyway.
+  implementerAccess: z.enum(['write', 'full']).default('write'),
+  // The dispatcher's spawn command: how a backlog item becomes a live
+  // workstream. Factory does NOT manage lanes or worktrees itself — the spawner
+  // tool (e.g. a bootstrap script creating tmux window + worktree + factory run)
+  // owns that. The command runs once per dispatched item via `bash -lc` with
+  // FACTORY_INTENT / FACTORY_NAME / FACTORY_VERIFY in its environment; exit 0
+  // removes the item from the backlog. null (default) = `factory dispatch` is
+  // unavailable.
+  dispatch: z
+    .object({
+      spawn: z.string().min(1),
+    })
+    .nullable()
+    .default(null),
+  // The earned-autonomy dial for delivery confirmation. When set, an
+  // auto-selected side-effecting delivery ($pr/$ship) no longer pauses for
+  // human confirmation IF the repo's recent telemetry has earned it: at least
+  // `minTasks` recent terminal tasks with a first-pass yield (done, zero fix
+  // retries) at or above `minFirstPassYield`. Autonomy expands exactly as fast
+  // as the numbers justify and contracts automatically when they dip. null
+  // (default) = always confirm side-effecting deliveries.
+  autoShip: z
+    .object({
+      minFirstPassYield: z.number().min(0).max(1),
+      minTasks: z.number().int().positive(),
+    })
+    .nullable()
+    .default(null),
+  // Auto-accept recommended answers: when a needs-input task's questions ALL
+  // carry a recommended answer and nobody has replied for this many minutes, the
+  // loop proceeds with the recommendations (recorded as an explicit, reviewable
+  // answer). null (default) = never auto-accept — asking is a quality instrument
+  // and silence may mean the human wants to weigh in; opt in deliberately.
+  autoAcceptAfterMinutes: z.number().int().positive().nullable().default(null),
   // User-authored standing policy files the workforce planner may attach to
   // specific research scouts or review lenses. Relative paths resolve from root.
   specialists: z.record(z.string(), SpecialistPolicySchema).default({}),
@@ -272,6 +314,34 @@ export function guidanceDir(): string {
   return `${factoryHome()}/guidance`
 }
 
+export function sessionsDir(): string {
+  return `${factoryHome()}/sessions`
+}
+
+// Machine-wide delivery skills, available in every repo (a repo's .skills/
+// entries override same-named globals).
+export function globalSkillsDir(): string {
+  return `${factoryHome()}/skills`
+}
+
+// Each session (per-worktree) state dir records which worktree it belongs to,
+// so `factory gc` can tell that the worktree was torn down. The path→key
+// encoding is lossy (dashes), so the reverse mapping must be stored, not derived.
+export function worktreeMarkerPath(stateDir: string): string {
+  return `${stateDir}/worktree.json`
+}
+
+export async function writeWorktreeMarker(stateDir: string, root: string): Promise<void> {
+  const path = worktreeMarkerPath(stateDir)
+  if (!(await Bun.file(path).exists())) {
+    await Bun.write(
+      path,
+      `${JSON.stringify({ root })}
+`
+    )
+  }
+}
+
 // Candidate config files in priority order, lowest first: the global base, then
 // each ancestor from the filesystem root down to the worktree (closest wins).
 function configCandidates(root: string): string[] {
@@ -292,6 +362,28 @@ function mergeHooks(
   const merged = { ...(base ?? {}) }
   for (const [event, commands] of Object.entries(incoming)) {
     merged[event] = [...new Set([...(merged[event] ?? []), ...commands])]
+  }
+  return merged
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+// `agents` and `specialists` merge PER KEY across the cascade instead of
+// closest-file-wins for the whole object. A worktree override like
+// {"agents": {"implementer": "codex"}} used to silently reset every OTHER role
+// (reviewer, planners, namer) to defaults — the single worst config footgun.
+// Within `agents`, the nested researcher/reviewer pools merge per key too.
+function mergeObjectKey(base: unknown, incoming: unknown, nestedMergeKeys: string[] = []): unknown {
+  if (!isPlainObject(base) || !isPlainObject(incoming)) {
+    return incoming
+  }
+  const merged: Record<string, unknown> = { ...base, ...incoming }
+  for (const key of nestedMergeKeys) {
+    if (isPlainObject(base[key]) && isPlainObject(incoming[key])) {
+      merged[key] = { ...base[key], ...incoming[key] }
+    }
   }
   return merged
 }
@@ -342,10 +434,16 @@ export async function loadConfig(root: string): Promise<Config> {
       hooks = result.data
     }
 
-    const priorHooks = merged['hooks'] as Record<string, string[]> | undefined
+    const prior = merged
     merged = { ...merged, ...raw }
     if (hooks) {
-      merged['hooks'] = mergeHooks(priorHooks, hooks)
+      merged['hooks'] = mergeHooks(prior['hooks'] as Record<string, string[]> | undefined, hooks)
+    }
+    if ('agents' in raw) {
+      merged['agents'] = mergeObjectKey(prior['agents'], raw.agents, ['researchers', 'reviewers'])
+    }
+    if ('specialists' in raw) {
+      merged['specialists'] = mergeObjectKey(prior['specialists'], raw.specialists)
     }
     sources.push(path)
   }
@@ -368,11 +466,16 @@ export type WorkContext = {
   agents: RoleAgents
   // Agent used only for `factory ask`.
   askAgent: Agent
-  // Repo-level state dir (keyed by the main worktree, like the backlog), shared
+  // Repo-level state dir (keyed by repo identity — normalized origin), shared
   // across the repo's worktrees — holds the telemetry db and LESSONS (the meta
   // loop), so both accumulate across worktrees instead of resetting per branch.
   repoStateDir: string
   metricsPath: string
+  // Machine-specific layer of repo state: the environment playbook. Provisioning
+  // steps and known quirks WITH their fixes, written by the remediation doctor,
+  // read before every diagnosis. Repo×machine because its content (container
+  // memory limits, sockets, local DB names) is not portable across hosts.
+  envPlaybookPath: string
 }
 
 function resolveAgents(config: Config): RoleAgents {
@@ -401,6 +504,52 @@ function worktreeKey(root: string): string {
   return root.replace(/\//g, '-').replace(/^-+/, '')
 }
 
+// The repo is a first-class concept, identified by its origin remote rather than
+// where a clone happens to live on disk — so the same repo shares one body of
+// repo-level state (lessons, metrics, evals, delivery history) across hosts and
+// checkout paths. Normalizes the common URL shapes to one canonical form:
+//   https://user:tok@GitHub.com/evansolomon/factory.git
+//   ssh://git@github.com/evansolomon/factory
+//   git@github.com:evansolomon/factory.git
+// all → github.com/evansolomon/factory. Host is case-insensitive (lowered);
+// the path is preserved as-is apart from the trailing `.git`.
+export function normalizeOrigin(url: string): string | null {
+  let rest = url.trim()
+  const protocol = rest.match(/^[a-z][a-z0-9+.-]*:\/\//i)
+  if (protocol) {
+    rest = rest.slice(protocol[0].length)
+  } else {
+    // scp-like syntax: [user@]host:path
+    const scp = rest.match(/^(?:[^@/]+@)?([^:/]+):(.+)$/)
+    if (scp?.[1] && scp[2]) {
+      rest = `${scp[1]}/${scp[2]}`
+    }
+  }
+  // credentials, port
+  rest = rest.replace(/^[^@/]+@/, '')
+  const slash = rest.indexOf('/')
+  if (slash <= 0) {
+    return null
+  }
+  const host = rest.slice(0, slash).replace(/:\d+$/, '').toLowerCase()
+  const path = rest
+    .slice(slash + 1)
+    .replace(/\.git$/, '')
+    .replace(/\/+$/, '')
+  if (!host || !path) {
+    return null
+  }
+  return `${host}/${path}`
+}
+
+// Filesystem key for a repo's state dir under <base>/repos/. Derived from the
+// normalized origin; falls back to the main worktree's path key for repos with
+// no origin remote.
+export function repoKey(origin: string | null, mainRoot: string): string {
+  const normalized = origin ? normalizeOrigin(origin) : null
+  return normalized ? normalized.replace(/\//g, '-') : worktreeKey(mainRoot)
+}
+
 function resolveStateDir(root: string, config: Config): string {
   const dir = config.dir
   if (dir) {
@@ -413,6 +562,21 @@ function resolveStateDir(root: string, config: Config): string {
   // root, which holds config.json + hooks/. (An explicit absolute/~ `dir` above is
   // the user's own base — left as <base>/<key>, no sessions/ namespace imposed.)
   return `${factoryHome()}/sessions/${worktreeKey(root)}`
+}
+
+// Repo-level state (lessons, metrics, eval candidates, delivery history, the env
+// playbook) is keyed by repo identity, not checkout path. An in-repo `dir`
+// (relative) keeps repo state in the main worktree as before — it's committed,
+// so it travels with the repo already. Otherwise state lives under
+// <base>/repos/<repo-key>, where <base> is the explicit absolute/~ `dir` or the
+// factory home.
+function resolveRepoStateDir(mainRoot: string, config: Config, origin: string | null): string {
+  const dir = config.dir
+  if (dir && !dir.startsWith('/') && !dir.startsWith('~')) {
+    return `${mainRoot}/${dir}`
+  }
+  const base = dir ? expandTilde(dir) : factoryHome()
+  return `${base}/repos/${repoKey(origin, mainRoot)}`
 }
 
 function resolvePlansDir(root: string, config: Config): string | null {
@@ -432,7 +596,7 @@ export async function loadContext(cwd: string): Promise<WorkContext> {
   const stateDir = resolveStateDir(root, config)
   const mainRoot = await mainWorktreeRoot(cwd)
   const mainConfig = mainRoot === root ? config : await loadConfig(mainRoot)
-  const repoStateDir = resolveStateDir(mainRoot, mainConfig)
+  const repoStateDir = resolveRepoStateDir(mainRoot, mainConfig, await originUrl(mainRoot))
   return {
     root,
     config,
@@ -443,6 +607,7 @@ export async function loadContext(cwd: string): Promise<WorkContext> {
     askAgent: normAgent(config.ask.agent),
     repoStateDir,
     metricsPath: `${repoStateDir}/metrics.db`,
+    envPlaybookPath: `${repoStateDir}/env/${hostname()}.md`,
   }
 }
 
@@ -460,12 +625,12 @@ export type RepoContext = {
 export async function loadRepoContext(cwd: string): Promise<RepoContext> {
   const mainRoot = await mainWorktreeRoot(cwd)
   const config = await loadConfig(mainRoot)
-  const stateDir = resolveStateDir(mainRoot, config)
+  const repoStateDir = resolveRepoStateDir(mainRoot, config, await originUrl(mainRoot))
   return {
     mainRoot,
     config,
-    backlogDir: `${stateDir}/backlog`,
-    metricsPath: `${stateDir}/metrics.db`,
+    backlogDir: `${repoStateDir}/backlog`,
+    metricsPath: `${repoStateDir}/metrics.db`,
     agents: resolveAgents(config),
   }
 }

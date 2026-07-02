@@ -42,6 +42,27 @@ function transcript(turns: Turn[]): string {
 
 export type Parsed = { ready: boolean; verify: string | null; spec: string; message: string }
 
+// The VERIFY value is executed verbatim with `bash -lc`, so markdown decoration
+// is not cosmetic: a model wrapping the command in backticks turned it into a
+// command substitution that EXECUTED the command's own output — every verify
+// attempt exited 127, and two real tasks died against that wall for ~22 hours.
+// Strip inline-code fences and quotes that clearly wrap the whole command.
+export function sanitizeVerifyCommand(raw: string): string {
+  let cmd = raw.trim()
+  for (const wrap of ['```', '``', '`', '"', "'"]) {
+    if (cmd.length <= wrap.length * 2 || !cmd.startsWith(wrap) || !cmd.endsWith(wrap)) {
+      continue
+    }
+    const inner = cmd.slice(wrap.length, -wrap.length)
+    // Only strip a genuine wrapper: if the interior uses the same character
+    // (e.g. `'a' && 'b'`), the quotes are part of the command, not decoration.
+    if (!inner.includes(wrap)) {
+      cmd = inner.trim()
+    }
+  }
+  return cmd
+}
+
 // The agent signals completion with a `SPEC READY` line; until then everything
 // is conversational. Parse out the spec + verify when present.
 export function parseSharpen(text: string): Parsed {
@@ -52,7 +73,7 @@ export function parseSharpen(text: string): Parsed {
   const message = text.slice(0, marker.index).trim()
   const after = text.slice(marker.index + marker[0].length)
   const vmatch = /^VERIFY:\s*(.*)$/m.exec(after)
-  const rawVerify = vmatch?.[1]?.trim() ?? ''
+  const rawVerify = sanitizeVerifyCommand(vmatch?.[1] ?? '')
   const verify = rawVerify && !/^none$/i.test(rawVerify) ? rawVerify : null
   const spec = (vmatch ? after.slice(vmatch.index + vmatch[0].length) : after).trim()
   return { ready: true, verify, spec, message }

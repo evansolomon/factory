@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { $ } from 'bun'
-import { ConfigError, loadConfig, loadContext } from '../src/config.ts'
+import { ConfigError, loadConfig, loadContext, normalizeOrigin, repoKey } from '../src/config.ts'
 
 async function tempDir(prefix: string): Promise<string> {
   return await mkdtemp(`${tmpdir()}/factory-${prefix}-`)
@@ -187,6 +187,113 @@ describe('config cascade', () => {
 
       expect(ctx.stateDir).toBe(`${home}/sessions/${key}`)
       expect(ctx.tasksDir).toBe(`${home}/sessions/${key}/tasks`)
+    })
+  })
+})
+
+describe('repo identity', () => {
+  test('normalizes the common origin URL shapes to one canonical form', () => {
+    const canonical = 'github.com/evansolomon/factory'
+    expect(normalizeOrigin('https://github.com/evansolomon/factory.git')).toBe(canonical)
+    expect(normalizeOrigin('https://user:token@GitHub.com/evansolomon/factory.git')).toBe(canonical)
+    expect(normalizeOrigin('ssh://git@github.com/evansolomon/factory')).toBe(canonical)
+    expect(normalizeOrigin('ssh://git@github.com:22/evansolomon/factory.git')).toBe(canonical)
+    expect(normalizeOrigin('git@github.com:evansolomon/factory.git')).toBe(canonical)
+    expect(normalizeOrigin('git://github.com/evansolomon/factory')).toBe(canonical)
+    expect(normalizeOrigin('https://gitlab.com/group/sub/project.git')).toBe(
+      'gitlab.com/group/sub/project'
+    )
+  })
+
+  test('rejects unusable origin values', () => {
+    expect(normalizeOrigin('')).toBeNull()
+    expect(normalizeOrigin('not-a-url')).toBeNull()
+    expect(normalizeOrigin('https://hostonly')).toBeNull()
+  })
+
+  test('repoKey uses the normalized origin and falls back to the path key', () => {
+    expect(repoKey('git@github.com:evansolomon/factory.git', '/data/repos/factory')).toBe(
+      'github.com-evansolomon-factory'
+    )
+    expect(repoKey(null, '/data/repos/factory')).toBe('data-repos-factory')
+    expect(repoKey('not-a-url', '/data/repos/factory')).toBe('data-repos-factory')
+  })
+
+  test('repo state lives under repos/<origin-key> regardless of checkout path', async () => {
+    await withFactoryHome(async (home) => {
+      const base = await tempDir('origin-repo')
+      const root = `${base}/repo`
+      await mkdir(root, { recursive: true })
+      await $`git -C ${root} init`.quiet()
+      await $`git -C ${root} remote add origin git@github.com:evansolomon/factory.git`.quiet()
+
+      const ctx = await loadContext(root)
+
+      expect(ctx.repoStateDir).toBe(`${home}/repos/github.com-evansolomon-factory`)
+      expect(ctx.metricsPath).toBe(`${home}/repos/github.com-evansolomon-factory/metrics.db`)
+      // Per-worktree session state still keys by path — worktrees ARE local.
+      expect(ctx.stateDir.startsWith(`${home}/sessions/`)).toBe(true)
+    })
+  })
+
+  test('repo state falls back to the path key without an origin remote', async () => {
+    await withFactoryHome(async (home) => {
+      const base = await tempDir('no-origin')
+      const root = `${base}/repo`
+      await mkdir(root, { recursive: true })
+      await $`git -C ${root} init`.quiet()
+
+      const ctx = await loadContext(root)
+      const key = ctx.root.replace(/\//g, '-').replace(/^-+/, '')
+
+      expect(ctx.repoStateDir).toBe(`${home}/repos/${key}`)
+    })
+  })
+})
+
+describe('cascade deep-merge for agents and specialists', () => {
+  test('a partial agents override does not reset sibling roles', async () => {
+    await withFactoryHome(async (home) => {
+      const base = await tempDir('agents-merge')
+      const root = `${base}/repo`
+      await mkdir(root, { recursive: true })
+      await writeJson(`${home}/config.json`, {
+        agents: {
+          reviewer: { cli: 'codex', model: 'gpt-5.4' },
+          researchers: { runtime: 'claude' },
+        },
+      })
+      await writeJson(`${root}/.factory.json`, {
+        agents: { implementer: 'claude', researchers: { history: 'codex' } },
+      })
+
+      const config = await loadConfig(root)
+
+      expect(config.agents.implementer).toBe('claude')
+      // Sibling role from the lower layer survives the partial override.
+      expect(config.agents.reviewer).toEqual({ cli: 'codex', model: 'gpt-5.4' })
+      // Nested pools merge per key too.
+      expect(config.agents.researchers).toEqual({ runtime: 'claude', history: 'codex' })
+      // Untouched roles still default.
+      expect(config.agents.planners).toEqual(['codex', 'claude'])
+    })
+  })
+
+  test('specialists merge per policy name across the cascade', async () => {
+    await withFactoryHome(async (home) => {
+      const base = await tempDir('specialists-merge')
+      const root = `${base}/repo`
+      await mkdir(root, { recursive: true })
+      await writeJson(`${home}/config.json`, {
+        specialists: { deploy: { path: 'policies/deploy.md' } },
+      })
+      await writeJson(`${root}/.factory.json`, {
+        specialists: { security: { path: 'policies/security.md' } },
+      })
+
+      const config = await loadConfig(root)
+
+      expect(Object.keys(config.specialists).sort()).toEqual(['deploy', 'security'])
     })
   })
 })

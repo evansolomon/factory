@@ -50,6 +50,10 @@ function testConfig(): Config {
     remediate: true,
     workforce: true,
     rescue: true,
+    autoAcceptAfterMinutes: null,
+    implementerAccess: 'write',
+    autoShip: null,
+    dispatch: null,
     specialists: {},
     hooks: {},
     agents: {
@@ -84,6 +88,7 @@ function testContext(repoStateDir: string, root = '/repo'): WorkContext {
     askAgent: agent,
     repoStateDir,
     metricsPath: `${repoStateDir}/metrics.db`,
+    envPlaybookPath: `${repoStateDir}/env/test-host.md`,
   }
 }
 
@@ -298,5 +303,37 @@ describe('guidance rendering', () => {
     expect(bullets).toHaveLength(12)
     expect(block).toContain('id13')
     expect(block).not.toContain('id0')
+  })
+})
+
+import { guidanceSimilarity, recordGuidanceOutcome } from '../src/guidance.ts'
+
+describe('guidance scoring and dedup', () => {
+  test('similarity is high for near-duplicate lessons and low for unrelated ones', () => {
+    const a = 'When tapioca RBI regeneration is OOM-killed, re-run with --no-regen'
+    const b = 'If tapioca RBI regen gets OOM killed, rerun using the --no-regen flag'
+    const c = 'Always preload associations to avoid N+1 queries in serializers'
+    expect(guidanceSimilarity(a, b)).toBeGreaterThan(0.5)
+    expect(guidanceSimilarity(a, c)).toBeLessThan(0.2)
+    expect(guidanceSimilarity('', 'anything')).toBe(0)
+  })
+
+  test('recordGuidanceOutcome accumulates and retires sustained losers', async () => {
+    await withFactoryHome(async () => {
+      const ctx = testContext(await tempDir('guidance-score'))
+      const record = await createGuidanceRecord(ctx, {
+        source: { kind: 'postmortem', taskId: null, detail: null },
+        scope: { kind: 'global' },
+        stages: ['fix'],
+        text: 'A lesson that keeps failing',
+      })
+      for (let i = 0; i < 8; i++) {
+        await recordGuidanceOutcome([record.id], 'blocked')
+      }
+      const after = (await loadGuidance()).find((r) => r.id === record.id)
+      expect(after?.applied).toBe(8)
+      expect(after?.losses).toBe(8)
+      expect(after?.status).toBe('retired')
+    })
   })
 })

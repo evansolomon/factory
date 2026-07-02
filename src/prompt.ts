@@ -15,7 +15,7 @@ import { composeInEditor } from './editor.ts'
 import { log, setActivePrompt } from './log.ts'
 import { formatQuestionAnswer, parseFormattedQuestions, type Question } from './sharpen.ts'
 import { BOLD, RESET, renderAgentMarkdown, styleSharpenMarkdownLine } from './sharpen-render.ts'
-import { appendAnswer, loadTasks, setStatus, type Task } from './task.ts'
+import { answerTask, loadTasks, type Task } from './task.ts'
 
 const POLL_MS = 500
 
@@ -106,8 +106,7 @@ async function promptTask(task: Task, deferred: Set<string>): Promise<void> {
       log.info(`  deferred — answer later with: factory add "…"`)
       return
     }
-    await appendAnswer(task, reply.text)
-    await setStatus(task, 'ready')
+    await answerTask(task, reply.text)
     setActivePrompt(null)
     log.ok(`${task.id}: answered, back in queue`)
   } finally {

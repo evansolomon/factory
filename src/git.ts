@@ -20,12 +20,21 @@ export async function repoRoot(cwd: string): Promise<string> {
   return res.text().trim()
 }
 
-// Full working-tree diff (staged + unstaged) plus a porcelain status header so
-// the adversarial reviewer sees new/deleted files, not just hunks.
+// Full working-tree diff (staged + unstaged + UNTRACKED) plus a porcelain status
+// header. Untracked files are rendered as add-diffs via `git diff --no-index`:
+// `git diff HEAD` alone omitted brand-new modules — usually the core of the
+// change — so reviewers judged diffs whose main file was invisible.
 export async function worktreeDiff(root: string): Promise<string> {
   const status = await $`git -C ${root} status --porcelain`.text()
   const diff = await $`git -C ${root} diff HEAD`.text()
-  return `# git status\n${status}\n# git diff HEAD\n${diff}`
+  const untrackedOut = await $`git -C ${root} ls-files --others --exclude-standard`.text()
+  const parts = [`# git status\n${status}\n# git diff HEAD\n${diff}`]
+  for (const file of untrackedOut.split('\n').filter((f) => f.trim().length > 0)) {
+    // --no-index exits 1 when files differ; nothrow treats that as data, not error.
+    const fileDiff = await $`git -C ${root} diff --no-index -- /dev/null ${file}`.nothrow().text()
+    parts.push(fileDiff)
+  }
+  return parts.join('\n')
 }
 
 export async function hasChanges(root: string): Promise<boolean> {
@@ -81,6 +90,18 @@ export async function recentAuthorCommitSubjects(
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
   return { identity, subjects }
+}
+
+// The origin remote's URL, or null when the repo has no origin (local-only
+// repos). Used to derive a host-independent repo identity for repo-level state;
+// callers fall back to a path-derived key when this is null.
+export async function originUrl(cwd: string): Promise<string | null> {
+  const res = await $`git -C ${cwd} remote get-url origin`.nothrow().quiet()
+  if (res.exitCode !== 0) {
+    return null
+  }
+  const url = res.text().trim()
+  return url.length > 0 ? url : null
 }
 
 // The main worktree of the repo (the first entry of `git worktree list`) — the

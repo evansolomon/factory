@@ -1,13 +1,20 @@
 import { type TaskComplexity, TaskComplexitySchema } from './task.ts'
 
 const ADD_USAGE =
-  'usage: factory add [--raw] [--trivial | --complexity trivial|complex] ' +
-  '[intent...] [--verify <cmd...>] [--edit]'
+  'usage: factory add [--raw] [--trivial | --complexity trivial|complex] [--force-new] ' +
+  '[--name <slug>] [intent...] [--verify <cmd...>] [--edit]'
 
 export type ParsedAddOptions = {
   args: string[]
   raw: boolean
   complexity: TaskComplexity | null
+  // Allow queueing a second fresh task in a worktree that already has one. The
+  // workstream model is one active task per worktree; a second fresh task is an
+  // error unless the batching is deliberate.
+  forceNew: boolean
+  // Explicit task id/slug from the caller (spawner tools already named the
+  // worktree) — skips the namer model call entirely.
+  name: string | null
 }
 
 export type ParseAddOptionsResult =
@@ -38,6 +45,8 @@ export function parseAddOptions(args: string[]): ParseAddOptionsResult {
 
   const cleaned: string[] = []
   let raw = false
+  let forceNew = false
+  let name: string | null = null
   let complexity: TaskComplexity | null = null
   for (let i = 0; i < head.length; i++) {
     const arg = head[i]
@@ -46,6 +55,19 @@ export function parseAddOptions(args: string[]): ParseAddOptionsResult {
     }
     if (arg === '--raw') {
       raw = true
+      continue
+    }
+    if (arg === '--force-new') {
+      forceNew = true
+      continue
+    }
+    if (arg === '--name') {
+      const value = head[i + 1]
+      if (!value || value.startsWith('--')) {
+        return fail('--name needs a value')
+      }
+      name = value
+      i++
       continue
     }
     if (arg === '--trivial') {
@@ -82,6 +104,8 @@ export function parseAddOptions(args: string[]): ParseAddOptionsResult {
       args: verifyIndex === -1 ? cleaned : [...cleaned, '--verify', ...tail],
       raw,
       complexity,
+      forceNew,
+      name,
     },
   }
 }

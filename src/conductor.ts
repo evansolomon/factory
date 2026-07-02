@@ -33,6 +33,7 @@ import {
   createGuidanceFromDistillation,
   type GuidanceStage,
   loadGuidance,
+  recordGuidanceOutcome,
   renderGuidanceBlock,
 } from './guidance.ts'
 import { emit } from './hooks.ts'
@@ -41,13 +42,15 @@ import { log } from './log.ts'
 import {
   parseConvergenceVerdict,
   parseDeliverySelection,
+  parseGateFix,
   parseReconcileDecision,
   parseRemedy,
   parseReviewVerdict,
   parseShip,
   parseTriage,
 } from './markers.ts'
-import { recordRun, type StageStat } from './metrics.ts'
+import { recentFirstPassYield, recordRun, type StageStat } from './metrics.ts'
+import { appendEnvPlaybook, readEnvPlaybook } from './playbook.ts'
 import {
   commitMessagePrompt,
   consolidatePrompt,
@@ -66,6 +69,7 @@ import {
   planRiskPrompt,
   postmortemPrompt,
   prototypePrompt,
+  quickFixPrompt,
   reconcilePrompt,
   remediatePrompt,
   rescuePrompt,
@@ -97,11 +101,14 @@ import {
   parseReview,
   parseSharpen,
   type SharpenResult,
+  sanitizeVerifyCommand,
   type Turn,
 } from './sharpen.ts'
 import {
   appendFailure,
+  appendPassMeter,
   type Failure,
+  type LiveMeter,
   latestAnswerValueAfter,
   markFeedbackConsumed,
   pendingFeedbackCount,
@@ -109,11 +116,13 @@ import {
   readArtifact,
   readFailures,
   readIntent,
+  readLiveMeter,
   readPendingFeedback,
   readPlan,
   readySharpenedTask,
   refreshFeedbackState,
   refreshMeta,
+  rollArtifactHistory,
   saveMeta,
   setStatus,
   setTaskDelivery,
@@ -168,6 +177,9 @@ type Meter = {
   startedAt: number
   stages: StageStat[]
   writeSeq: Promise<void>
+  // Guidance records actually injected into this pass's prompts, so the outcome
+  // can be attributed back to them (lessons must earn their context window).
+  guidanceIds: Set<string>
 }
 function newMeter(task: Task): Meter {
   return {
@@ -177,17 +189,36 @@ function newMeter(task: Task): Meter {
     startedAt: Date.now(),
     stages: [],
     writeSeq: Promise.resolve(),
+    guidanceIds: new Set(),
   }
 }
 
-async function persistLiveMeter(meter: Meter): Promise<void> {
-  const snapshot = {
+function meterSnapshot(meter: Meter): LiveMeter {
+  return {
     startedAt: new Date(meter.startedAt).toISOString(),
     updatedAt: new Date().toISOString(),
     inputTokens: meter.inTok,
     outputTokens: meter.outTok,
     stages: meter.stages.map((s) => ({ ...s })),
   }
+}
+
+// A meter.json left by a pass that never reached an outcome (killed loop, crash)
+// is swept into meters.jsonl before the new pass overwrites it — dedupe by
+// startedAt makes this a no-op when the prior pass recorded itself normally.
+async function sweepInterruptedMeter(task: Task): Promise<void> {
+  try {
+    const prior = await readLiveMeter(task)
+    if (prior) {
+      await appendPassMeter(task, prior, 'interrupted')
+    }
+  } catch (err) {
+    log.warn(`interrupted meter sweep failed for ${task.id}: ${formatErr(err)}`)
+  }
+}
+
+async function persistLiveMeter(meter: Meter): Promise<void> {
+  const snapshot = meterSnapshot(meter)
   const write = meter.writeSeq.then(async () => {
     try {
       await writeLiveMeter(meter.task, snapshot)
@@ -272,6 +303,39 @@ async function agentStep(
     `${display} ${fmtSecs(ms)} · ${fmtTok(usage.inputTokens)}→${fmtTok(usage.outputTokens)} tok`
   )
   return text
+}
+
+// Run independent agent steps concurrently, tolerating individual crashes: one
+// flaky CLI invocation must not discard the healthy rest of a parallel stage.
+// (With Promise.all, a single rejected planner/scout/expert blocked the whole
+// task — five clean reviews thrown away because a sixth hiccuped.) Fulfilled
+// results keep their keys so callers can re-align positional structures; below
+// `min` fulfilled, the stage genuinely failed and the error propagates.
+async function settleStage<T>(
+  taskId: string,
+  stage: string,
+  work: Array<{ key: string; promise: Promise<T> }>,
+  min: number = 1
+): Promise<Array<{ key: string; value: T }>> {
+  const settled = await Promise.allSettled(work.map((w) => w.promise))
+  const ok: Array<{ key: string; value: T }> = []
+  const failed: string[] = []
+  settled.forEach((res, i) => {
+    const key = work[i]?.key ?? String(i)
+    if (res.status === 'fulfilled') {
+      ok.push({ key, value: res.value })
+    } else {
+      failed.push(key)
+      log.warn(`${taskId}: ${stage} agent '${key}' failed: ${formatErr(res.reason)}`)
+    }
+  })
+  if (ok.length < min) {
+    throw new Error(
+      `${stage}: ${failed.length}/${work.length} agents failed (${failed.join(', ')}) — ` +
+        `below the stage quorum of ${min}`
+    )
+  }
+  return ok
 }
 
 function logTotal(meter: Meter): void {
@@ -614,7 +678,7 @@ function recordTask(
   ctx: WorkContext,
   task: Task,
   meter: Meter,
-  outcome: 'done' | 'blocked' | 'needs-input',
+  outcome: 'done' | 'blocked' | 'needs-input' | 'retrying',
   stats: RunStats
 ): void {
   recordRun(ctx.metricsPath, {
@@ -630,6 +694,18 @@ function recordTask(
     outTokens: meter.outTok,
     stages: meter.stages,
   })
+  // Append the pass to the task's durable meter history. meter.json alone holds
+  // only the current pass; multi-pass task costs vanished without this.
+  void appendPassMeter(task, meterSnapshot(meter), outcome).catch((err) => {
+    log.warn(`pass meter append failed for ${task.id}: ${formatErr(err)}`)
+  })
+  // Attribute terminal outcomes to the lessons that rode along, so guidance
+  // accrues a win/loss record and losing lessons retire themselves.
+  if ((outcome === 'done' || outcome === 'blocked') && meter.guidanceIds.size > 0) {
+    void recordGuidanceOutcome(meter.guidanceIds, outcome).catch((err) => {
+      log.warn(`guidance outcome record failed for ${task.id}: ${formatErr(err)}`)
+    })
+  }
 }
 
 // A blocked outcome also drops a raw signal into the lesson candidates, so
@@ -715,15 +791,36 @@ async function postmortem(
 // Once the cap is spent, the convergence judge decides whether to keep retrying,
 // ask for input, or stop as terminal.
 export const AUTO_CAP = 5
+// Absolute ceiling on judge-approved retries past AUTO_CAP. The judge could
+// historically vote RETRY_LATER forever, pinning a task to hourly retries of a
+// deterministic failure with no human contact. Past this, the human is asked.
+export const AUTO_HARD_CAP = 10
 const BACKOFF_MS = [120_000, 300_000, 900_000, 1_800_000, 3_600_000] // 2m, 5m, 15m, 30m, 60m
 function backoffMs(n: number): number {
   return BACKOFF_MS[Math.min(n, BACKOFF_MS.length - 1)] ?? 3_600_000
 }
 
-function retryLater(task: Task, meter: Meter, reason: string): TaskOutcome {
+function retryLater(
+  ctx: WorkContext,
+  task: Task,
+  meter: Meter,
+  stats: RunStats,
+  reason: string
+): TaskOutcome {
   logTotal(meter)
+  recordTask(ctx, task, meter, 'retrying', stats)
   const retryAt = new Date(Date.now() + backoffMs(task.meta.autoRetries)).toISOString()
   return { ok: false, kind: 'retrying', reason, retryAt, autoRetries: task.meta.autoRetries + 1 }
+}
+
+// questions.md always holds the CURRENT question round (that's what show/ask and
+// the inline prompt read); earlier rounds roll into questions.history.md instead
+// of being destroyed.
+async function writeQuestions(task: Task, questions: string): Promise<void> {
+  await rollArtifactHistory(task, 'questions.md')
+  await writeArtifact(task, 'questions.md', questions)
+  task.meta.questionRounds += 1
+  await saveMeta(task)
 }
 
 async function needsInput(
@@ -733,7 +830,7 @@ async function needsInput(
   stats: RunStats,
   questions: string
 ): Promise<TaskOutcome> {
-  await writeArtifact(task, 'questions.md', questions)
+  await writeQuestions(task, questions)
   await appendCandidate(ctx, `needs-input · ${task.id} · ${firstLine(questions)}`)
   logTotal(meter)
   recordTask(ctx, task, meter, 'needs-input', stats)
@@ -786,8 +883,23 @@ async function judgeFailure(
         },
         summary,
       }
-    default:
+    case 'TERMINAL':
       return { action: { kind: 'terminal' }, summary }
+    default:
+      // Malformed judge output must not silently kill the task (it used to fall
+      // through to terminal). Fail toward the human: a question is recoverable,
+      // a wrongly-terminal block loses the work.
+      log.warn(`${task.id}: convergence judge output had no VERDICT marker; asking the human`)
+      return {
+        action: {
+          kind: 'needs-input',
+          questions:
+            'Factory could not parse its own convergence judgment and paused instead of ' +
+            `guessing. Latest failure:\n\n${summary}\n\n` +
+            'Reply with guidance (or just "continue" / "stop") via factory add.',
+        },
+        summary,
+      }
   }
 }
 
@@ -801,6 +913,23 @@ async function setAside(
   intent: string,
   postmortemGuidance: string | null
 ): Promise<TaskOutcome> {
+  if (task.meta.autoRetries >= AUTO_HARD_CAP) {
+    // Mechanical ceiling: the judge does not get to keep a task on hourly
+    // retries forever. Transient failures that survive this many backoffs are
+    // not transient; the human decides.
+    log.warn(`${task.id}: auto-retry hard ceiling ${AUTO_HARD_CAP} reached; asking the human`)
+    return needsInput(
+      ctx,
+      task,
+      meter,
+      stats,
+      stuckQuestions(
+        'retry',
+        `${task.meta.autoRetries} auto-retries were spent on a failure that keeps recurring`,
+        detail ?? reason
+      )
+    )
+  }
   if (task.meta.autoRetries >= AUTO_CAP) {
     const failures = await readFailures(task)
     const judged = await judgeFailure(
@@ -816,8 +945,10 @@ async function setAside(
       case 'retry':
       case 'continue':
         return retryLater(
+          ctx,
           task,
           meter,
+          stats,
           judged.action.kind === 'retry' ? judged.action.reason : reason
         )
       case 'needs-input':
@@ -834,15 +965,64 @@ async function setAside(
         )
     }
   }
-  return retryLater(task, meter, reason)
+  return retryLater(ctx, task, meter, stats, reason)
 }
 
-// After a gate failure, decide what to do next. Replaces a blind retry count:
-// the convergence judge reads the whole failure history and chooses code-fix,
-// retry-later, ask-human, or terminal. The failure is logged either way (so the
-// history spans resumes and feeds the next fixer). `attempt` is 0-based;
-// `hardCap` is only the runaway backstop — normal termination should come from
-// the convergence judge.
+// Stable fingerprint of a failure for mechanical loop detection: same gate +
+// same (whitespace-normalized) failure text. Combined with a worktree-diff hash
+// it answers "did the last fix attempt change anything observable?" in code,
+// without trusting a model to notice it's going in circles.
+// Clip long gate output while keeping BOTH ends: test runners print the actual
+// failures (expected/actual diffs) in the middle or head and a low-information
+// summary at the tail. A tail-only clip fed fixers 84 rounds of blind guessing
+// on one real task because the assertion diffs were sliced away.
+const FAILURE_HEAD = 3000
+const FAILURE_TAIL = 12000
+export function clipFailureOutput(
+  text: string,
+  head: number = FAILURE_HEAD,
+  tail: number = FAILURE_TAIL
+): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= head + tail) {
+    return trimmed
+  }
+  return `${trimmed.slice(0, head)}\n\n[... ${trimmed.length - head - tail} chars clipped ...]\n\n${trimmed.slice(-tail)}`
+}
+
+function failureFingerprint(gate: string, detail: string): string {
+  return Bun.hash(`${gate}\n${detail.replace(/\s+/g, ' ').trim()}`).toString(16)
+}
+
+async function worktreeDiffHash(root: string): Promise<string> {
+  return Bun.hash(await worktreeDiff(root)).toString(16)
+}
+
+function stuckQuestions(gate: string, reason: string, detail: string): string {
+  return [
+    `Factory mechanically stopped an unproductive ${gate} fix loop: ${reason}.`,
+    '',
+    'Latest failure:',
+    '',
+    detail,
+    '',
+    'Reply via `factory add`: a concrete hint for the next fix attempt,',
+    '"continue" to authorize more attempts, or "stop" to abandon the task.',
+  ].join('\n')
+}
+
+// After a gate failure, decide what to do next. The convergence judge reads the
+// whole failure history and chooses code-fix, retry-later, ask-human, or
+// terminal — but two bounds are enforced mechanically, not delegated to the
+// judge's judgment:
+//   1. STUCK: the failure is byte-identical to the previous one AND the fix
+//      attempt didn't change the worktree → re-running is forbidden; ask the
+//      human instead of guessing again.
+//   2. `hardCap` is a REAL cap on fix attempts: at the cap, continue is not an
+//      available action (the judge historically kept voting CONTINUE past every
+//      "hard" cap — one real task burned 84 identical attempts / 611M tokens).
+// Both bounds fail toward the human (a question is recoverable; silent churn
+// and wrongly-terminal blocks are not). The failure is logged either way.
 async function assessFailure(
   ctx: WorkContext,
   task: Task,
@@ -854,18 +1034,39 @@ async function assessFailure(
   gate: string,
   detail: string
 ): Promise<FailureAction> {
-  if (hardCap === 0) {
-    const entry: Failure = {
-      attempt,
-      gate,
-      summary: firstLine(detail).slice(0, 200),
-      detail,
-      remediation: 'code-fix',
-    }
+  const fingerprint = failureFingerprint(gate, detail)
+  const diffHash = await worktreeDiffHash(ctx.root)
+  const record = async (summary: string, remediation: 'code-fix' | 'backoff'): Promise<void> => {
+    const entry: Failure = { attempt, gate, summary, detail, remediation, fingerprint, diffHash }
     failures.push(entry)
     await appendFailure(task, entry)
+  }
+
+  if (hardCap === 0) {
+    await record(firstLine(detail).slice(0, 200), 'code-fix')
     return { kind: 'terminal' }
   }
+
+  const previous = failures.filter((f) => f.gate === gate).at(-1)
+  const identicalFailure = previous?.fingerprint != null && previous.fingerprint === fingerprint
+  const identicalDiff = previous?.diffHash != null && previous.diffHash === diffHash
+  if (identicalFailure && identicalDiff) {
+    log.warn(
+      `${task.id}: ${gate} failed identically with an unchanged worktree — asking the human ` +
+        'instead of re-running'
+    )
+    await record(`identical ${gate} failure, unchanged worktree — mechanically stuck`, 'code-fix')
+    return {
+      kind: 'needs-input',
+      questions: stuckQuestions(
+        gate,
+        'the failure is identical to the previous attempt and the fix pass changed nothing',
+        detail
+      ),
+    }
+  }
+
+  const atCap = attempt + 1 >= hardCap
   const judged = await judgeFailure(
     ctx,
     task,
@@ -873,19 +1074,36 @@ async function assessFailure(
     intent,
     failures,
     detail,
-    attempt + 1 >= hardCap ? `implementation-attempt limit ${hardCap} reached` : null
+    atCap ? `implementation-attempt limit ${hardCap} reached` : null
   )
-  const summary = judged.summary
-  const entry: Failure = {
-    attempt,
-    gate,
-    summary,
-    detail,
-    remediation: judged.action.kind === 'retry' ? 'backoff' : 'code-fix',
+  await record(judged.summary, judged.action.kind === 'retry' ? 'backoff' : 'code-fix')
+  if (atCap && judged.action.kind === 'continue') {
+    log.warn(
+      `${task.id}: fix-attempt cap ${hardCap} reached; overriding the judge's CONTINUE and ` +
+        'asking the human'
+    )
+    return {
+      kind: 'needs-input',
+      questions: stuckQuestions(gate, `the fix-attempt cap (retries: ${hardCap}) is spent`, detail),
+    }
   }
-  failures.push(entry)
-  await appendFailure(task, entry)
   return judged.action
+}
+
+// The consolidator's "## Quick fixes" section: cheap/safe advisory items worth
+// one bounded pass after PASS. Returns null when absent or "none".
+export function extractQuickFixes(consolidated: string): string | null {
+  const match = /^## Quick fixes\s*$/im.exec(consolidated)
+  if (!match || match.index === undefined) {
+    return null
+  }
+  const after = consolidated.slice(match.index + match[0].length)
+  const end = after.search(/^## |^VERDICT:/im)
+  const body = (end === -1 ? after : after.slice(0, end)).trim()
+  if (!body || /^none\.?$/i.test(body)) {
+    return null
+  }
+  return body
 }
 
 function markerText(text: string, marker: string): string | null {
@@ -971,7 +1189,7 @@ const REMEDIATE_CAP = 3
 //   aside — a flake or an environment problem remediation couldn't fix → back off
 //           and auto-retry; don't churn code over it.
 type VerifyVerdict =
-  | { kind: 'pass' }
+  | { kind: 'pass'; verify: string }
   | { kind: 'code'; detail: string }
   | { kind: 'aside'; reason: string; detail: string }
 
@@ -992,24 +1210,29 @@ async function verifyGate(
   remediateGuidance: string | null
 ): Promise<VerifyVerdict> {
   const remedies: string[] = []
+  // Defense in depth: the command is sanitized where specs are parsed, but verify
+  // strings also arrive from older meta.json and human flags. Backtick-wrapped
+  // commands become command substitutions under bash -lc — never run those.
+  let command = sanitizeVerifyCommand(verify)
   while (true) {
     await setStatus(task, 'verifying')
-    await progress(ctx, task, 'verify', `verify — ${verify}`)
+    await progress(ctx, task, 'verify', `verify — ${command}`)
     const vstart = Date.now()
     const result = await withHeartbeat(
       'verify',
       vstart,
-      run(['bash', '-lc', verify], { cwd: ctx.root })
+      run(['bash', '-lc', command], { cwd: ctx.root })
     )
     const vms = Date.now() - vstart
     meter.stages.push({ stage: 'verify', agent: '-', inTok: 0, outTok: 0, ms: vms })
     await persistLiveMeter(meter)
     log.done(`verify ${fmtSecs(vms)}`)
-    await writeArtifact(task, 'verify.log', `$ ${verify}\n\n${result.stdout}\n${result.stderr}`)
+    await rollArtifactHistory(task, 'verify.log')
+    await writeArtifact(task, 'verify.log', `$ ${command}\n\n${result.stdout}\n${result.stderr}`)
     if (result.code === 0) {
-      return { kind: 'pass' }
+      return { kind: 'pass', verify: command }
     }
-    const detail = `Verify \`${verify}\` failed (exit ${result.code}):\n${`${result.stdout}\n${result.stderr}`.slice(-4000)}`
+    const detail = `Verify \`${command}\` failed (exit ${result.code}):\n${clipFailureOutput(`${result.stdout}\n${result.stderr}`)}`
     if (!ctx.config.remediate || remedies.length >= REMEDIATE_CAP) {
       // Remediation disabled or exhausted: fall back to the historical behavior —
       // treat the failure as a code problem and let the code-fix loop have it.
@@ -1030,7 +1253,14 @@ async function verifyGate(
       agentLabel(ctx.agents.implementer),
       runAgent(ctx.agents.implementer, {
         root: ctx.root,
-        prompt: remediatePrompt(intent, verify, detail, remedies, remediateGuidance),
+        prompt: remediatePrompt(
+          intent,
+          command,
+          detail,
+          remedies,
+          remediateGuidance,
+          await readEnvPlaybook(ctx.envPlaybookPath)
+        ),
         access: 'full',
         outFile: `${task.dir}/remediate${n > 1 ? `.${n}` : ''}.md`,
       })
@@ -1039,7 +1269,34 @@ async function verifyGate(
     switch (parseRemedy(out)) {
       case 'ENV-FIXED':
         remedies.push(summary)
+        await appendEnvPlaybook(ctx.envPlaybookPath, `env fixed: ${summary}`)
         continue // re-run verify against the repaired environment
+      case 'GATE-MISCONFIGURED': {
+        // The gate itself is broken (nonexistent script, broken quoting, wrong
+        // path). Two real tasks died re-running a corrupted command for hours
+        // because there was no bucket for "the check cannot ever pass". The
+        // doctor supplies the corrected command; it is persisted so resumes and
+        // ship use it too. Without a GATE-FIX the verdict is unusable — back off.
+        const fix = parseGateFix(out)
+        const fixed = fix ? sanitizeVerifyCommand(fix) : ''
+        if (!fixed || fixed === command) {
+          return {
+            kind: 'aside',
+            reason: `verify command is misconfigured and the doctor offered no usable fix: ${summary}`,
+            detail,
+          }
+        }
+        log.warn(`${task.id}: verify command repaired by the doctor: ${command} → ${fixed}`)
+        remedies.push(`gate repaired: ${summary}`)
+        await appendEnvPlaybook(
+          ctx.envPlaybookPath,
+          `gate repaired: ${summary} (${command} → ${fixed})`
+        )
+        command = fixed
+        task.meta.verify = fixed
+        await saveMeta(task)
+        continue // re-run with the corrected gate
+      }
       case 'FLAKE':
         return { kind: 'aside', reason: 'verify hit a transient/external flake', detail }
       case 'ENV-BLOCKED':
@@ -1076,8 +1333,6 @@ async function planEnsemble(
   const planners = ctx.agents.planners
   const labels = plannerLabels(planners)
   const lead = ctx.agents.implementer
-  const labeled = (texts: string[]): Labeled[] =>
-    texts.map((text, i) => ({ label: labels[i] ?? `plan-${i + 1}`, text }))
 
   // 1. RESEARCH — either the legacy single dossier or a workforce-planned set of
   // independent scouts synthesized back into one canonical research.md.
@@ -1091,31 +1346,38 @@ async function planEnsemble(
       `research — ${workforcePlan.research.length}-scout workforce`
     )
     const agents = agentChoiceMap(ctx)
-    const reports = await Promise.all(
-      workforcePlan.research.map(async (entry) => {
-        const agent = agents.get(entry.agent) ?? ctx.agents.implementer
-        const policies = await renderPolicies(ctx, entry.policies, `research.${entry.kind}`)
-        return agentStep(
-          meter,
-          `research.${entry.kind}`,
-          agentLabel(agent),
-          runAgent(agent, {
-            root: ctx.root,
-            prompt: researchScoutPrompt(
-              entry.kind,
-              intent,
-              verify,
-              ctx.plansDir,
-              userFacing,
-              policies
-            ),
-            access: entry.kind === 'external' ? 'research' : 'read',
-            outFile: `${task.dir}/research.${entry.kind}.md`,
-          }),
-          `${agentLabel(agent)} · research/${entry.kind}`
-        ).then((text): Labeled => ({ label: entry.kind, text }))
-      })
+    const scoutResults = await settleStage(
+      task.id,
+      'research',
+      workforcePlan.research.map((entry) => ({
+        key: entry.kind,
+        promise: (async () => {
+          const agent = agents.get(entry.agent) ?? ctx.agents.implementer
+          const policies = await renderPolicies(ctx, entry.policies, `research.${entry.kind}`)
+          const text = await agentStep(
+            meter,
+            `research.${entry.kind}`,
+            agentLabel(agent),
+            runAgent(agent, {
+              root: ctx.root,
+              prompt: researchScoutPrompt(
+                entry.kind,
+                intent,
+                verify,
+                ctx.plansDir,
+                userFacing,
+                policies
+              ),
+              access: entry.kind === 'external' ? 'research' : 'read',
+              outFile: `${task.dir}/research.${entry.kind}.md`,
+            }),
+            `${agentLabel(agent)} · research/${entry.kind}`
+          )
+          return { label: entry.kind, text } satisfies Labeled
+        })(),
+      }))
     )
+    const reports = scoutResults.map((r) => r.value)
     await progress(ctx, task, 'research', 'research — synthesizing scouts')
     research = await agentStep(
       meter,
@@ -1143,15 +1405,24 @@ async function planEnsemble(
     )
   }
 
-  // 2. PLAN — every planner drafts in parallel (read-only).
+  // 2. PLAN — every planner drafts in parallel (read-only). A crashed planner is
+  // dropped from the ensemble (with its critique/revise seats) rather than
+  // blocking the task; at least one draft must survive.
   await progress(ctx, task, 'plan', 'plan — drafting')
-  const plans = await Promise.all(
-    planners.map((agent, i) =>
-      agentStep(
+  const fullEnsemble = planners.map((agent, i) => ({
+    agent,
+    label: labels[i] ?? `plan-${i + 1}`,
+  }))
+  const draftResults = await settleStage(
+    task.id,
+    'plan',
+    fullEnsemble.map((member) => ({
+      key: member.label,
+      promise: agentStep(
         meter,
         'plan',
-        labels[i] ?? agent.cli,
-        runAgent(agent, {
+        member.label,
+        runAgent(member.agent, {
           root: ctx.root,
           prompt: planPrompt(
             intent,
@@ -1163,38 +1434,51 @@ async function planEnsemble(
             userFacing
           ),
           access: 'read',
-          outFile: `${task.dir}/plan.${labels[i]}.md`,
+          outFile: `${task.dir}/plan.${member.label}.md`,
         })
-      )
-    )
+      ),
+    }))
   )
+  const ensemble = fullEnsemble.filter((m) => draftResults.some((r) => r.key === m.label))
+  const plans = ensemble.map((m) => draftResults.find((r) => r.key === m.label)?.value ?? '')
+  const labeled = (texts: string[]): Labeled[] =>
+    texts.map((text, i) => ({ label: ensemble[i]?.label ?? `plan-${i + 1}`, text }))
 
-  // 3. CRITIQUE — each planner critiques the others' plans (only with ≥2).
+  // 3. CRITIQUE — each planner critiques the others' plans (only with ≥2). A
+  // crashed critic degrades to a placeholder; the surviving critiques still flow.
   let critiques: string[] = []
-  if (planners.length >= 2) {
+  if (ensemble.length >= 2) {
     await progress(ctx, task, 'crit', 'critique — cross-reviewing the plans')
-    critiques = await Promise.all(
-      planners.map((agent, i) => {
-        const others = plans.filter((_, j) => j !== i).join('\n\n---\n\n')
-        return agentStep(
+    const critiqueResults = await settleStage(
+      task.id,
+      'critique',
+      ensemble.map((member, i) => ({
+        key: member.label,
+        promise: agentStep(
           meter,
           'critique',
-          labels[i] ?? agent.cli,
-          runAgent(agent, {
+          member.label,
+          runAgent(member.agent, {
             root: ctx.root,
             prompt: critiquePrompt(
               intent,
-              others,
+              plans.filter((_, j) => j !== i).join('\n\n---\n\n'),
               answers,
               lessons,
               stageGuidance('critique'),
               research
             ),
             access: 'read',
-            outFile: `${task.dir}/critique.${labels[i]}.md`,
+            outFile: `${task.dir}/critique.${member.label}.md`,
           })
-        )
-      })
+        ),
+      })),
+      0
+    )
+    critiques = ensemble.map(
+      (member) =>
+        critiqueResults.find((r) => r.key === member.label)?.value ??
+        '(critique unavailable — the critic agent failed; weigh the plan on its own merits)'
     )
   }
 
@@ -1239,35 +1523,50 @@ async function planEnsemble(
       outFile: `${task.dir}/reconcile.md`,
     })
   )
-  if (parseReconcileDecision(reconcile) === 'ASK') {
+  const reconcileDecision = parseReconcileDecision(reconcile)
+  if (reconcileDecision === null) {
+    // The escalation valve must fail CLOSED. A reconcile output with no parseable
+    // DECISION used to fall through to proceed — silently overriding the one
+    // checkpoint whose job is to stop factory from building the wrong thing.
+    log.warn(`${task.id}: reconcile output had no DECISION marker; treating it as ASK`)
+  }
+  if (reconcileDecision !== 'PROCEED') {
     const questions = reconcile.replace(/^\s*DECISION:\s*ASK\s*/i, '').trim() || reconcile
-    await writeArtifact(task, 'questions.md', questions)
+    await writeQuestions(task, questions)
     await appendCandidate(ctx, `needs-input · ${task.id} · ${firstLine(questions)}`)
     logTotal(meter)
     return { pause: { ok: false, kind: 'needs-input', questions } }
   }
 
   // 4. REVISE — each planner improves its own plan using the critiques (≥2 only).
+  // A crashed reviser keeps its original draft instead of blocking the task.
   let revised = plans
-  if (planners.length >= 2) {
+  if (ensemble.length >= 2) {
     await progress(ctx, task, 'revise', 'revise — improving each plan')
     const allCritiques =
-      critiques.map((text, i) => `## Critique (${labels[i]})\n${text}`).join('\n\n') +
+      critiques.map((text, i) => `## Critique (${ensemble[i]?.label})\n${text}`).join('\n\n') +
       (uxCritique ? `\n\n## Critique (ux/ia)\n${uxCritique}` : '')
-    revised = await Promise.all(
-      planners.map((agent, i) =>
-        agentStep(
+    const reviseResults = await settleStage(
+      task.id,
+      'revise',
+      ensemble.map((member, i) => ({
+        key: member.label,
+        promise: agentStep(
           meter,
           'revise',
-          labels[i] ?? agent.cli,
-          runAgent(agent, {
+          member.label,
+          runAgent(member.agent, {
             root: ctx.root,
             prompt: revisePrompt(intent, plans[i] ?? '', allCritiques),
             access: 'read',
-            outFile: `${task.dir}/plan.${labels[i]}.v2.md`,
+            outFile: `${task.dir}/plan.${member.label}.v2.md`,
           })
-        )
-      )
+        ),
+      })),
+      0
+    )
+    revised = ensemble.map(
+      (member, i) => reviseResults.find((r) => r.key === member.label)?.value ?? plans[i] ?? ''
     )
   }
 
@@ -1349,7 +1648,7 @@ async function reviewSharpenSpec(
   }
   if (review.kind === 'questions') {
     const questions = formatQuestions(review.preamble, review.questions)
-    await writeArtifact(task, 'questions.md', questions)
+    await writeQuestions(task, questions)
     await appendCandidate(ctx, `needs-input · ${task.id} · ${firstLine(questions)}`)
     return { pause: questionsOutcome(questions) }
   }
@@ -1395,7 +1694,7 @@ async function runSharpenStage(
     const { preamble, questions } = parseQuestions(out)
     if (questions.length > 0) {
       const questionText = formatQuestions(preamble, questions)
-      await writeArtifact(task, 'questions.md', questionText)
+      await writeQuestions(task, questionText)
       await appendCandidate(ctx, `needs-input · ${task.id} · ${firstLine(questionText)}`)
       return { pause: questionsOutcome(questionText) }
     }
@@ -1538,6 +1837,29 @@ async function selectTaskDelivery(
     return null
   }
 
+  // The earned-autonomy dial: side-effecting deliveries skip the confirmation
+  // pause when recent telemetry has earned it (config.autoShip), and fall back
+  // to confirming the moment the numbers dip. Explicit directives and manual
+  // `factory delivery` choices already skip confirmation; this extends that
+  // trust to auto-selected deliveries, mechanically.
+  const autoShip = ctx.config.autoShip
+  if (autoShip) {
+    const readiness = recentFirstPassYield(ctx.metricsPath, autoShip.minTasks)
+    if (
+      readiness &&
+      readiness.tasks >= autoShip.minTasks &&
+      readiness.firstPassYield >= autoShip.minFirstPassYield
+    ) {
+      await setTaskDelivery(task, selection.delivery)
+      log.info(
+        `${task.id}: delivery — ${deliveryLabel(selection.delivery)} auto-confirmed ` +
+          `(earned autonomy: ${(readiness.firstPassYield * 100).toFixed(0)}% first-pass yield ` +
+          `over last ${readiness.tasks} tasks)`
+      )
+      return null
+    }
+  }
+
   const now = new Date().toISOString()
   task.meta.deliveryProposal = selection.delivery
   task.meta.deliveryProposalAt = now
@@ -1604,6 +1926,7 @@ async function runPrototypeStage(
 export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome> {
   let intent = await readIntent(task)
   let verify = task.meta.verify
+  await sweepInterruptedMeter(task)
   const meter = newMeter(task)
   await persistLiveMeter(meter)
   const lead = ctx.agents.implementer
@@ -1613,7 +1936,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     return []
   })
   const stageGuidance: StageGuidance = (stage) =>
-    renderGuidanceBlock(applicableGuidance(guidance, ctx, stage))
+    renderGuidanceBlock(applicableGuidance(guidance, ctx, stage), meter.guidanceIds)
 
   const baselineDiff = await worktreeDiff(ctx.root)
   const baselineHasChanges = await hasChanges(ctx.root)
@@ -1676,6 +1999,19 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         })
       )
       const triage = parseTriage(verdict)
+      if (!triage.complexityMarker || !triage.userFacingMarker) {
+        // Defaults still apply (complex / not-user-facing) but a missing marker is
+        // a prompt-contract violation worth surfacing — a silent USER-FACING miss
+        // disables the UX review gate for the whole task.
+        log.warn(
+          `${task.id}: triage output missing ${[
+            !triage.complexityMarker && 'COMPLEXITY',
+            !triage.userFacingMarker && 'USER-FACING',
+          ]
+            .filter(Boolean)
+            .join(' and ')} marker(s); using defaults`
+        )
+      }
       trivial = triage.trivial
       stats.triage = trivial ? 'trivial' : 'complex'
       classifiedUserFacing = triage.userFacing
@@ -1809,6 +2145,18 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   const feedbackContext = await analyzeFeedbackIfPending(ctx, task, meter, intent, finalPlan)
   const prototype = await prototypeContext(task)
 
+  // Crash-window recovery: the commit ran but the loop died before the SHA was
+  // recorded. A clean tree + a set commitStartedAt means HEAD is this task's
+  // commit — adopt it rather than re-implementing on a clean tree.
+  if (resuming && !task.meta.commit && task.meta.commitStartedAt) {
+    if (!(await hasChanges(ctx.root))) {
+      task.meta.commit = await headSha(ctx.root)
+      log.warn(`${task.id}: recovered commit ${task.meta.commit} from an interrupted commit step`)
+    }
+    task.meta.commitStartedAt = null
+    await saveMeta(task)
+  }
+
   // A resume whose work already committed only has delivery left — skip the build.
   if (resuming && task.meta.commit) {
     return shipAndFinish(ctx, task, intent, meter, stats, stageGuidance)
@@ -1831,6 +2179,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   const hardCap = ctx.config.retries
   const failures = await readFailures(task)
   let rescueUsed = false
+  let quickFixUsed = false
   const rescueOnce = async (latestFailure: string): Promise<FailureAction | null> => {
     if (rescueUsed) {
       return null
@@ -1922,7 +2271,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         runAgent(lead, {
           root: ctx.root,
           prompt: stagePrompt,
-          access: 'write',
+          access: ctx.config.implementerAccess === 'full' ? 'full' : 'write',
           outFile: `${task.dir}/implement.log.md`,
         })
       )
@@ -1991,12 +2340,16 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       research: [],
       review: legacyReviewEntries,
     }
-    const reviewEntries = reviewWorkforceForDiff(
-      ctx,
-      workforcePlan ?? legacyReview,
-      userFacing,
-      diff
-    )
+    let reviewEntries = reviewWorkforceForDiff(ctx, workforcePlan ?? legacyReview, userFacing, diff)
+    if (attempt > 0) {
+      // Fix-pass panels are scoped to the gating lenses (correctness, security,
+      // ux-when-relevant). Risk and deploy safety are advisory scorers — they
+      // already assessed the change on the first pass, and re-running the full
+      // 5-expert panel after every small fix was one of the largest measured
+      // waste mechanisms (one task paid 240M review tokens across 84 re-panels).
+      const gating = new Set(['correctness', 'security', 'ux'])
+      reviewEntries = reviewEntries.filter((entry) => gating.has(entry.kind))
+    }
     const agents = agentChoiceMap(ctx)
     const panel: Array<{ key: string; label: string; agent: Agent; prompt: string }> = []
     for (const entry of reviewEntries) {
@@ -2083,9 +2436,15 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       }
     }
     await progress(ctx, task, 'review', `review — ${panel.length}-expert panel`)
-    const reports = await Promise.all(
-      panel.map((e) =>
-        agentStep(
+    // A crashed expert must not discard the rest of the panel: surviving reports
+    // go to the consolidator with an explicit note about who is missing, so the
+    // verdict is made knowing its coverage. At least one expert must survive.
+    const panelResults = await settleStage<Labeled>(
+      task.id,
+      'review',
+      panel.map((e) => ({
+        key: e.key,
+        promise: agentStep(
           meter,
           e.key,
           agentLabel(e.agent),
@@ -2096,9 +2455,27 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             outFile: `${task.dir}/${e.key}.md`,
           }),
           `${agentLabel(e.agent)} · ${e.label}`
-        ).then((text): Labeled => ({ label: e.label, text }))
-      )
+        ).then((text): Labeled => ({ label: e.label, text })),
+      }))
     )
+    const reports = panelResults.map((r) => r.value)
+    for (const e of panel) {
+      if (!panelResults.some((r) => r.key === e.key)) {
+        reports.push({
+          label: e.label,
+          text: `(no report — the ${e.label} expert crashed; its lens did NOT review this diff)`,
+        })
+      }
+    }
+    if (attempt > 0) {
+      const prior = await readArtifact(task, 'consolidated.md')
+      if (prior) {
+        reports.push({
+          label: 'prior consolidated verdict (before this fix attempt)',
+          text: prior,
+        })
+      }
+    }
 
     // CONSOLIDATE — one judge dedupes, drops nits, resolves conflicts by priority,
     // classifies blocking vs advisory, and emits one verdict + one fix list. A FAIL
@@ -2124,6 +2501,29 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       })
     )
     const verdict = parseReviewVerdict(consolidated)
+    if (verdict === 'PASS' && !quickFixUsed) {
+      const quickFixes = extractQuickFixes(consolidated)
+      if (quickFixes) {
+        // One bounded pass clearing the cheap advisories, then straight to
+        // verify — no re-panel. If a quick fix breaks verify, that failure feeds
+        // the normal (mechanically bounded) fix machinery like any other.
+        quickFixUsed = true
+        await setStatus(task, 'implementing')
+        await progress(ctx, task, 'quickfix', 'quick fixes — applying cheap advisories')
+        await agentStep(
+          meter,
+          'quickfix',
+          agentLabel(lead),
+          runAgent(lead, {
+            root: ctx.root,
+            prompt: quickFixPrompt(intent, quickFixes, diff),
+            access: ctx.config.implementerAccess === 'full' ? 'full' : 'write',
+            outFile: `${task.dir}/quickfix.log.md`,
+          })
+        )
+        await writeArtifact(task, 'diff.patch', await worktreeDiff(ctx.root))
+      }
+    }
     if (verdict !== 'PASS') {
       const detail = `The review panel found blocking issues:\n${consolidated}`
       const action = await assessFailure(
@@ -2142,7 +2542,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         continue
       }
       if (action.kind === 'retry') {
-        return retryLater(task, meter, action.reason)
+        return retryLater(ctx, task, meter, stats, action.reason)
       }
       if (action.kind === 'needs-input') {
         return needsInput(ctx, task, meter, stats, action.questions)
@@ -2153,7 +2553,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         continue
       }
       if (rescued?.kind === 'retry') {
-        return retryLater(task, meter, rescued.reason)
+        return retryLater(ctx, task, meter, stats, rescued.reason)
       }
       if (rescued?.kind === 'needs-input') {
         return needsInput(ctx, task, meter, stats, rescued.questions)
@@ -2175,6 +2575,9 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // problem goes straight to the backoff retry instead of burning fix attempts.
     if (verify) {
       const v = await verifyGate(ctx, task, meter, intent, verify, stageGuidance('remediate'))
+      if (v.kind === 'pass') {
+        verify = v.verify // adopt a doctor-repaired gate for proof/resume/ship
+      }
       if (v.kind === 'code') {
         const action = await assessFailure(
           ctx,
@@ -2192,7 +2595,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           continue
         }
         if (action.kind === 'retry') {
-          return retryLater(task, meter, action.reason)
+          return retryLater(ctx, task, meter, stats, action.reason)
         }
         if (action.kind === 'needs-input') {
           return needsInput(ctx, task, meter, stats, action.questions)
@@ -2203,7 +2606,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           continue
         }
         if (rescued?.kind === 'retry') {
-          return retryLater(task, meter, rescued.reason)
+          return retryLater(ctx, task, meter, stats, rescued.reason)
         }
         if (rescued?.kind === 'needs-input') {
           return needsInput(ctx, task, meter, stats, rescued.questions)
@@ -2248,7 +2651,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
               attempt++
               continue
             case 'retry':
-              return retryLater(task, meter, judged.action.reason)
+              return retryLater(ctx, task, meter, stats, judged.action.reason)
             case 'needs-input':
               return needsInput(ctx, task, meter, stats, judged.action.questions)
             case 'terminal':
@@ -2263,7 +2666,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
               )
           }
         }
-        return retryLater(task, meter, v.reason)
+        return retryLater(ctx, task, meter, stats, v.reason)
       }
       // Passed verify — first try iff no prior code-fix attempts (an environment
       // remediation isn't a code fix, so it doesn't disqualify first-try).
@@ -2275,23 +2678,40 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     break // both gates passed
   }
 
-  // Gate passed: record proof and commit on the branch.
+  // Gate passed: record proof and commit on the branch. Proof is a self-contained
+  // record of WHAT passed — verdict summary, real verify output, and the shape of
+  // the change — not a stub pointing at files that later get overwritten.
+  const consolidatedVerdict = await readArtifact(task, 'consolidated.md')
+  const verifyLog = await readArtifact(task, 'verify.log')
+  const diffForProof = await worktreeDiff(ctx.root)
   const proof = [
     `# Proof — ${task.id}`,
     '',
-    '## Selected plan (head)',
-    finalPlan.split('\n').slice(0, 3).join('\n'),
+    `Recorded: ${new Date().toISOString()}`,
+    `Fix attempts: ${attempt}`,
     '',
-    '## Review',
-    'VERDICT: PASS',
+    '## Review verdict',
+    consolidatedVerdict ? consolidatedVerdict.split('\n').slice(0, 40).join('\n') : 'VERDICT: PASS',
     '',
-    `## Verify\n${verify ? `\`${verify}\` passed` : 'no verify command'}`,
+    '## Verify',
+    verify ? `\`${verify}\` passed` : 'no verify command',
+    ...(verifyLog ? ['', '```', ...verifyLog.split('\n').slice(-30), '```'] : []),
+    '',
+    '## Change shape',
+    '```',
+    ...diffForProof.split('\n').slice(0, 60),
+    '```',
   ].join('\n')
   await writeArtifact(task, 'proof.md', proof)
 
   const message = await synthesizeCommitMessage(ctx, task, meter, intent, finalPlan, verify)
+  // Mark commit intent BEFORE running git commit: a crash between the commit and
+  // the meta save must be recoverable (see meta.commitStartedAt).
+  task.meta.commitStartedAt = new Date().toISOString()
+  await saveMeta(task)
   await commitAll(ctx.root, message)
   task.meta.commit = await headSha(ctx.root)
+  task.meta.commitStartedAt = null
   if (feedbackContext) {
     await refreshFeedbackState(task)
     markFeedbackConsumed(task, feedbackContext.count)
@@ -2450,6 +2870,17 @@ async function shipAndFinish(
         intent,
         stageGuidance('postmortem')
       )
+    }
+    // Delivery may append commits (CI fixes, review responses); keep meta.commit
+    // pointing at the true HEAD instead of the pre-ship commit.
+    try {
+      const head = await headSha(ctx.root)
+      if (task.meta.commit !== head) {
+        task.meta.commit = head
+        await saveMeta(task)
+      }
+    } catch (err) {
+      log.warn(`post-ship commit refresh failed for ${task.id}: ${formatErr(err)}`)
     }
   }
 

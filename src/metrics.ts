@@ -12,6 +12,39 @@ import { log } from './log.ts'
 // telemetry is acceptable) and try once more, then give up quietly. The schema
 // is versioned and rebuilt on any mismatch; we never carefully migrate it.
 
+// Rolling autonomy readiness: over the most recent `limit` tasks whose latest
+// pass was terminal (done/blocked), the fraction that completed first-pass
+// (done, zero fix retries). Best-effort like everything here — null on any
+// error so a broken db can never gate behavior open OR closed unexpectedly.
+export function recentFirstPassYield(
+  path: string,
+  limit: number
+): { tasks: number; firstPassYield: number } | null {
+  try {
+    const db = new Database(path, { readonly: true })
+    try {
+      const rows = db
+        .query<{ outcome: string; retries: number }, [number]>(
+          `SELECT outcome, retries FROM runs r
+           WHERE ts = (SELECT MAX(ts) FROM runs r2 WHERE r2.task = r.task)
+             AND outcome IN ('done', 'blocked')
+           ORDER BY ts DESC LIMIT ?`
+        )
+        .all(limit)
+      if (rows.length === 0) {
+        return { tasks: 0, firstPassYield: 0 }
+      }
+      const firstPass = rows.filter((r) => r.outcome === 'done' && r.retries === 0).length
+      return { tasks: rows.length, firstPassYield: firstPass / rows.length }
+    } finally {
+      db.close()
+    }
+  } catch (err) {
+    log.warn(`autonomy readiness read failed: ${errMsg(err)}`)
+    return null
+  }
+}
+
 export type StageStat = {
   stage: string
   agent: string
@@ -24,7 +57,7 @@ export type RunRecord = {
   task: string
   ts: string
   createdAt: string | null
-  outcome: 'done' | 'blocked' | 'needs-input'
+  outcome: 'done' | 'blocked' | 'needs-input' | 'retrying'
   triage: 'trivial' | 'complex' | null
   retries: number
   verifyFirstTry: boolean | null

@@ -50,10 +50,13 @@ its own agents must follow when the repo is the target.
   `DELIVERY: NONE|SKILL|POLICY`,
   `VERDICT: PASS|FAIL`,
   `VERDICT: CONTINUE_CODE_FIX|RETRY_LATER|ASK_HUMAN|TERMINAL`,
+  `VERDICT: ENV-FIXED|ENV-BLOCKED|CODE|FLAKE|GATE-MISCONFIGURED` (+ `GATE-FIX:`),
   `SHIP: OK|FAILED`, `SPEC READY`, `SHARPEN: PASS|REVISE`, and
   `CATEGORY:` / `LESSON:` / `SUMMARY:`.
-  If you change a marker, change **both** the prompt (`prompts.ts`) and its parser
-  (`conductor.ts` or the owning parser).
+  Parsing is ONE convention (`markers.ts`): whole line, anywhere in the output,
+  last match wins; residual nulls fail toward safety (reconcile → ASK,
+  convergence → ask the human). If you change a marker, change **both** the
+  prompt (`prompts.ts`) and its parser.
 - **codex and claude are peers, shelled out headless.** Do **not** add a
   from-scratch agent loop or a unified LLM client — orchestrating the CLIs is the
   whole point. A new agent CLI is a small adapter in `agents.ts` plus an enum
@@ -78,9 +81,25 @@ its own agents must follow when the repo is the target.
   window state, notifications, or any host-specific integration. Keep it that way —
   new integration is a hook, not core.
 - **Re-enterability.** `runTask` resumes by reusing the saved plan + worktree diff;
-  the fix loop terminates by the convergence judge (with `config.retries` as the
-  hard cap), not a fixed count. Keep new gates on the same auto-fix path, and route
-  transient failures (verify/ship) to the backoff auto-resume rather than a block.
+  answering a mid-loop question resumes at the gates (`answerTask`), not with a
+  replan. The fix loop terminates by the convergence judge WITHIN mechanical
+  bounds enforced in code: identical failure + unchanged worktree is never
+  re-run, `config.retries` is a real cap, and auto-retries have an absolute
+  ceiling — all bounds fail toward asking the human, never silent churn or
+  silent death. Keep new gates on the same auto-fix path, and route transient
+  failures (verify/ship) to the backoff auto-resume rather than a block.
+- **One loop, one active task.** `factory run` holds a lock per worktree; a second
+  fresh `factory add` errors without `--force-new`. The workstream model is one
+  task per worktree (spawner tools create/tear down worktrees per task); task
+  dirs are durable records, not a queue.
+- **Repo state is keyed by origin.** Repo-level stores live under
+  `$FACTORY_HOME/repos/<normalized-origin>/` (path-key fallback without a
+  remote); the env playbook is per-host inside it. Per-worktree session state
+  stays path-keyed and is disposable (`factory gc`).
+- **Gate your changes with the replay runner.** For changes to prompts, markers,
+  or loop policy, run `factory evals run` (or a filtered case) when the repo has
+  captured candidates — that is the regression gate that makes self-modification
+  safe.
 
 ## Map
 

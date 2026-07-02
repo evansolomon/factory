@@ -35,6 +35,10 @@ const config: Config = {
   remediate: true,
   workforce: true,
   rescue: true,
+  autoAcceptAfterMinutes: null,
+  implementerAccess: 'write',
+  autoShip: null,
+  dispatch: null,
   specialists: {},
   hooks: {},
   agents: {
@@ -76,6 +80,7 @@ async function workContext(): Promise<WorkContext> {
     askAgent: { cli: 'claude' },
     repoStateDir: stateDir,
     metricsPath: `${stateDir}/metrics.db`,
+    envPlaybookPath: `${stateDir}/env/test-host.md`,
   }
 }
 
@@ -188,11 +193,19 @@ describe('task state transitions', () => {
     expect(next?.meta.note).toContain('recovered after interrupted sharpening stage')
   })
 
-  test('legacy interactive grilling tasks are not reclaimed as stranded work', async () => {
+  test('legacy grilling tasks are reclaimed instead of fossilizing', async () => {
+    // 'grilling' used to be a settled status the loop never picked up and never
+    // reclaimed — real tasks froze there forever. It now recovers like an
+    // interrupted sharpening stage.
     const ctx = await workContext()
-    await addTask(ctx, 'Still grilling', null, { status: 'grilling' })
+    const task = await addTask(ctx, 'Still grilling', null, { status: 'grilling' })
 
-    expect(await nextRunnable(ctx, 2_000)).toBeNull()
+    const next = await nextRunnable(ctx, 2_000)
+
+    expect(next?.id).toBe(task.id)
+    expect(next?.meta.status).toBe('ready')
+    expect(next?.meta.resume).toBe(false)
+    expect(next?.meta.note).toContain('recovered after interrupted grilling stage')
   })
 
   test('due retries resume as auto-retry', async () => {
@@ -550,5 +563,100 @@ describe('backlog removal', () => {
     await addBacklog(ctx, 'Existing task', null)
 
     expect(await removeBacklog(ctx, 'missing')).toBeNull()
+  })
+})
+
+describe('phase-0 measurement contracts', () => {
+  test('addTask preserves the raw intent and sharpening never destroys it', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Original raw intent', null)
+
+    expect(await readArtifact(task, 'task.original.md')).toBe('Original raw intent')
+
+    const { readySharpenedTask, readIntent } = await import('../src/task.ts')
+    await readySharpenedTask(task, 'Refined spec', 'bun test')
+
+    expect(await readIntent(task)).toBe('Refined spec')
+    expect(await readArtifact(task, 'task.original.md')).toBe('Original raw intent')
+  })
+
+  test('readySharpenedTask backfills task.original.md for pre-existing tasks', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Legacy intent', null)
+    const { rm } = await import('node:fs/promises')
+    await rm(`${task.dir}/task.original.md`)
+
+    const { readySharpenedTask } = await import('../src/task.ts')
+    await readySharpenedTask(task, 'Refined spec', null)
+
+    expect(await readArtifact(task, 'task.original.md')).toBe('Legacy intent')
+  })
+
+  test('appendFailure stamps a timestamp and legacy lines still parse', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Failing task', null)
+    const { appendFailure } = await import('../src/task.ts')
+    // Legacy line without `at`
+    await writeArtifact(
+      task,
+      'failures.jsonl',
+      `${JSON.stringify({ attempt: 0, gate: 'verify', summary: 'old', detail: 'old' })}\n`
+    )
+    await appendFailure(task, {
+      attempt: 1,
+      gate: 'review',
+      summary: 'new',
+      detail: 'new',
+      remediation: 'code-fix',
+    })
+
+    const failures = await readFailures(task)
+    expect(failures).toHaveLength(2)
+    expect(failures[0]?.at).toBeUndefined()
+    expect(typeof failures[1]?.at).toBe('string')
+  })
+
+  test('appendPassMeter accumulates passes and dedupes by startedAt', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Metered task', null)
+    const { appendPassMeter, readPassMeters } = await import('../src/task.ts')
+    const pass = (startedAt: string, inputTokens: number) => ({
+      startedAt,
+      updatedAt: startedAt,
+      inputTokens,
+      outputTokens: 1,
+      stages: [],
+    })
+
+    await appendPassMeter(task, pass('2026-07-01T00:00:00Z', 100), 'retrying')
+    await appendPassMeter(task, pass('2026-07-01T01:00:00Z', 200), 'done')
+    // Same pass swept again as interrupted → no-op
+    await appendPassMeter(task, pass('2026-07-01T01:00:00Z', 999), 'interrupted')
+
+    const meters = await readPassMeters(task)
+    expect(meters).toHaveLength(2)
+    expect(meters.map((m) => m.outcome)).toEqual(['retrying', 'done'])
+    expect(meters[1]?.inputTokens).toBe(200)
+  })
+
+  test('rollArtifactHistory preserves superseded artifact content', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'History task', null)
+    const { rollArtifactHistory } = await import('../src/task.ts')
+
+    await rollArtifactHistory(task, 'questions.md') // no file yet → no-op
+    expect(await readArtifact(task, 'questions.history.md')).toBeNull()
+
+    await writeArtifact(task, 'questions.md', 'Round 1 questions')
+    await rollArtifactHistory(task, 'questions.md')
+    await writeArtifact(task, 'questions.md', 'Round 2 questions')
+    await rollArtifactHistory(task, 'questions.md')
+    await writeArtifact(task, 'questions.md', 'Round 3 questions')
+
+    const history = await readArtifact(task, 'questions.history.md')
+    expect(history).toContain('Round 1 questions')
+    expect(history).toContain('Round 2 questions')
+    expect(history).not.toContain('Round 3 questions')
+    expect(await readArtifact(task, 'questions.md')).toBe('Round 3 questions')
   })
 })

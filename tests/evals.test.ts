@@ -38,6 +38,10 @@ function testConfig(): Config {
     remediate: true,
     workforce: true,
     rescue: true,
+    autoAcceptAfterMinutes: null,
+    implementerAccess: 'write',
+    autoShip: null,
+    dispatch: null,
     specialists: {},
     hooks: {},
     agents: {
@@ -72,6 +76,7 @@ function testContext(repoStateDir: string): WorkContext {
     askAgent: agent,
     repoStateDir,
     metricsPath: `${repoStateDir}/metrics.db`,
+    envPlaybookPath: `${repoStateDir}/env/test-host.md`,
   }
 }
 

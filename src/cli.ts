@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
+import { readdir, rm, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { z } from 'zod'
 import { type ParsedAddOptions, parseAddOptions } from './add-options.ts'
 import { type AddRouteTask, selectAddRoute } from './add-route.ts'
 import { openAgentSession } from './agent-session.ts'
@@ -15,7 +17,9 @@ import {
   globalConfigFile,
   loadContext,
   loadRepoContext,
+  sessionsDir,
   type WorkContext,
+  worktreeMarkerPath,
 } from './config.ts'
 import { openDeck } from './deck.ts'
 import {
@@ -26,7 +30,9 @@ import {
   type TaskDelivery,
 } from './delivery.ts'
 import { composeInEditor, openEditor } from './editor.ts'
+import { appendEvalResult, listEvalCases, runEvalCase } from './eval-run.ts'
 import { captureCorrection, captureEvalCase } from './evals.ts'
+import { run } from './exec.ts'
 import {
   decideFeedbackRoute,
   feedbackRouteInput,
@@ -34,7 +40,7 @@ import {
   latestFeedbackTarget,
   renderTerminalFeedback,
 } from './feedback.ts'
-import { hasChanges, NotARepoError } from './git.ts'
+import { hasChanges, NotARepoError, repoRoot } from './git.ts'
 import {
   deleteGuidance,
   editGuidance,
@@ -49,13 +55,14 @@ import {
 import { emit, type Hooks } from './hooks.ts'
 import { parseInputArgs, resolveMessage } from './input.ts'
 import { readCandidates, readLessons } from './lessons.ts'
+import { acquireRunLock, RunLockError, runLockHolder } from './lock.ts'
 import { log } from './log.ts'
 import { startPromptWorker } from './prompt.ts'
 import { taskNamePrompt } from './prompts.ts'
-import { sharpen } from './sharpen.ts'
+import { parseFormattedQuestions, sharpen } from './sharpen.ts'
 import {
   addTask,
-  appendAnswer,
+  answerTask,
   appendFeedback,
   findTask,
   isStranded,
@@ -84,10 +91,15 @@ you only when the current task is genuinely ambiguous. Run one instance per
 worktree (a fleet) and triage via tmux.
 
 COMMANDS
-  factory backlog [add|rm] …    Experimental repo-level backlog of vetted intents.
-                             add/rm take the same intent forms as 'factory add';
-                             automatic dispatch is not built yet.
-  factory add [--raw] [--trivial | --complexity trivial|complex] [intent...] [--verify <cmd...>] [--edit]
+  factory backlog [add|rm] …    Repo-level backlog of vetted intents, drained by
+                             'factory dispatch'. add/rm take the same intent
+                             forms as 'factory add'.
+  factory dispatch [--limit N] [--dry-run]
+      Spawn one workstream per backlog item through the configured dispatch.spawn
+      command (your worktree/tmux bootstrap tooling). Factory hands each item to
+      the spawner with FACTORY_INTENT/FACTORY_NAME/FACTORY_VERIFY in the
+      environment; exit 0 removes it from the backlog.
+  factory add [--raw] [--trivial | --complexity trivial|complex] [--force-new] [--name <slug>] [intent...] [--verify <cmd...>] [--edit]
       Tell this factory/workstream something. If a current task needs input, has
       progress, is blocked/retrying, or just completed, the input is routed into
       that task. If there is no current work, it queues a new task. A running
@@ -99,8 +111,12 @@ COMMANDS
       declared runtime complexity instead of triage. A directive like $ship or
       /ship maps to a repo skill when present; plain delivery wording is resolved
       by the run loop before planning/implementation.
+      One ACTIVE task per workstream is enforced: queueing a second fresh task is
+      an error (use a new worktree, or --force-new to batch deliberately).
+      --name <slug> names the task directly (skips the AI namer) — for spawner
+      tools that already named the worktree.
 
-  factory run [--once | --drain] [--no-prompt]
+  factory run [--once | --drain | --until-done] [--no-prompt]
       Work the stream. Default: stay running and pick up tasks as they're added
       (factory add), unblocked (factory retry), due for an auto-retry, or
       stranded mid-stage by a previously killed loop (Ctrl-C/crash) — shovel coal
@@ -110,9 +126,12 @@ COMMANDS
       no action from you. In watch mode on a terminal it also prompts you inline for
       needs-input answers (no need to switch terminals); set-aside work can still
       be resumed later.
-        --once       do one ready task, then exit (good for trying it out)
-        --drain      work until the stream is idle, then exit
-        --no-prompt  don't prompt inline; needs-input waits for factory add
+      One run loop per worktree is enforced with a lock; a second loop fails fast.
+        --once        do one ready task, then exit (good for trying it out)
+        --drain       work until the stream is idle, then exit
+        --until-done  exit 0 when the workstream's task completes, 2 when it
+                      blocks — the spawner-teardown contract
+        --no-prompt   don't prompt inline; needs-input waits for factory add
 
   factory retry [task-id] [-m <note> | --edit]
       Pick a BLOCKED, waiting-to-retry, or interrupted (killed mid-stage) task back
@@ -161,6 +180,17 @@ COMMANDS
                              with a step (e.g. implement, review, plan.codex), show
                              that step's line-by-line agent activity. A lone step
                              name applies to the latest task (factory show review).
+  factory evals [list | run [case] [--keep]]
+      Replay harvested eval candidates against the CURRENT factory build in a
+      throwaway worktree + isolated FACTORY_HOME, scoring outcome + touched-file
+      overlap vs the captured reference. The regression gate for prompt/policy
+      changes and for changes to factory itself.
+
+  factory gc [--dry-run]
+      Prune per-worktree session state whose worktree no longer exists (spawned
+      workstreams are ephemeral). Repo-level state (metrics, lessons, evals,
+      delivery history, env playbook) is never touched.
+
   factory report [task-id] [--all]
                              Telemetry for one task (defaults to the latest here):
                              cost, cycle time, where the tokens go. --all rolls up
@@ -625,8 +655,8 @@ async function hasSavedPlan(task: Task): Promise<boolean> {
   return (await readPlan(task)) !== null
 }
 
-async function feedbackFacts(task: Task, hasWorktreeDiff: boolean) {
-  return feedbackRouteInput(task, await hasSavedPlan(task), hasWorktreeDiff)
+async function feedbackFacts(task: Task, hasWorktreeDiff: boolean, loopActive: boolean) {
+  return feedbackRouteInput(task, await hasSavedPlan(task), hasWorktreeDiff, loopActive)
 }
 
 async function addRouteTasks(tasks: Task[]): Promise<AddRouteTask[]> {
@@ -692,7 +722,9 @@ async function queueNewTask(
   // skips runtime triage.
   const skipSharpen = options.raw || options.complexity !== null || !process.stdin.isTTY
   const directed = extractDeliveryDirective(base.intent, await listDeliverySkills(ctx.root))
-  const suggestedSlug = await suggestTaskSlug(ctx, directed.intent)
+  // An explicit --name skips the namer model call: the spawner already named
+  // this workstream and the worktree, so a second AI-chosen name is pure cost.
+  const suggestedSlug = options.name ?? (await suggestTaskSlug(ctx, directed.intent))
   const task = await addTask(ctx, directed.intent, base.verify, {
     sharpen: skipSharpen ? 'skipped' : 'pending',
     complexity: options.complexity,
@@ -714,6 +746,67 @@ async function queueNewTask(
         existingFreshTaskIds.join(', ')
     )
     log.info('one task per worktree keeps the workstream and commit provenance clean')
+  }
+}
+
+// Idle-loop housekeeping for parked needs-input tasks. Two jobs:
+//  1. AUTO-ACCEPT (opt-in via config.autoAcceptAfterMinutes): when every open
+//     question carries a recommended answer and the task has waited past the
+//     window, proceed with the recommendations — recorded as a normal answer so
+//     it is visible, auditable, and overridable by later feedback. Real usage
+//     showed rubber-stamp answers ("go with all recommendations") dominating
+//     these waits, and hard-parked tasks losing races against manual work.
+//  2. STALE SIGNAL: emit a `task.stale` hook once per parked task per loop run
+//     after 24h, so the environment can nudge (the attention hook is deduped and
+//     fires only on state changes).
+const STALE_AFTER_MS = 24 * 60 * 60 * 1000
+const staleSignaled = new Set<string>()
+
+async function tendParkedTasks(ctx: WorkContext): Promise<void> {
+  const autoAcceptMs = ctx.config.autoAcceptAfterMinutes
+    ? ctx.config.autoAcceptAfterMinutes * 60_000
+    : null
+  for (const task of await loadTasks(ctx)) {
+    if (task.meta.status !== 'needs-input' && task.meta.status !== 'blocked') {
+      continue
+    }
+    const parkedSince = Date.parse(task.meta.updatedAt ?? task.meta.createdAt)
+    const waited = Date.now() - (Number.isFinite(parkedSince) ? parkedSince : Date.now())
+    if (waited > STALE_AFTER_MS && !staleSignaled.has(task.id)) {
+      staleSignaled.add(task.id)
+      await emit(ctx.root, ctx.config.hooks, 'task.stale', {
+        task: task.id,
+        state: task.meta.status,
+      })
+    }
+    if (task.meta.status !== 'needs-input' || autoAcceptMs === null || waited < autoAcceptMs) {
+      continue
+    }
+    const questionsText = await readArtifact(task, 'questions.md')
+    if (!questionsText) {
+      continue
+    }
+    const { questions } = parseFormattedQuestions(questionsText)
+    if (questions.length === 0 || questions.some((q) => !q.rec)) {
+      continue // only auto-accept when EVERY question has a recommendation
+    }
+    task.meta.autoAcceptedRounds += 1
+    await answerTask(
+      task,
+      'Proceed with your recommended answers for all questions. ' +
+        `(auto-accepted after ${Math.round(waited / 60_000)} minutes by ` +
+        'config.autoAcceptAfterMinutes; treat each recommendation as an explicit ' +
+        'assumption and record it in the spec)'
+    )
+    log.warn(`${task.id}: auto-accepted recommended answers after ${Math.round(waited / 60_000)}m`)
+  }
+}
+
+async function repoRootOrNull(cwd: string): Promise<string | null> {
+  try {
+    return await repoRoot(cwd)
+  } catch {
+    return null
   }
 }
 
@@ -757,7 +850,11 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     const ctx = await loadContext(process.cwd())
     const tasks = await loadTasks(ctx)
     const routeTasks = await addRouteTasks(tasks)
-    const route = selectAddRoute(routeTasks, await hasChanges(ctx.root))
+    const route = selectAddRoute(
+      routeTasks,
+      await hasChanges(ctx.root),
+      (await runLockHolder(ctx.stateDir)) !== null
+    )
     if (route.kind === 'new-task') {
       const existingFreshTaskIds = routeTasks
         .filter(
@@ -765,6 +862,15 @@ export async function main(opts: MainOptions = {}): Promise<number> {
             task.status === 'ready' && !task.hasPlan && !task.hasCommit && !task.pendingFeedback
         )
         .map((task) => task.id)
+      if (existingFreshTaskIds.length > 0 && !parsed.options.forceNew) {
+        // One active task per workstream, enforced. A second fresh task belongs
+        // in its own worktree; deliberate batching needs the explicit flag.
+        log.fail(
+          `this workstream already has a fresh queued task: ${existingFreshTaskIds.join(', ')}`
+        )
+        log.info('start it in a new worktree, or pass --force-new to batch deliberately')
+        return 1
+      }
       await queueNewTask(ctx, base, parsed.options, existingFreshTaskIds)
       return 0
     }
@@ -779,8 +885,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     }
     const task = findLoadedTask(tasks, route.taskId)
     if (route.kind === 'answer') {
-      await appendAnswer(task, base.intent)
-      await setStatus(task, 'ready')
+      await answerTask(task, base.intent)
       log.ok(`${task.id}: routed as answer — ${route.reason}`)
       return 0
     }
@@ -803,6 +908,13 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       task.meta.retryAt = null
       await setStatus(task, 'ready')
       log.ok(`${task.id}: routed as feedback — ${route.reason}`)
+      return 0
+    }
+    if (route.kind === 'feedback-live') {
+      // A live loop owns this task's status; record the feedback only. It is
+      // consumed after the in-flight pass commits, or by the next pass.
+      await appendFeedback(task, base.intent)
+      log.ok(`${task.id}: feedback recorded — ${route.reason}`)
       return 0
     }
     if (route.recordOnSource) {
@@ -880,10 +992,43 @@ export async function main(opts: MainOptions = {}): Promise<number> {
   if (cmd === 'run') {
     const once = rest.includes('--once')
     const drain = rest.includes('--drain')
+    const untilDone = rest.includes('--until-done')
     const ctx = await loadContext(process.cwd())
     log.info(
-      once ? 'running one task' : drain ? 'draining queue' : 'watching queue (Ctrl-C to stop)'
+      once
+        ? 'running one task'
+        : drain
+          ? 'draining queue'
+          : untilDone
+            ? 'running until the workstream task completes'
+            : 'watching queue (Ctrl-C to stop)'
     )
+
+    // One loop per worktree, enforced: a second concurrent loop would reclaim
+    // the first loop's in-flight task as "stranded". Released on exit/SIGINT.
+    let releaseLock: (() => Promise<void>) | null = null
+    try {
+      releaseLock = await acquireRunLock(ctx.stateDir)
+    } catch (err) {
+      if (err instanceof RunLockError) {
+        log.fail(err.message)
+        return 1
+      }
+      throw err
+    }
+    const release = async () => {
+      if (releaseLock) {
+        const r = releaseLock
+        releaseLock = null
+        await r()
+      }
+    }
+    process.on('SIGINT', () => {
+      void release().finally(() => process.exit(130))
+    })
+    process.on('SIGTERM', () => {
+      void release().finally(() => process.exit(143))
+    })
 
     // In the long-lived watch mode, when someone is at the terminal, prompt for
     // needs-input answers inline. Bounded runs (--once/--drain) and non-TTY/piped
@@ -926,6 +1071,11 @@ export async function main(opts: MainOptions = {}): Promise<number> {
           break
         }
         await emit(ctx.root, ctx.config.hooks, 'loop.idle', { state: remaining ?? 'idle' })
+        try {
+          await tendParkedTasks(ctx)
+        } catch (err) {
+          log.warn(`parked-task housekeeping failed: ${err instanceof Error ? err.message : err}`)
+        }
         await Bun.sleep(POLL_MS)
         continue
       }
@@ -960,6 +1110,13 @@ export async function main(opts: MainOptions = {}): Promise<number> {
         }
         if (await readArtifact(task, 'brief.html')) {
           log.log(`brief: factory deck ${task.id}`)
+        }
+        if (untilDone) {
+          // Spawner contract: the workstream's task completed — exit 0 so the
+          // surrounding tooling (tmux window, worktree teardown) can proceed.
+          await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+          await release()
+          return 0
         }
       } else if (outcome.kind === 'needs-input') {
         await setStatus(task, 'needs-input', 'awaiting answer — see questions.md')
@@ -1004,6 +1161,13 @@ export async function main(opts: MainOptions = {}): Promise<number> {
           log.log(`    ${line}`)
         }
         log.info(`    detail: factory show ${task.id}  ·  retry: factory retry`)
+        if (untilDone) {
+          // Spawner contract: blocked means a human decision is required — exit
+          // nonzero so teardown does NOT proceed and the workstream stays up.
+          await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+          await release()
+          return 2
+        }
       }
 
       if (once) {
@@ -1015,6 +1179,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     // stale "an agent is working here" indicator after the process is gone. The
     // long-lived path never reaches here — it clears via loop.idle instead.
     await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+    await release()
     return 0
   }
 
@@ -1041,8 +1206,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       log.fail(usage)
       return 1
     }
-    await appendAnswer(task, text)
-    await setStatus(task, 'ready')
+    await answerTask(task, text)
     log.ok(`${task.id}: answered, back in queue`)
     return 0
   }
@@ -1056,6 +1220,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       return 1
     }
     const hasWorktreeDiff = await hasChanges(ctx.root)
+    const loopActive = (await runLockHolder(ctx.stateDir)) !== null
     let task: Task | null
     if (parsed.taskQuery) {
       task = await findTask(ctx, parsed.taskQuery)
@@ -1067,7 +1232,12 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       }
       const hasPlanByTask = new Map(hasPlanEntries)
       task = latestFeedbackTarget(tasks, (candidate) =>
-        feedbackRouteInput(candidate, hasPlanByTask.get(candidate.id) ?? false, hasWorktreeDiff)
+        feedbackRouteInput(
+          candidate,
+          hasPlanByTask.get(candidate.id) ?? false,
+          hasWorktreeDiff,
+          loopActive
+        )
       )
     }
     if (!task) {
@@ -1078,7 +1248,7 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       )
       return 1
     }
-    const route = decideFeedbackRoute(await feedbackFacts(task, hasWorktreeDiff))
+    const route = decideFeedbackRoute(await feedbackFacts(task, hasWorktreeDiff, loopActive))
     if (route.kind === 'reject') {
       log.fail(route.message)
       return 1
@@ -1101,6 +1271,13 @@ export async function main(opts: MainOptions = {}): Promise<number> {
         suggestedSlug: await suggestTaskSlug(ctx, followUpText),
       })
       log.ok(`${task.id}: done — queued follow-up ${followUp.id} for feedback`)
+      return 0
+    }
+
+    if (route.kind === 'record') {
+      // A live loop owns this task's status; append only, no requeue.
+      await appendFeedback(task, text)
+      log.ok(`${task.id}: feedback recorded — the running loop will consume it`)
       return 0
     }
 
@@ -1174,6 +1351,186 @@ export async function main(opts: MainOptions = {}): Promise<number> {
     await captureCorrection(ctx, task, note ?? '')
     await setStatus(task, 'done')
     log.ok(`${task.id}: correction recorded, marked done`)
+    return 0
+  }
+
+  if (cmd === 'evals') {
+    // The replay runner: re-run harvested eval candidates against the CURRENT
+    // factory build and score them. This is the regression gate for changes to
+    // prompts, policies, and factory itself.
+    const sub = rest[0] ?? 'list'
+    const ctx = await loadContext(process.cwd())
+    const repoCtx = await loadRepoContext(process.cwd())
+    const cases = await listEvalCases(ctx.repoStateDir)
+    if (sub === 'list') {
+      if (cases.length === 0) {
+        log.info('no eval candidates captured for this repo yet')
+        return 0
+      }
+      for (const c of cases) {
+        log.log(`${c.file} · ${c.case.outcome} · base ${c.case.baseCommit.slice(0, 10)}`)
+      }
+      log.info(`${cases.length} candidates · run one: factory evals run <file-substring>`)
+      return 0
+    }
+    if (sub === 'run') {
+      const keep = rest.includes('--keep')
+      const filter = rest.slice(1).find((a) => !a.startsWith('--'))
+      const selected = filter ? cases.filter((c) => c.file.includes(filter)) : cases
+      const runnable = selected.filter((c) => c.case.outcome !== 'corrected')
+      if (runnable.length === 0) {
+        log.fail(filter ? `no replayable case matching ${filter}` : 'no replayable cases')
+        return 1
+      }
+      log.info(
+        `replaying ${runnable.length} case${runnable.length === 1 ? '' : 's'} against the ` +
+          'current factory build — each is a full pipeline run'
+      )
+      let matched = 0
+      for (const c of runnable) {
+        log.step(`replaying ${c.file}`)
+        const result = await runEvalCase(repoCtx.mainRoot, c, { keep })
+        await appendEvalResult(ctx.repoStateDir, result)
+        if (result.error) {
+          log.fail(`${c.file}: ${result.error}`)
+          continue
+        }
+        const verdict = result.outcomeMatch ? 'outcome-match' : 'OUTCOME-MISMATCH'
+        if (result.outcomeMatch) {
+          matched++
+        }
+        log.ok(
+          `${c.file}: ${verdict} (expected ${result.expectedOutcome}, replay ${result.replayStatus}) · ` +
+            `file overlap ${(result.fileJaccard * 100).toFixed(0)}% · ${Math.round(result.durationMs / 1000)}s`
+        )
+      }
+      log.info(
+        `replay summary: ${matched}/${runnable.length} outcome matches · results: ` +
+          `${ctx.repoStateDir}/eval-results.jsonl`
+      )
+      return matched === runnable.length ? 0 : 1
+    }
+    log.fail('usage: factory evals [list | run [case-substring] [--keep]]')
+    return 1
+  }
+
+  if (cmd === 'dispatch') {
+    // Drain the repo backlog by spawning one workstream per item through the
+    // configured spawn command (one task = one worktree = one lifecycle, owned
+    // by the spawner tool). Factory hands the item over; it does not queue
+    // tasks internally or manage lanes.
+    const ctx = await loadRepoContext(process.cwd())
+    const spawn = ctx.config.dispatch?.spawn
+    if (!spawn) {
+      log.fail(
+        'no dispatch.spawn command configured (set it in .factory.json or the global config)'
+      )
+      return 1
+    }
+    const dryRun = rest.includes('--dry-run')
+    const limitIdx = rest.indexOf('--limit')
+    const limit = limitIdx !== -1 ? Number(rest[limitIdx + 1]) : Number.POSITIVE_INFINITY
+    if (Number.isNaN(limit) || limit <= 0) {
+      log.fail('--limit needs a positive number')
+      return 1
+    }
+    const entries = await loadBacklog(ctx)
+    if (entries.length === 0) {
+      log.info('backlog is empty')
+      return 0
+    }
+    let spawned = 0
+    for (const entry of entries) {
+      if (spawned >= limit) {
+        break
+      }
+      if (dryRun) {
+        log.info(`would dispatch ${entry.id}: ${entry.intent.split('\n')[0]}`)
+        spawned++
+        continue
+      }
+      log.step(`dispatching ${entry.id}`)
+      const env: Record<string, string> = {}
+      for (const [key, value] of Object.entries(process.env)) {
+        if (value !== undefined) {
+          env[key] = value
+        }
+      }
+      env['FACTORY_INTENT'] = entry.intent
+      env['FACTORY_NAME'] = entry.id
+      env['FACTORY_VERIFY'] = entry.verify ?? ''
+      const res = await run(['bash', '-lc', spawn], { cwd: ctx.mainRoot, stdin: '', env })
+      if (res.code !== 0) {
+        log.fail(
+          `spawn failed for ${entry.id} (exit ${res.code}): ${(res.stderr || res.stdout).slice(0, 300)}`
+        )
+        log.info('stopping dispatch; the item stays in the backlog')
+        return 1
+      }
+      await removeBacklog(ctx, entry.id)
+      log.ok(`dispatched ${entry.id}`)
+      spawned++
+    }
+    log.info(
+      `${dryRun ? 'would dispatch' : 'dispatched'} ${spawned} item${spawned === 1 ? '' : 's'}`
+    )
+    return 0
+  }
+
+  if (cmd === 'gc') {
+    // Worktrees are ephemeral in the workstream model (spawned per task, torn
+    // down on done); their session state is debris once the worktree is gone.
+    // Durable value (metrics, lessons, evals, delivery history) lives at the
+    // repo level and is never touched here.
+    const dryRun = rest.includes('--dry-run')
+    const base = sessionsDir()
+    let entries: string[] = []
+    try {
+      entries = (await readdir(base, { withFileTypes: true }))
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+    } catch {
+      log.info('no session state to collect')
+      return 0
+    }
+    const currentRoot = await repoRootOrNull(process.cwd())
+    let removed = 0
+    let kept = 0
+    let unknown = 0
+    for (const name of entries) {
+      const dir = `${base}/${name}`
+      let root: string | null = null
+      try {
+        const marker = await Bun.file(worktreeMarkerPath(dir)).json()
+        root = z.object({ root: z.string() }).parse(marker).root
+      } catch {
+        unknown++
+        continue // no marker → can't prove the worktree is gone; leave it
+      }
+      if (root === currentRoot) {
+        kept++
+        continue
+      }
+      const worktreeExists = await stat(root).then(
+        (s) => s.isDirectory(),
+        () => false
+      )
+      if (worktreeExists) {
+        kept++
+        continue
+      }
+      if (dryRun) {
+        log.info(`would remove ${dir} (worktree gone: ${root})`)
+      } else {
+        await rm(dir, { recursive: true, force: true })
+        log.ok(`removed ${dir} (worktree gone: ${root})`)
+      }
+      removed++
+    }
+    log.info(
+      `${dryRun ? 'would remove' : 'removed'} ${removed} · kept ${kept} live` +
+        (unknown ? ` · ${unknown} unidentifiable (no worktree marker; left alone)` : '')
+    )
     return 0
   }
 

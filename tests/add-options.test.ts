@@ -23,6 +23,8 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo'],
       raw: false,
       complexity: 'trivial',
+      forceNew: false,
+      name: null,
     })
   })
 
@@ -31,6 +33,8 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo'],
       raw: false,
       complexity: 'trivial',
+      forceNew: false,
+      name: null,
     })
   })
 
@@ -39,6 +43,8 @@ describe('parseAddOptions', () => {
       args: ['Refactor', 'parser'],
       raw: false,
       complexity: 'complex',
+      forceNew: false,
+      name: null,
     })
   })
 
@@ -47,6 +53,8 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo'],
       raw: false,
       complexity: 'trivial',
+      forceNew: false,
+      name: null,
     })
   })
 
@@ -75,6 +83,8 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo', '--verify', 'bun', 'test'],
       raw: false,
       complexity: 'trivial',
+      forceNew: false,
+      name: null,
     })
   })
 
@@ -92,6 +102,8 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo', '--verify', 'bun', 'test', '--raw'],
       raw: false,
       complexity: null,
+      forceNew: false,
+      name: null,
     })
   })
 
@@ -100,6 +112,36 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo'],
       raw: true,
       complexity: null,
+      forceNew: false,
+      name: null,
     })
+  })
+})
+
+describe('parseAddOptions --force-new', () => {
+  test('parses --force-new and strips it from intent args', () => {
+    expect(expectParsed(['--force-new', 'Second', 'task'])).toEqual({
+      args: ['Second', 'task'],
+      raw: false,
+      complexity: null,
+      forceNew: true,
+      name: null,
+    })
+  })
+})
+
+describe('parseAddOptions --name', () => {
+  test('parses --name and strips it from intent args', () => {
+    expect(expectParsed(['--name', 'fix-upload', 'Fix', 'the', 'upload'])).toEqual({
+      args: ['Fix', 'the', 'upload'],
+      raw: false,
+      complexity: null,
+      forceNew: false,
+      name: 'fix-upload',
+    })
+  })
+
+  test('rejects --name without a value', () => {
+    expect(expectError(['--name'])).toContain('--name needs a value')
   })
 })

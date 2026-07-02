@@ -170,6 +170,7 @@ function task(id: string, updatedAt: string, overrides: Partial<Task['meta']> = 
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt,
       commit: null,
+      commitStartedAt: null,
       note: null,
       sharpen: 'done',
       resume: false,
@@ -180,6 +181,8 @@ function task(id: string, updatedAt: string, overrides: Partial<Task['meta']> = 
       complexity: null,
       delivery: { mode: 'pending' },
       deliveryProposalAt: null,
+      questionRounds: 0,
+      autoAcceptedRounds: 0,
       feedbackCount: 0,
       feedbackConsumed: 0,
       feedbackSourceTaskId: null,
@@ -195,6 +198,7 @@ function route(overrides: Partial<FeedbackRouteInput>) {
     hasWorktreeDiff: false,
     hasCommit: false,
     pendingFeedback: false,
+    loopActive: false,
     ...overrides,
   })
 }
@@ -287,6 +291,7 @@ function baseInput(overrides: Partial<FeedbackRouteInput> = {}): FeedbackRouteIn
     hasWorktreeDiff: false,
     hasCommit: false,
     pendingFeedback: false,
+    loopActive: false,
     ...overrides,
   }
 }

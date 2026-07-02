@@ -25,6 +25,10 @@ const config: Config = {
   remediate: true,
   workforce: true,
   rescue: true,
+  autoAcceptAfterMinutes: null,
+  implementerAccess: 'write',
+  autoShip: null,
+  dispatch: null,
   specialists: {},
   hooks: {},
   agents: {
@@ -62,6 +66,7 @@ async function workContext(): Promise<WorkContext> {
     askAgent: { cli: 'claude' },
     repoStateDir: stateDir,
     metricsPath: `${stateDir}/metrics.db`,
+    envPlaybookPath: `${stateDir}/env/test-host.md`,
   }
 }
 

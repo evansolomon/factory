@@ -1,6 +1,7 @@
 import { mkdir, readdir } from 'node:fs/promises'
 import { z } from 'zod'
 import type { WorkContext } from './config.ts'
+import { globalSkillsDir } from './config.ts'
 import type { Task } from './task.ts'
 
 const DeliverySourceSchema = z.enum(['explicit', 'manual', 'selected', 'fallback'])
@@ -168,8 +169,7 @@ function firstFrontmatterValue(text: string, key: string): string | null {
   return match?.[1]?.trim() ?? null
 }
 
-export async function listDeliverySkills(root: string): Promise<DeliverySkill[]> {
-  const dir = `${root}/.skills`
+async function skillsInDir(dir: string): Promise<DeliverySkill[]> {
   try {
     const entries = await readdir(dir, { withFileTypes: true })
     const skills: DeliverySkill[] = []
@@ -187,10 +187,23 @@ export async function listDeliverySkills(root: string): Promise<DeliverySkill[]>
         description: firstFrontmatterValue(text, 'description'),
       })
     }
-    return skills.sort((a, b) => a.name.localeCompare(b.name))
+    return skills
   } catch {
     return []
   }
+}
+
+// Repo skills (.skills/) plus GLOBAL skills ($FACTORY_HOME/skills/). Real usage
+// showed 7 of 8 delivery selections choosing "none" solely because no skills
+// were registered in that repo — stranding 33-hour tasks at unadvertised local
+// commits. Machine-wide ship/pr skills make delivery the default everywhere;
+// a repo skill with the same name overrides the global one.
+export async function listDeliverySkills(root: string): Promise<DeliverySkill[]> {
+  const repo = await skillsInDir(`${root}/.skills`)
+  const global = await skillsInDir(globalSkillsDir())
+  const names = new Set(repo.map((s) => s.name.toLowerCase()))
+  const merged = [...repo, ...global.filter((s) => !names.has(s.name.toLowerCase()))]
+  return merged.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 function historyPath(ctx: WorkContext): string {
