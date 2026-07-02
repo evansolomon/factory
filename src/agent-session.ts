@@ -1,5 +1,7 @@
 import { readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { scanArgs } from './args.ts'
+import { SESSION_OPTIONS } from './commands.ts'
 import type { WorkContext } from './config.ts'
 import { log } from './log.ts'
 import { prototypePrimaryArtifactPath } from './prototype.ts'
@@ -62,46 +64,33 @@ export function parseAgentSessionArgs(
   args: string[],
   defaultAgent: InteractiveAgent
 ): { ok: true; request: SessionRequest } | { ok: false; message: string } {
+  const usage = 'usage: factory session [--agent codex|claude] [task-id]'
+  // Single-dash tokens are positional task queries here, not options.
+  const scan = scanArgs(SESSION_OPTIONS, args, { unknown: 'error', flagish: 'double-dash' })
+  if (!scan.ok) {
+    if (scan.error.kind === 'unknown-option') {
+      return { ok: false, message: `unknown option ${scan.error.option}` }
+    }
+    return { ok: false, message: usage }
+  }
+
   let agent = defaultAgent
-  const positional: string[] = []
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]
-    if (arg === undefined) {
-      break
+  for (const value of scan.flags['--agent']) {
+    if (!value) {
+      return { ok: false, message: usage }
     }
-    if (arg === '--agent') {
-      const next = args[i + 1]
-      if (!next) {
-        return { ok: false, message: 'usage: factory session [--agent codex|claude] [task-id]' }
-      }
-      const parsed = parseAgent(next)
-      if (!parsed) {
-        return { ok: false, message: `unknown agent "${next}" (expected codex or claude)` }
-      }
-      agent = parsed
-      i += 1
-      continue
+    const parsed = parseAgent(value)
+    if (!parsed) {
+      return { ok: false, message: `unknown agent "${value}" (expected codex or claude)` }
     }
-    if (arg.startsWith('--agent=')) {
-      const parsed = parseAgent(arg.slice('--agent='.length))
-      if (!parsed) {
-        return { ok: false, message: `unknown agent "${arg.slice('--agent='.length)}"` }
-      }
-      agent = parsed
-      continue
-    }
-    if (arg.startsWith('--')) {
-      return { ok: false, message: `unknown option ${arg}` }
-    }
-    positional.push(arg)
+    agent = parsed
   }
 
-  if (positional.length > 1) {
-    return { ok: false, message: 'usage: factory session [--agent codex|claude] [task-id]' }
+  if (scan.positionals.length > 1) {
+    return { ok: false, message: usage }
   }
 
-  return { ok: true, request: { agent, taskQuery: positional[0] ?? null } }
+  return { ok: true, request: { agent, taskQuery: scan.positionals[0] ?? null } }
 }
 
 async function existingArtifactNames(task: Task): Promise<string[]> {

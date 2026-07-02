@@ -25,7 +25,7 @@ export type AutoUpgradeState = z.infer<typeof AutoUpgradeStateSchema>
 
 export type AutoUpgradeResult = { kind: 'continue' } | { kind: 'exit'; code: number }
 
-const AUTO_UPGRADE_COMMANDS = new Set(AUTO_UPGRADE_COMMAND_NAMES)
+const AUTO_UPGRADE_COMMANDS: ReadonlySet<string> = new Set(AUTO_UPGRADE_COMMAND_NAMES)
 
 export function isAutoUpgradeCommand(command: string): boolean {
   return AUTO_UPGRADE_COMMANDS.has(command)

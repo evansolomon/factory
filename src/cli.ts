@@ -4,12 +4,32 @@ import { dirname } from 'node:path'
 import { z } from 'zod'
 import { type ParsedAddOptions, parseAddOptions } from './add-options.ts'
 import { type AddRouteTask, selectAddRoute } from './add-route.ts'
-import { openAgentSession } from './agent-session.ts'
+import { type InteractiveAgent, openAgentSession } from './agent-session.ts'
 import { agentLabel, runAgent } from './agents.ts'
+import { type FlagValues, type Scanned, type ScanResult, scanArgs, scanFlags } from './args.ts'
 import { askFactory } from './ask.ts'
 import { type AlertState, createAttentionTracker } from './attention.ts'
 import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
 import { addBacklog, type BacklogEntry, loadBacklog, removeBacklog } from './backlog.ts'
+import {
+  BACKLOG_ADD_OPTIONS,
+  CONFIG_EDIT_OPTIONS,
+  type CommandName,
+  DELIVERY_OPTIONS,
+  DISPATCH_OPTIONS,
+  EVALS_RUN_OPTIONS,
+  GC_OPTIONS,
+  HARVEST_OPTIONS,
+  LESSONS_CURATE_OPTIONS,
+  LESSONS_EDIT_OPTIONS,
+  LESSONS_LIST_OPTIONS,
+  REPORT_OPTIONS,
+  RUN_OPTIONS,
+  resolveCommand,
+  SKILLS_EDIT_OPTIONS,
+  type SubcommandNames,
+} from './commands.ts'
+import { runComplete } from './complete.ts'
 import { runCompletion } from './completion.ts'
 import { AUTO_CAP, deliverTask, runTask, type TaskOutcome } from './conductor.ts'
 import {
@@ -321,33 +341,33 @@ type MainOptions = {
   completion?: (args: string[]) => number
 }
 
-function parseAdd(args: string[]): { intent: string; verify: string | null } {
-  const i = args.indexOf('--verify')
-  if (i === -1) {
-    return { intent: args.join(' ').trim(), verify: null }
-  }
-  return {
-    intent: args.slice(0, i).join(' ').trim(),
-    verify:
-      args
-        .slice(i + 1)
-        .join(' ')
-        .trim() || null,
-  }
-}
-
-// Resolve an intent (+ verify) from args, $EDITOR (--edit or no args on a TTY),
-// or stdin. Shared by `factory add` and `factory backlog add`.
-async function resolveIntent(rest: string[]): Promise<{ intent: string; verify: string | null }> {
-  const editFlag = rest.includes('--edit')
-  const parsed = parseAdd(rest.filter((a) => a !== '--edit'))
-  let intent = parsed.intent
-  if (editFlag || (!intent && process.stdin.isTTY)) {
-    intent = await composeInEditor(parsed.intent)
+// Resolve an intent (+ verify) from the scanned parts, $EDITOR (--edit or no
+// intent on a TTY), or stdin. Shared by `factory add` and `factory backlog add`.
+async function resolveIntentParts(parts: {
+  intentTokens: string[]
+  verifyTail: string[] | undefined
+  edit: boolean
+}): Promise<{ intent: string; verify: string | null }> {
+  let intent = parts.intentTokens.join(' ').trim()
+  const verify = parts.verifyTail ? parts.verifyTail.join(' ').trim() || null : null
+  if (parts.edit || (!intent && process.stdin.isTTY)) {
+    intent = await composeInEditor(intent)
   } else if (!intent) {
     intent = (await Bun.stdin.text()).trim()
   }
-  return { intent, verify: parsed.verify }
+  return { intent, verify }
+}
+
+// Token-form entry for `add`, whose frozen parser keeps --edit in the intent
+// tokens: --edit counts (and is stripped) anywhere, including after --verify.
+async function resolveIntent(rest: string[]): Promise<{ intent: string; verify: string | null }> {
+  const cleaned = rest.filter((a) => a !== '--edit')
+  const i = cleaned.indexOf('--verify')
+  return resolveIntentParts({
+    intentTokens: i === -1 ? cleaned : cleaned.slice(0, i),
+    verifyTail: i === -1 ? undefined : cleaned.slice(i + 1),
+    edit: rest.includes('--edit'),
+  })
 }
 
 function queuedSuffix(opts: {
@@ -386,35 +406,6 @@ async function maybeSharpen(
     return base
   }
   return sharpen({ root, agent, reviewer, hooks, intent: base.intent, verify: base.verify })
-}
-
-type ParseTaskTargetResult =
-  | { ok: true; args: string[]; taskQuery: string | null }
-  | { ok: false; message: string }
-
-function parseTaskTarget(args: string[], usage: string): ParseTaskTargetResult {
-  const cleaned: string[] = []
-  let taskQuery: string | null = null
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]
-    if (arg === undefined) {
-      continue
-    }
-    if (arg !== '--task') {
-      cleaned.push(arg)
-      continue
-    }
-    const next = args[i + 1]
-    if (!next || next.startsWith('--')) {
-      return { ok: false, message: usage }
-    }
-    if (taskQuery) {
-      return { ok: false, message: usage }
-    }
-    taskQuery = next
-    i++
-  }
-  return { ok: true, args: cleaned, taskQuery }
 }
 
 async function inferTaskTarget(ctx: WorkContext, taskQuery: string | null): Promise<Task> {
@@ -650,26 +641,27 @@ async function lessonsCommand(ctx: WorkContext, args: string[]): Promise<number>
   try {
     if (sub === 'list') {
       const usage = 'usage: factory lessons list [--all] [--scope global|repo] [--stage <stage>]'
-      let includeDeleted = false
-      let scope: 'global' | 'repo' | undefined
-      let stage: GuidanceStage | undefined
-      for (let i = 0; i < rest.length; i++) {
-        const arg = rest[i] ?? ''
-        if (arg === '--all') {
-          includeDeleted = true
-        } else if (arg === '--scope') {
-          scope = parseGuidanceScope(rest[i + 1], usage)
-          i++
-        } else if (arg.startsWith('--scope=')) {
-          scope = parseGuidanceScope(arg.slice('--scope='.length), usage)
-        } else if (arg === '--stage') {
-          stage = parseGuidanceStage(rest[i + 1], usage)
-          i++
-        } else if (arg.startsWith('--stage=')) {
-          stage = parseGuidanceStage(arg.slice('--stage='.length), usage)
-        } else {
-          throw new Error(usage)
+      const scan = scanArgs(LESSONS_LIST_OPTIONS, rest, { unknown: 'error' })
+      if (!scan.ok) {
+        if (scan.error.kind === 'missing-value' && scan.error.option === '--scope') {
+          parseGuidanceScope(undefined, usage) // throws with the valid-scopes hint
         }
+        if (scan.error.kind === 'missing-value' && scan.error.option === '--stage') {
+          parseGuidanceStage(undefined, usage) // throws with the valid-stages hint
+        }
+        throw new Error(usage)
+      }
+      if (scan.positionals.length > 0) {
+        throw new Error(usage)
+      }
+      const includeDeleted = scan.flags['--all']
+      let scope: 'global' | 'repo' | undefined
+      for (const value of scan.flags['--scope']) {
+        scope = parseGuidanceScope(value, usage)
+      }
+      let stage: GuidanceStage | undefined
+      for (const value of scan.flags['--stage']) {
+        stage = parseGuidanceStage(value, usage)
       }
       await printLessonsList(ctx, { includeDeleted, scope, stage })
       return 0
@@ -679,41 +671,23 @@ async function lessonsCommand(ctx: WorkContext, args: string[]): Promise<number>
       const usage =
         'usage: factory lessons curate [--dry-run] [--min-cluster <n>] ' +
         '[--eval-case <substring>] [--keep-evals]'
-      let dryRun = false
+      const scan = scanArgs(LESSONS_CURATE_OPTIONS, rest, { unknown: 'error' })
+      if (!scan.ok || scan.positionals.length > 0) {
+        throw new Error(usage)
+      }
+      const dryRun = scan.flags['--dry-run']
+      const keep = scan.flags['--keep-evals']
       let minClusterSize = 2
-      let evalFilter: string | null = null
-      let keep = false
-      for (let i = 0; i < rest.length; i++) {
-        const arg = rest[i] ?? ''
-        if (arg === '--dry-run') {
-          dryRun = true
-        } else if (arg === '--keep-evals') {
-          keep = true
-        } else if (arg === '--min-cluster') {
-          const value = Number(rest[i + 1])
-          if (!Number.isInteger(value) || value < 1) {
-            throw new Error(usage)
-          }
-          minClusterSize = value
-          i++
-        } else if (arg.startsWith('--min-cluster=')) {
-          const value = Number(arg.slice('--min-cluster='.length))
-          if (!Number.isInteger(value) || value < 1) {
-            throw new Error(usage)
-          }
-          minClusterSize = value
-        } else if (arg === '--eval-case') {
-          const value = rest[i + 1]
-          if (!value) {
-            throw new Error(usage)
-          }
-          evalFilter = value
-          i++
-        } else if (arg.startsWith('--eval-case=')) {
-          evalFilter = arg.slice('--eval-case='.length)
-        } else {
+      for (const raw of scan.flags['--min-cluster']) {
+        const value = Number(raw)
+        if (!Number.isInteger(value) || value < 1) {
           throw new Error(usage)
         }
+        minClusterSize = value
+      }
+      let evalFilter: string | null = null
+      for (const value of scan.flags['--eval-case']) {
+        evalFilter = value
       }
 
       const release = await acquireRunLock(`${ctx.repoStateDir}/lessons-curate`)
@@ -793,36 +767,28 @@ async function lessonsCommand(ctx: WorkContext, args: string[]): Promise<number>
       log.fail(usage)
       return 1
     }
-    let message: string | null = null
-    let edit = false
-    let scope: 'global' | 'repo' | null = null
-    const stages: GuidanceStage[] = []
-    for (let i = 1; i < rest.length; i++) {
-      const arg = rest[i] ?? ''
-      if (arg === '-m' || arg === '--message') {
-        const next = rest[i + 1]
-        if (next === undefined) {
-          throw new Error(usage)
-        }
-        message = next
-        i++
-      } else if (arg.startsWith('--message=')) {
-        message = arg.slice('--message='.length)
-      } else if (arg === '--edit') {
-        edit = true
-      } else if (arg === '--scope') {
-        scope = parseGuidanceScope(rest[i + 1], usage)
-        i++
-      } else if (arg.startsWith('--scope=')) {
-        scope = parseGuidanceScope(arg.slice('--scope='.length), usage)
-      } else if (arg === '--stage') {
-        stages.push(parseGuidanceStage(rest[i + 1], usage))
-        i++
-      } else if (arg.startsWith('--stage=')) {
-        stages.push(parseGuidanceStage(arg.slice('--stage='.length), usage))
-      } else {
-        throw new Error(usage)
+    const scan = scanArgs(LESSONS_EDIT_OPTIONS, rest.slice(1), { unknown: 'error' })
+    if (!scan.ok) {
+      if (scan.error.kind === 'missing-value' && scan.error.option === '--scope') {
+        parseGuidanceScope(undefined, usage) // throws with the valid-scopes hint
       }
+      if (scan.error.kind === 'missing-value' && scan.error.option === '--stage') {
+        parseGuidanceStage(undefined, usage) // throws with the valid-stages hint
+      }
+      throw new Error(usage)
+    }
+    if (scan.positionals.length > 0) {
+      throw new Error(usage)
+    }
+    const message = scan.flags['--message'].at(-1) ?? null
+    const edit = scan.flags['--edit']
+    let scope: 'global' | 'repo' | null = null
+    for (const value of scan.flags['--scope']) {
+      scope = parseGuidanceScope(value, usage)
+    }
+    const stages: GuidanceStage[] = []
+    for (const value of scan.flags['--stage']) {
+      stages.push(parseGuidanceStage(value, usage))
     }
     const text =
       message !== null || edit ? await resolveMessage({ message, edit }, 'required') : null
@@ -852,16 +818,24 @@ async function lessonsCommand(ctx: WorkContext, args: string[]): Promise<number>
   }
 }
 
-async function taskDelivery(ctx: WorkContext, args: string[]): Promise<number> {
+async function taskDelivery(
+  ctx: WorkContext,
+  scan: ScanResult<typeof DELIVERY_OPTIONS>
+): Promise<number> {
   const usage = "usage: factory delivery [--task <id>] [none | '$skill' | /skill | <policy...>]"
-  const parsed = parseTaskTarget(args, usage)
-  if (!parsed.ok) {
-    log.fail(parsed.message)
+  if (!scan.ok) {
+    log.fail(usage)
+    return 1
+  }
+  const taskValues = scan.flags['--task']
+  const firstTask = taskValues[0]
+  if (taskValues.length > 1 || firstTask === '' || firstTask?.startsWith('--')) {
+    log.fail(usage)
     return 1
   }
   try {
-    const { task, wasDone } = await inferDeliveryTaskTarget(ctx, parsed.taskQuery)
-    const value = parsed.args.join(' ').trim()
+    const { task, wasDone } = await inferDeliveryTaskTarget(ctx, firstTask ?? null)
+    const value = scan.positionals.join(' ').trim()
     if (value) {
       await setTaskDelivery(
         task,
@@ -1210,134 +1184,139 @@ async function repoRootOrNull(cwd: string): Promise<string | null> {
   }
 }
 
-export async function main(opts: MainOptions = {}): Promise<number> {
-  const [cmd, ...rest] = opts.argv ?? process.argv.slice(2)
+// The dispatch boundary contract: raw argv exists only in main() and the
+// HANDLERS entries below. Scanner-grammar commands are scanned against their
+// registry spec before their handler runs, so those handlers can only read
+// declared, typed flags; the remaining commands receive their declared
+// freeform tail (frozen parser modules, subcommand trees, positional-only
+// grammars) and parse it through the registry-typed scanner internally.
+type CommandHandler = (args: string[], opts: MainOptions) => number | Promise<number>
 
-  if (!cmd || cmd === 'help' || cmd === '-h' || cmd === '--help') {
-    log.log(HELP)
+// hasOwn-guarded narrowing: the record's keys are exactly the registry's
+// subcommand names, so a present key is provably a K.
+function pickSubcommand<K extends string, V>(
+  handlers: Record<K, V>,
+  name: string | undefined
+): V | undefined {
+  if (name === undefined || !Object.hasOwn(handlers, name)) {
+    return undefined
+  }
+  return handlers[name as K]
+}
+
+async function addCommand(args: string[]): Promise<number> {
+  const parsed = parseAddOptions(args)
+  if (!parsed.ok) {
+    log.fail(parsed.message)
+    return 1
+  }
+  const base = await resolveIntent(parsed.options.args)
+  if (!base.intent) {
+    log.fail('add needs an intent (argument, editor, or stdin)')
+    return 1
+  }
+  const ctx = await loadContext(process.cwd())
+  const tasks = await loadTasks(ctx)
+  const routeTasks = await addRouteTasks(tasks)
+  const route = selectAddRoute(
+    routeTasks,
+    await hasChanges(ctx.root),
+    (await runLockHolder(ctx.stateDir)) !== null
+  )
+  if (route.kind === 'new-task') {
+    const existingFreshTaskIds = routeTasks
+      .filter(
+        (task) =>
+          task.status === 'ready' && !task.hasPlan && !task.hasCommit && !task.pendingFeedback
+      )
+      .map((task) => task.id)
+    if (existingFreshTaskIds.length > 0 && !parsed.options.forceNew) {
+      // One active task per workstream, enforced. A second fresh task belongs
+      // in its own worktree; deliberate batching needs the explicit flag.
+      log.fail(
+        `this workstream already has a fresh queued task: ${existingFreshTaskIds.join(', ')}`
+      )
+      log.info('start it in a new worktree, or pass --force-new to batch deliberately')
+      return 1
+    }
+    await queueNewTask(ctx, base, parsed.options, existingFreshTaskIds)
     return 0
   }
-
-  if (cmd === 'version' || cmd === '--version') {
-    log.log(FACTORY_VERSION)
+  const newTaskOnlyError = addOptionsRequireNewTask(parsed.options)
+  if (newTaskOnlyError) {
+    log.fail(newTaskOnlyError)
+    return 1
+  }
+  if (base.verify) {
+    log.fail('--verify only applies when add queues a new task')
+    return 1
+  }
+  const task = findLoadedTask(tasks, route.taskId)
+  if (route.kind === 'answer') {
+    await answerTask(task, base.intent, { repoStateDir: ctx.repoStateDir })
+    log.ok(`${task.id}: routed as answer — ${route.reason}`)
     return 0
   }
-
-  if (cmd === 'upgrade') {
-    return await (opts.upgrade ?? upgradeFactory)()
-  }
-
-  if (cmd === 'completion') {
-    return (opts.completion ?? runCompletion)(rest)
-  }
-
-  const autoUpgrade = await (opts.autoUpgrade ?? maybeAutoUpgrade)({ command: cmd })
-  if (autoUpgrade.kind === 'exit') {
-    return autoUpgrade.code
-  }
-
-  if (cmd === 'add') {
-    const parsed = parseAddOptions(rest)
-    if (!parsed.ok) {
-      log.fail(parsed.message)
-      return 1
-    }
-    const base = await resolveIntent(parsed.options.args)
-    if (!base.intent) {
-      log.fail('add needs an intent (argument, editor, or stdin)')
-      return 1
-    }
-    const ctx = await loadContext(process.cwd())
-    const tasks = await loadTasks(ctx)
-    const routeTasks = await addRouteTasks(tasks)
-    const route = selectAddRoute(
-      routeTasks,
-      await hasChanges(ctx.root),
-      (await runLockHolder(ctx.stateDir)) !== null
-    )
-    if (route.kind === 'new-task') {
-      const existingFreshTaskIds = routeTasks
-        .filter(
-          (task) =>
-            task.status === 'ready' && !task.hasPlan && !task.hasCommit && !task.pendingFeedback
-        )
-        .map((task) => task.id)
-      if (existingFreshTaskIds.length > 0 && !parsed.options.forceNew) {
-        // One active task per workstream, enforced. A second fresh task belongs
-        // in its own worktree; deliberate batching needs the explicit flag.
-        log.fail(
-          `this workstream already has a fresh queued task: ${existingFreshTaskIds.join(', ')}`
-        )
-        log.info('start it in a new worktree, or pass --force-new to batch deliberately')
-        return 1
-      }
-      await queueNewTask(ctx, base, parsed.options, existingFreshTaskIds)
-      return 0
-    }
-    const newTaskOnlyError = addOptionsRequireNewTask(parsed.options)
-    if (newTaskOnlyError) {
-      log.fail(newTaskOnlyError)
-      return 1
-    }
-    if (base.verify) {
-      log.fail('--verify only applies when add queues a new task')
-      return 1
-    }
-    const task = findLoadedTask(tasks, route.taskId)
-    if (route.kind === 'answer') {
-      await answerTask(task, base.intent, { repoStateDir: ctx.repoStateDir })
-      log.ok(`${task.id}: routed as answer — ${route.reason}`)
-      return 0
-    }
-    if (route.kind === 'retry') {
-      task.meta.resume = true
-      task.meta.resumeNote = base.intent
-      task.meta.resumeKind = 'manual'
-      task.meta.autoRetries = 0
-      task.meta.retryAt = null
-      await setStatus(task, 'ready')
-      log.ok(`${task.id}: routed as retry — ${route.reason}`)
-      return 0
-    }
-    if (route.kind === 'feedback') {
-      await appendFeedback(task, base.intent)
-      task.meta.resume = true
-      task.meta.resumeKind = 'manual'
-      task.meta.resumeNote = null
-      task.meta.autoRetries = 0
-      task.meta.retryAt = null
-      await setStatus(task, 'ready')
-      log.ok(`${task.id}: routed as feedback — ${route.reason}`)
-      return 0
-    }
-    if (route.kind === 'feedback-live') {
-      // A live loop owns this task's status; record the feedback only. It is
-      // consumed after the in-flight pass commits, or by the next pass.
-      await appendFeedback(task, base.intent)
-      log.ok(`${task.id}: feedback recorded — ${route.reason}`)
-      return 0
-    }
-    if (route.recordOnSource) {
-      await appendFeedback(task, base.intent)
-      markFeedbackConsumed(task, task.meta.feedbackCount)
-      await saveMeta(task)
-    }
-    const followUpText = followUpIntent(task, base.intent)
-    const followUp = await addTask(ctx, followUpText, task.meta.verify, {
-      sharpen: 'skipped',
-      feedbackSourceTaskId: task.id,
-      suggestedSlug: await suggestTaskSlug(ctx, followUpText),
-    })
-    log.ok(`${task.id}: routed as follow-up — ${route.reason}; queued ${followUp.id}`)
+  if (route.kind === 'retry') {
+    task.meta.resume = true
+    task.meta.resumeNote = base.intent
+    task.meta.resumeKind = 'manual'
+    task.meta.autoRetries = 0
+    task.meta.retryAt = null
+    await setStatus(task, 'ready')
+    log.ok(`${task.id}: routed as retry — ${route.reason}`)
     return 0
   }
+  if (route.kind === 'feedback') {
+    await appendFeedback(task, base.intent)
+    task.meta.resume = true
+    task.meta.resumeKind = 'manual'
+    task.meta.resumeNote = null
+    task.meta.autoRetries = 0
+    task.meta.retryAt = null
+    await setStatus(task, 'ready')
+    log.ok(`${task.id}: routed as feedback — ${route.reason}`)
+    return 0
+  }
+  if (route.kind === 'feedback-live') {
+    // A live loop owns this task's status; record the feedback only. It is
+    // consumed after the in-flight pass commits, or by the next pass.
+    await appendFeedback(task, base.intent)
+    log.ok(`${task.id}: feedback recorded — ${route.reason}`)
+    return 0
+  }
+  if (route.recordOnSource) {
+    await appendFeedback(task, base.intent)
+    markFeedbackConsumed(task, task.meta.feedbackCount)
+    await saveMeta(task)
+  }
+  const followUpText = followUpIntent(task, base.intent)
+  const followUp = await addTask(ctx, followUpText, task.meta.verify, {
+    sharpen: 'skipped',
+    feedbackSourceTaskId: task.id,
+    suggestedSlug: await suggestTaskSlug(ctx, followUpText),
+  })
+  log.ok(`${task.id}: routed as follow-up — ${route.reason}; queued ${followUp.id}`)
+  return 0
+}
 
-  if (cmd === 'backlog') {
-    const ctx = await loadRepoContext(process.cwd())
-    const sub = rest[0]
-    if (sub === 'add') {
-      const raw = rest.includes('--raw')
-      const base = await resolveIntent(rest.slice(1).filter((a) => a !== '--raw'))
+async function backlogCommand(rest: string[]): Promise<number> {
+  const ctx = await loadRepoContext(process.cwd())
+  const subcommands: Record<SubcommandNames<'backlog'>, () => Promise<number>> = {
+    add: async () => {
+      // The full declared grammar is scanned here; unknown flag-ish tokens are
+      // intent words ('collect'). --raw and --edit keep their historical
+      // position-independent rule: they count (and are stripped from the
+      // verify text) even inside the --verify tail.
+      const scan = scanFlags(BACKLOG_ADD_OPTIONS, rest.slice(1), { unknown: 'collect' })
+      const tail = scan.flags['--verify']
+      const raw = scan.flags['--raw'] || (tail?.includes('--raw') ?? false)
+      const edit = scan.flags['--edit'] || (tail?.includes('--edit') ?? false)
+      const base = await resolveIntentParts({
+        intentTokens: scan.positionals,
+        verifyTail: tail?.filter((a) => a !== '--raw' && a !== '--edit'),
+        edit,
+      })
       if (!base.intent) {
         log.fail('backlog add needs an intent (argument, editor, or stdin)')
         return 1
@@ -1357,8 +1336,8 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       const entry = await addBacklog(ctx, refined.intent, refined.verify)
       log.ok(`backlog +${entry.id}${refined.verify ? ` (verify: ${refined.verify})` : ''}`)
       return 0
-    }
-    if (sub === 'rm') {
+    },
+    rm: async () => {
       const id = rest[1]
       if (!id) {
         log.fail('usage: factory backlog rm <id>')
@@ -1376,411 +1355,418 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       }
       log.ok(`backlog -${removed.removed.id}`)
       return 0
-    }
-    const entries = await loadBacklog(ctx)
-    if (entries.length === 0) {
-      log.info('backlog empty — add with: factory backlog add "…"')
-      return 0
-    }
-    log.log(`backlog — ${entries.length} pending`)
-    for (const e of entries) {
-      log.log(`  ${e.id}${e.verify ? `  (verify: ${e.verify})` : ''}`)
-    }
+    },
+  }
+  const sub = pickSubcommand(subcommands, rest[0])
+  if (sub) {
+    return await sub()
+  }
+  const entries = await loadBacklog(ctx)
+  if (entries.length === 0) {
+    log.info('backlog empty — add with: factory backlog add "…"')
     return 0
   }
+  log.log(`backlog — ${entries.length} pending`)
+  for (const e of entries) {
+    log.log(`  ${e.id}${e.verify ? `  (verify: ${e.verify})` : ''}`)
+  }
+  return 0
+}
 
-  if (cmd === 'run') {
-    const once = rest.includes('--once')
-    const drain = rest.includes('--drain')
-    const untilDone = rest.includes('--until-done')
-    const ctx = await loadContext(process.cwd())
-    log.info(
-      once
-        ? 'running one task'
-        : drain
-          ? 'draining queue'
-          : untilDone
-            ? 'running until the workstream task completes'
-            : 'watching queue (Ctrl-C to stop)'
-    )
+async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<number> {
+  const once = flags['--once']
+  const drain = flags['--drain']
+  const untilDone = flags['--until-done']
+  const noPrompt = flags['--no-prompt']
+  const ctx = await loadContext(process.cwd())
+  log.info(
+    once
+      ? 'running one task'
+      : drain
+        ? 'draining queue'
+        : untilDone
+          ? 'running until the workstream task completes'
+          : 'watching queue (Ctrl-C to stop)'
+  )
 
-    // One loop per worktree, enforced: a second concurrent loop would reclaim
-    // the first loop's in-flight task as "stranded". Released on exit/SIGINT.
-    let releaseLock: (() => Promise<void>) | null = null
-    try {
-      releaseLock = await acquireRunLock(ctx.stateDir)
-    } catch (err) {
-      if (err instanceof RunLockError) {
-        log.fail(err.message)
-        return 1
-      }
-      throw err
+  // One loop per worktree, enforced: a second concurrent loop would reclaim
+  // the first loop's in-flight task as "stranded". Released on exit/SIGINT.
+  let releaseLock: (() => Promise<void>) | null = null
+  try {
+    releaseLock = await acquireRunLock(ctx.stateDir)
+  } catch (err) {
+    if (err instanceof RunLockError) {
+      log.fail(err.message)
+      return 1
     }
-    const release = async () => {
-      if (releaseLock) {
-        const r = releaseLock
-        releaseLock = null
-        await r()
-      }
+    throw err
+  }
+  const release = async () => {
+    if (releaseLock) {
+      const r = releaseLock
+      releaseLock = null
+      await r()
     }
-    process.on('SIGINT', () => {
-      void release().finally(() => process.exit(130))
-    })
-    process.on('SIGTERM', () => {
-      void release().finally(() => process.exit(143))
-    })
+  }
+  process.on('SIGINT', () => {
+    void release().finally(() => process.exit(130))
+  })
+  process.on('SIGTERM', () => {
+    void release().finally(() => process.exit(143))
+  })
 
-    // In the long-lived watch mode, when someone is at the terminal, prompt for
-    // needs-input answers inline. Bounded runs (--once/--drain) and non-TTY/piped
-    // runs keep the set-aside + state-aware `factory add` behavior; opt out with
-    // --no-prompt.
-    const interactive = !once && !drain && process.stdin.isTTY && !rest.includes('--no-prompt')
-    if (interactive) {
-      startPromptWorker(ctx)
+  // In the long-lived watch mode, when someone is at the terminal, prompt for
+  // needs-input answers inline. Bounded runs (--once/--drain) and non-TTY/piped
+  // runs keep the set-aside + state-aware `factory add` behavior; opt out with
+  // --no-prompt.
+  const interactive = !once && !drain && process.stdin.isTTY && !noPrompt
+  if (interactive) {
+    startPromptWorker(ctx)
+  }
+
+  // The attention hook means "something new is parked since you last heard
+  // from me" — raised only when the loop has no runnable work left, never
+  // while it's actively churning other tasks, and once per parked episode of
+  // each task (the tracker decides WHETHER to alert; setAlert still dedups
+  // identical consecutive emits so a long idle wait doesn't repeatedly notify
+  // hook consumers on every poll).
+  let alerted: AlertState | 'none' | null = null
+  const setAlert = async (state: AlertState | 'none') => {
+    if (state === alerted) {
+      return
     }
+    alerted = state
+    await emit(ctx.root, ctx.config.hooks, 'attention', { state })
+  }
+  const attention = createAttentionTracker()
 
-    // The attention hook means "something new is parked since you last heard
-    // from me" — raised only when the loop has no runnable work left, never
-    // while it's actively churning other tasks, and once per parked episode of
-    // each task (the tracker decides WHETHER to alert; setAlert still dedups
-    // identical consecutive emits so a long idle wait doesn't repeatedly notify
-    // hook consumers on every poll).
-    let alerted: AlertState | 'none' | null = null
-    const setAlert = async (state: AlertState | 'none') => {
-      if (state === alerted) {
-        return
+  // Long-lived by default: when no task is ready, wait and poll so tasks added
+  // later (factory add), unblocked later (factory retry), or due for an
+  // auto-retry get picked up. needs-input/blocked/retrying tasks are set aside,
+  // not stopped on, so factory stays busy.
+  while (true) {
+    const task = await nextRunnable(ctx)
+    if (!task) {
+      // Nothing runnable: the loop is now genuinely waiting on you. The
+      // tracker alerts once per parked episode of each task — a null means
+      // only already-surfaced questions remain, so HOLD the current alert
+      // (this branch runs every poll; emitting 'none' here would clear a
+      // fresh alert after one poll interval). This is the only place the run
+      // loop raises attention, so consumers never see "waiting on you" while
+      // factory is actively working other tasks. loop.idle still labels the
+      // window with the real whole-queue state on every poll.
+      const tasks = await loadTasks(ctx)
+      const remaining = queueState(tasks)
+      const parked = tasks.flatMap((t) =>
+        t.meta.status === 'needs-input' || t.meta.status === 'blocked'
+          ? [{ id: t.id, status: t.meta.status }]
+          : []
+      )
+      const next = attention.observeIdle(parked, remaining === 'done')
+      if (next !== null) {
+        await setAlert(next)
       }
-      alerted = state
-      await emit(ctx.root, ctx.config.hooks, 'attention', { state })
-    }
-    const attention = createAttentionTracker()
-
-    // Long-lived by default: when no task is ready, wait and poll so tasks added
-    // later (factory add), unblocked later (factory retry), or due for an
-    // auto-retry get picked up. needs-input/blocked/retrying tasks are set aside,
-    // not stopped on, so factory stays busy.
-    while (true) {
-      const task = await nextRunnable(ctx)
-      if (!task) {
-        // Nothing runnable: the loop is now genuinely waiting on you. The
-        // tracker alerts once per parked episode of each task — a null means
-        // only already-surfaced questions remain, so HOLD the current alert
-        // (this branch runs every poll; emitting 'none' here would clear a
-        // fresh alert after one poll interval). This is the only place the run
-        // loop raises attention, so consumers never see "waiting on you" while
-        // factory is actively working other tasks. loop.idle still labels the
-        // window with the real whole-queue state on every poll.
-        const tasks = await loadTasks(ctx)
-        const remaining = queueState(tasks)
-        const parked = tasks.flatMap((t) =>
-          t.meta.status === 'needs-input' || t.meta.status === 'blocked'
-            ? [{ id: t.id, status: t.meta.status }]
-            : []
-        )
-        const next = attention.observeIdle(parked, remaining === 'done')
-        if (next !== null) {
-          await setAlert(next)
-        }
-        if (once || drain) {
-          break
-        }
-        await emit(ctx.root, ctx.config.hooks, 'loop.idle', { state: remaining ?? 'idle' })
-        try {
-          await tendParkedTasks(ctx, (state) => {
-            alerted = state
-          })
-        } catch (err) {
-          log.warn(`parked-task housekeeping failed: ${err instanceof Error ? err.message : err}`)
-        }
-        await Bun.sleep(POLL_MS)
-        continue
-      }
-
-      log.step(`running ${task.id}`)
-      // Actively working — clear any waiting alert, end this task's parked
-      // episode (a re-park after this run alerts fresh), announce the start.
-      attention.taskStarted(task.id)
-      await setAlert('none')
-      await emit(ctx.root, ctx.config.hooks, 'task.start', { task: task.id })
-      // Isolate the task: any unhandled error blocks just this task (logged
-      // clearly) and the loop keeps going, rather than killing the whole run.
-      let outcome: TaskOutcome
-      try {
-        outcome = await runTask(ctx, task)
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err)
-        log.fail(`${task.id}: errored — ${reason}`)
-        outcome = { ok: false, kind: 'blocked', reason }
-      }
-      if (outcome.ok) {
-        await setStatus(task, 'done')
-        await captureEvalCase(ctx, task, 'done')
-        await emit(ctx.root, ctx.config.hooks, 'task.done', {
-          task: task.id,
-          commit: task.meta.commit,
-        })
-        log.ok(`${task.id}: done`)
-        const feedback = await readArtifact(task, 'feedback.md')
-        if (feedback) {
-          for (const line of renderTerminalFeedback(feedback, task.id)) {
-            log.log(line)
-          }
-        }
-        if (await readArtifact(task, 'brief.html')) {
-          log.log(`brief: factory deck ${task.id}`)
-        }
-        if (untilDone) {
-          // Spawner contract: the workstream's task completed — exit 0 so the
-          // surrounding tooling (tmux window, worktree teardown) can proceed.
-          await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
-          await release()
-          return 0
-        }
-      } else if (outcome.kind === 'needs-input') {
-        await setStatus(task, 'needs-input', 'awaiting answer — see questions.md')
-        await emit(ctx.root, ctx.config.hooks, 'task.needs_input', { task: task.id })
-        // In interactive mode the prompt worker announces and collects the answer
-        // inline; point at state-aware `factory add` when nothing will prompt here.
-        if (!interactive) {
-          log.warn(`${task.id}: needs input — run: factory add "..."`)
-        }
-      } else if (outcome.kind === 'retrying') {
-        // Transient gate failure: set aside (no alert) and let the loop auto-resume
-        // it once the backoff elapses, up to the cap, before it truly blocks.
-        task.meta.autoRetries = outcome.autoRetries
-        task.meta.retryAt = outcome.retryAt
-        await setStatus(task, 'retrying', outcome.reason)
-        await emit(ctx.root, ctx.config.hooks, 'task.retrying', {
-          task: task.id,
-          reason: outcome.reason,
-          retryAt: outcome.retryAt,
-        })
-        const retryCount =
-          outcome.autoRetries <= AUTO_CAP
-            ? `${outcome.autoRetries}/${AUTO_CAP}`
-            : `${outcome.autoRetries} (past cap; judge approved)`
-        const retryTime = new Date(outcome.retryAt).toLocaleTimeString()
-        log.warn(`${task.id}: ${outcome.reason} — auto-retry ${retryCount} at ${retryTime}`)
-      } else {
-        await setStatus(task, 'blocked', outcome.reason)
-        await captureEvalCase(ctx, task, 'blocked', outcome.reason)
-        await emit(ctx.root, ctx.config.hooks, 'task.blocked', {
-          task: task.id,
-          reason: outcome.reason,
-        })
-        log.fail(`${task.id}: blocked — ${outcome.reason}`)
-        // Surface why, inline: the first lines of the review/verify failure.
-        const why = (outcome.detail ?? '')
-          .split('\n')
-          .map((l) => l.trim())
-          .filter(Boolean)
-          .slice(0, 8)
-        for (const line of why) {
-          log.log(`    ${line}`)
-        }
-        log.info(`    detail: factory show ${task.id}  ·  retry: factory retry`)
-        if (untilDone) {
-          // Spawner contract: blocked means a human decision is required — exit
-          // nonzero so teardown does NOT proceed and the workstream stays up.
-          await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
-          await release()
-          return 2
-        }
-      }
-
-      if (once) {
+      if (once || drain) {
         break
       }
-    }
-    // Exiting (--once/--drain): clear the active stage so the window drops its
-    // "(stage)" suffix and the shared ▶ working-marker, rather than leaving a
-    // stale "an agent is working here" indicator after the process is gone. The
-    // long-lived path never reaches here — it clears via loop.idle instead.
-    await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
-    await release()
-    return 0
-  }
-
-  if (cmd === 'answer') {
-    const usage = 'usage: factory answer [task-id] [-m <answer> | --edit]'
-    const ctx = await loadContext(process.cwd())
-    log.warn('factory answer is deprecated; use factory add "..." or the inline run prompt')
-    const parsed = parseInputArgs(rest, usage)
-    if (!parsed.ok) {
-      log.fail(parsed.error)
-      return 1
-    }
-    const task = parsed.taskQuery
-      ? await findTask(ctx, parsed.taskQuery)
-      : await latestTask(ctx, ['needs-input'])
-    if (!task) {
-      log.fail(
-        parsed.taskQuery ? `no task matching ${parsed.taskQuery}` : 'no needs-input task to answer'
-      )
-      return 1
-    }
-    const text = await resolveMessage(parsed, 'required')
-    if (!text) {
-      log.fail(usage)
-      return 1
-    }
-    await answerTask(task, text, { repoStateDir: ctx.repoStateDir })
-    log.ok(`${task.id}: answered, back in queue`)
-    return 0
-  }
-
-  if (cmd === 'feedback') {
-    const usage = 'usage: factory feedback [task-id] [-m <feedback> | --edit]'
-    const ctx = await loadContext(process.cwd())
-    const parsed = parseInputArgs(rest, usage)
-    if (!parsed.ok) {
-      log.fail(parsed.error)
-      return 1
-    }
-    const hasWorktreeDiff = await hasChanges(ctx.root)
-    const loopActive = (await runLockHolder(ctx.stateDir)) !== null
-    let task: Task | null
-    if (parsed.taskQuery) {
-      task = await findTask(ctx, parsed.taskQuery)
-    } else {
-      const tasks = await loadTasks(ctx)
-      const hasPlanEntries: Array<[string, boolean]> = []
-      for (const candidate of tasks) {
-        hasPlanEntries.push([candidate.id, await hasSavedPlan(candidate)])
+      await emit(ctx.root, ctx.config.hooks, 'loop.idle', { state: remaining ?? 'idle' })
+      try {
+        await tendParkedTasks(ctx, (state) => {
+          alerted = state
+        })
+      } catch (err) {
+        log.warn(`parked-task housekeeping failed: ${err instanceof Error ? err.message : err}`)
       }
-      const hasPlanByTask = new Map(hasPlanEntries)
-      task = latestFeedbackTarget(tasks, (candidate) =>
-        feedbackRouteInput(
-          candidate,
-          hasPlanByTask.get(candidate.id) ?? false,
-          hasWorktreeDiff,
-          loopActive
-        )
-      )
+      await Bun.sleep(POLL_MS)
+      continue
     }
-    if (!task) {
-      log.fail(
-        parsed.taskQuery
-          ? `no task matching ${parsed.taskQuery}`
-          : 'no feedback target with existing progress'
-      )
-      return 1
+
+    log.step(`running ${task.id}`)
+    // Actively working — clear any waiting alert, end this task's parked
+    // episode (a re-park after this run alerts fresh), announce the start.
+    attention.taskStarted(task.id)
+    await setAlert('none')
+    await emit(ctx.root, ctx.config.hooks, 'task.start', { task: task.id })
+    // Isolate the task: any unhandled error blocks just this task (logged
+    // clearly) and the loop keeps going, rather than killing the whole run.
+    let outcome: TaskOutcome
+    try {
+      outcome = await runTask(ctx, task)
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      log.fail(`${task.id}: errored — ${reason}`)
+      outcome = { ok: false, kind: 'blocked', reason }
     }
-    const route = decideFeedbackRoute(await feedbackFacts(task, hasWorktreeDiff, loopActive))
-    if (route.kind === 'reject') {
-      log.fail(route.message)
-      return 1
-    }
-    // Resolve the message only after the task can actually take feedback, so a
-    // rejected route never makes the user write into an editor for nothing.
-    const text = await resolveMessage(parsed, 'required')
-    if (!text) {
-      log.fail(usage)
-      return 1
-    }
-    if (route.kind === 'follow-up') {
-      await appendFeedback(task, text)
-      markFeedbackConsumed(task, task.meta.feedbackCount)
-      await saveMeta(task)
-      const followUpText = followUpIntent(task, text)
-      const followUp = await addTask(ctx, followUpText, task.meta.verify, {
-        sharpen: 'skipped',
-        feedbackSourceTaskId: task.id,
-        suggestedSlug: await suggestTaskSlug(ctx, followUpText),
+    if (outcome.ok) {
+      await setStatus(task, 'done')
+      await captureEvalCase(ctx, task, 'done')
+      await emit(ctx.root, ctx.config.hooks, 'task.done', {
+        task: task.id,
+        commit: task.meta.commit,
       })
-      log.ok(`${task.id}: done — queued follow-up ${followUp.id} for feedback`)
-      return 0
+      log.ok(`${task.id}: done`)
+      const feedback = await readArtifact(task, 'feedback.md')
+      if (feedback) {
+        for (const line of renderTerminalFeedback(feedback, task.id)) {
+          log.log(line)
+        }
+      }
+      if (await readArtifact(task, 'brief.html')) {
+        log.log(`brief: factory deck ${task.id}`)
+      }
+      if (untilDone) {
+        // Spawner contract: the workstream's task completed — exit 0 so the
+        // surrounding tooling (tmux window, worktree teardown) can proceed.
+        await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+        await release()
+        return 0
+      }
+    } else if (outcome.kind === 'needs-input') {
+      await setStatus(task, 'needs-input', 'awaiting answer — see questions.md')
+      await emit(ctx.root, ctx.config.hooks, 'task.needs_input', { task: task.id })
+      // In interactive mode the prompt worker announces and collects the answer
+      // inline; point at state-aware `factory add` when nothing will prompt here.
+      if (!interactive) {
+        log.warn(`${task.id}: needs input — run: factory add "..."`)
+      }
+    } else if (outcome.kind === 'retrying') {
+      // Transient gate failure: set aside (no alert) and let the loop auto-resume
+      // it once the backoff elapses, up to the cap, before it truly blocks.
+      task.meta.autoRetries = outcome.autoRetries
+      task.meta.retryAt = outcome.retryAt
+      await setStatus(task, 'retrying', outcome.reason)
+      await emit(ctx.root, ctx.config.hooks, 'task.retrying', {
+        task: task.id,
+        reason: outcome.reason,
+        retryAt: outcome.retryAt,
+      })
+      const retryCount =
+        outcome.autoRetries <= AUTO_CAP
+          ? `${outcome.autoRetries}/${AUTO_CAP}`
+          : `${outcome.autoRetries} (past cap; judge approved)`
+      const retryTime = new Date(outcome.retryAt).toLocaleTimeString()
+      log.warn(`${task.id}: ${outcome.reason} — auto-retry ${retryCount} at ${retryTime}`)
+    } else {
+      await setStatus(task, 'blocked', outcome.reason)
+      await captureEvalCase(ctx, task, 'blocked', outcome.reason)
+      await emit(ctx.root, ctx.config.hooks, 'task.blocked', {
+        task: task.id,
+        reason: outcome.reason,
+      })
+      log.fail(`${task.id}: blocked — ${outcome.reason}`)
+      // Surface why, inline: the first lines of the review/verify failure.
+      const why = (outcome.detail ?? '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .slice(0, 8)
+      for (const line of why) {
+        log.log(`    ${line}`)
+      }
+      log.info(`    detail: factory show ${task.id}  ·  retry: factory retry`)
+      if (untilDone) {
+        // Spawner contract: blocked means a human decision is required — exit
+        // nonzero so teardown does NOT proceed and the workstream stays up.
+        await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+        await release()
+        return 2
+      }
     }
 
-    if (route.kind === 'record') {
-      // A live loop owns this task's status; append only, no requeue.
-      await appendFeedback(task, text)
-      log.ok(`${task.id}: feedback recorded — the running loop will consume it`)
-      return 0
+    if (once) {
+      break
     }
+  }
+  // Exiting (--once/--drain): clear the active stage so the window drops its
+  // "(stage)" suffix and the shared ▶ working-marker, rather than leaving a
+  // stale "an agent is working here" indicator after the process is gone. The
+  // long-lived path never reaches here — it clears via loop.idle instead.
+  await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+  await release()
+  return 0
+}
 
+async function answerCommand(args: string[]): Promise<number> {
+  const usage = 'usage: factory answer [task-id] [-m <answer> | --edit]'
+  const ctx = await loadContext(process.cwd())
+  log.warn('factory answer is deprecated; use factory add "..." or the inline run prompt')
+  const parsed = parseInputArgs(args, usage)
+  if (!parsed.ok) {
+    log.fail(parsed.error)
+    return 1
+  }
+  const task = parsed.taskQuery
+    ? await findTask(ctx, parsed.taskQuery)
+    : await latestTask(ctx, ['needs-input'])
+  if (!task) {
+    log.fail(
+      parsed.taskQuery ? `no task matching ${parsed.taskQuery}` : 'no needs-input task to answer'
+    )
+    return 1
+  }
+  const text = await resolveMessage(parsed, 'required')
+  if (!text) {
+    log.fail(usage)
+    return 1
+  }
+  await answerTask(task, text, { repoStateDir: ctx.repoStateDir })
+  log.ok(`${task.id}: answered, back in queue`)
+  return 0
+}
+
+async function feedbackCommand(args: string[]): Promise<number> {
+  const usage = 'usage: factory feedback [task-id] [-m <feedback> | --edit]'
+  const ctx = await loadContext(process.cwd())
+  const parsed = parseInputArgs(args, usage)
+  if (!parsed.ok) {
+    log.fail(parsed.error)
+    return 1
+  }
+  const hasWorktreeDiff = await hasChanges(ctx.root)
+  const loopActive = (await runLockHolder(ctx.stateDir)) !== null
+  let task: Task | null
+  if (parsed.taskQuery) {
+    task = await findTask(ctx, parsed.taskQuery)
+  } else {
+    const tasks = await loadTasks(ctx)
+    const hasPlanEntries: Array<[string, boolean]> = []
+    for (const candidate of tasks) {
+      hasPlanEntries.push([candidate.id, await hasSavedPlan(candidate)])
+    }
+    const hasPlanByTask = new Map(hasPlanEntries)
+    task = latestFeedbackTarget(tasks, (candidate) =>
+      feedbackRouteInput(
+        candidate,
+        hasPlanByTask.get(candidate.id) ?? false,
+        hasWorktreeDiff,
+        loopActive
+      )
+    )
+  }
+  if (!task) {
+    log.fail(
+      parsed.taskQuery
+        ? `no task matching ${parsed.taskQuery}`
+        : 'no feedback target with existing progress'
+    )
+    return 1
+  }
+  const route = decideFeedbackRoute(await feedbackFacts(task, hasWorktreeDiff, loopActive))
+  if (route.kind === 'reject') {
+    log.fail(route.message)
+    return 1
+  }
+  // Resolve the message only after the task can actually take feedback, so a
+  // rejected route never makes the user write into an editor for nothing.
+  const text = await resolveMessage(parsed, 'required')
+  if (!text) {
+    log.fail(usage)
+    return 1
+  }
+  if (route.kind === 'follow-up') {
     await appendFeedback(task, text)
-    task.meta.resume = true
-    task.meta.resumeKind = 'manual'
-    task.meta.resumeNote = null
-    task.meta.autoRetries = 0
-    task.meta.retryAt = null
-    await setStatus(task, 'ready')
-    log.ok(`${task.id}: feedback recorded — back in queue`)
+    markFeedbackConsumed(task, task.meta.feedbackCount)
+    await saveMeta(task)
+    const followUpText = followUpIntent(task, text)
+    const followUp = await addTask(ctx, followUpText, task.meta.verify, {
+      sharpen: 'skipped',
+      feedbackSourceTaskId: task.id,
+      suggestedSlug: await suggestTaskSlug(ctx, followUpText),
+    })
+    log.ok(`${task.id}: done — queued follow-up ${followUp.id} for feedback`)
     return 0
   }
 
-  if (cmd === 'retry' || cmd === 'resume') {
-    // Pick up a stuck task where it left off — reuse its plan + diff, no re-plan.
-    // id optional (defaults to the latest blocked/retrying task, or one stranded
-    // mid-stage by a killed loop). The note is optional and only set via -m/--edit,
-    // so a bare `factory retry` still just retries.
-    const usage = `usage: factory ${cmd} [task-id] [-m <note> | --edit]`
-    const ctx = await loadContext(process.cwd())
-    const parsed = parseInputArgs(rest, usage)
-    if (!parsed.ok) {
-      log.fail(parsed.error)
-      return 1
-    }
-    const task = parsed.taskQuery
-      ? await findTask(ctx, parsed.taskQuery)
-      : await latestTask(ctx, RESUMABLE_STATUSES)
-    if (!task) {
-      log.fail(
-        parsed.taskQuery
-          ? `no task matching ${parsed.taskQuery}`
-          : 'no resumable task (blocked, retrying, or interrupted mid-stage)'
-      )
-      return 1
-    }
-    const note = await resolveMessage(parsed, 'optional')
-    task.meta.resume = true
-    task.meta.resumeNote = note
-    task.meta.resumeKind = 'manual'
-    // Manual retry restores the full auto-retry budget for transient failures.
-    task.meta.autoRetries = 0
-    task.meta.retryAt = null
-    await setStatus(task, 'ready')
-    log.ok(`${task.id}: retrying — back in queue${note ? ' with note' : ''}`)
+  if (route.kind === 'record') {
+    // A live loop owns this task's status; append only, no requeue.
+    await appendFeedback(task, text)
+    log.ok(`${task.id}: feedback recorded — the running loop will consume it`)
     return 0
   }
 
-  if (cmd === 'correct') {
-    // Record a manual takeover of a blocked task: pair the agent's attempt with your
-    // in-worktree fix into a lesson + eval case, then mark it done. id optional
-    // (latest blocked); the note is optional and only set via -m/--edit.
-    const usage = 'usage: factory correct [task-id] [-m <note> | --edit]'
-    const ctx = await loadContext(process.cwd())
-    const parsed = parseInputArgs(rest, usage)
-    if (!parsed.ok) {
-      log.fail(parsed.error)
-      return 1
-    }
-    const task = parsed.taskQuery
-      ? await findTask(ctx, parsed.taskQuery)
-      : await latestTask(ctx, ['blocked'])
-    if (!task) {
-      log.fail(
-        parsed.taskQuery ? `no task matching ${parsed.taskQuery}` : 'no blocked task to correct'
-      )
-      return 1
-    }
-    const note = await resolveMessage(parsed, 'optional')
-    await captureCorrection(ctx, task, note ?? '')
-    await setStatus(task, 'done')
-    log.ok(`${task.id}: correction recorded, marked done`)
-    return 0
-  }
+  await appendFeedback(task, text)
+  task.meta.resume = true
+  task.meta.resumeKind = 'manual'
+  task.meta.resumeNote = null
+  task.meta.autoRetries = 0
+  task.meta.retryAt = null
+  await setStatus(task, 'ready')
+  log.ok(`${task.id}: feedback recorded — back in queue`)
+  return 0
+}
 
-  if (cmd === 'evals') {
-    // The replay runner: re-run harvested eval candidates against the CURRENT
-    // factory build and score them. This is the regression gate for changes to
-    // prompts, policies, and factory itself.
-    const sub = rest[0] ?? 'list'
-    const ctx = await loadContext(process.cwd())
-    const repoCtx = await loadRepoContext(process.cwd())
-    const cases = await listEvalCases(ctx.repoStateDir)
-    if (sub === 'list') {
+// Shared by `retry` and its deprecated alias `resume`.
+async function retryCommand(command: 'retry' | 'resume', args: string[]): Promise<number> {
+  // Pick up a stuck task where it left off — reuse its plan + diff, no re-plan.
+  // id optional (defaults to the latest blocked/retrying task, or one stranded
+  // mid-stage by a killed loop). The note is optional and only set via -m/--edit,
+  // so a bare `factory retry` still just retries.
+  const usage = `usage: factory ${command} [task-id] [-m <note> | --edit]`
+  const ctx = await loadContext(process.cwd())
+  const parsed = parseInputArgs(args, usage)
+  if (!parsed.ok) {
+    log.fail(parsed.error)
+    return 1
+  }
+  const task = parsed.taskQuery
+    ? await findTask(ctx, parsed.taskQuery)
+    : await latestTask(ctx, RESUMABLE_STATUSES)
+  if (!task) {
+    log.fail(
+      parsed.taskQuery
+        ? `no task matching ${parsed.taskQuery}`
+        : 'no resumable task (blocked, retrying, or interrupted mid-stage)'
+    )
+    return 1
+  }
+  const note = await resolveMessage(parsed, 'optional')
+  task.meta.resume = true
+  task.meta.resumeNote = note
+  task.meta.resumeKind = 'manual'
+  // Manual retry restores the full auto-retry budget for transient failures.
+  task.meta.autoRetries = 0
+  task.meta.retryAt = null
+  await setStatus(task, 'ready')
+  log.ok(`${task.id}: retrying — back in queue${note ? ' with note' : ''}`)
+  return 0
+}
+
+async function correctCommand(args: string[]): Promise<number> {
+  // Record a manual takeover of a blocked task: pair the agent's attempt with your
+  // in-worktree fix into a lesson + eval case, then mark it done. id optional
+  // (latest blocked); the note is optional and only set via -m/--edit.
+  const usage = 'usage: factory correct [task-id] [-m <note> | --edit]'
+  const ctx = await loadContext(process.cwd())
+  const parsed = parseInputArgs(args, usage)
+  if (!parsed.ok) {
+    log.fail(parsed.error)
+    return 1
+  }
+  const task = parsed.taskQuery
+    ? await findTask(ctx, parsed.taskQuery)
+    : await latestTask(ctx, ['blocked'])
+  if (!task) {
+    log.fail(
+      parsed.taskQuery ? `no task matching ${parsed.taskQuery}` : 'no blocked task to correct'
+    )
+    return 1
+  }
+  const note = await resolveMessage(parsed, 'optional')
+  await captureCorrection(ctx, task, note ?? '')
+  await setStatus(task, 'done')
+  log.ok(`${task.id}: correction recorded, marked done`)
+  return 0
+}
+
+async function evalsCommand(rest: string[]): Promise<number> {
+  // The replay runner: re-run harvested eval candidates against the CURRENT
+  // factory build and score them. This is the regression gate for changes to
+  // prompts, policies, and factory itself.
+  const ctx = await loadContext(process.cwd())
+  const repoCtx = await loadRepoContext(process.cwd())
+  const cases = await listEvalCases(ctx.repoStateDir)
+  const subcommands: Record<SubcommandNames<'evals'>, () => Promise<number>> = {
+    list: async () => {
       if (cases.length === 0) {
         log.info('no eval candidates captured for this repo yet')
         return 0
@@ -1790,10 +1776,14 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       }
       log.info(`${cases.length} candidates · run one: factory evals run <file-substring>`)
       return 0
-    }
-    if (sub === 'run') {
-      const keep = rest.includes('--keep')
-      const filter = rest.slice(1).find((a) => !a.startsWith('--'))
+    },
+    run: async () => {
+      const scan = scanFlags(EVALS_RUN_OPTIONS, rest.slice(1), {
+        unknown: 'ignore',
+        flagish: 'double-dash',
+      })
+      const keep = scan.flags['--keep']
+      const filter = scan.positionals[0]
       const selected = filter ? cases.filter((c) => c.file.includes(filter)) : cases
       const runnable = selected.filter((c) => c.case.outcome !== 'corrected')
       if (runnable.length === 0) {
@@ -1827,218 +1817,236 @@ export async function main(opts: MainOptions = {}): Promise<number> {
           `${ctx.repoStateDir}/eval-results.jsonl`
       )
       return matched === runnable.length ? 0 : 1
-    }
+    },
+  }
+  const sub = pickSubcommand(subcommands, rest[0] ?? 'list')
+  if (!sub) {
     log.fail('usage: factory evals [list | run [case-substring] [--keep]]')
     return 1
   }
+  return await sub()
+}
 
-  if (cmd === 'dispatch') {
-    // Drain the repo backlog by spawning one workstream per item through the
-    // configured spawn command (one task = one worktree = one lifecycle, owned
-    // by the spawner tool). Factory hands the item over; it does not queue
-    // tasks internally or manage lanes.
-    const ctx = await loadRepoContext(process.cwd())
-    const spawn = ctx.config.dispatch?.spawn ?? null
-    const dryRun = rest.includes('--dry-run')
-    const limitIdx = rest.indexOf('--limit')
-    const limit = limitIdx !== -1 ? Number(rest[limitIdx + 1]) : Number.POSITIVE_INFINITY
-    if (Number.isNaN(limit) || limit <= 0) {
-      log.fail('--limit needs a positive number')
-      return 1
+async function dispatchCommand(scan: ScanResult<typeof DISPATCH_OPTIONS>): Promise<number> {
+  // Drain the repo backlog by spawning one workstream per item through the
+  // configured spawn command (one task = one worktree = one lifecycle, owned
+  // by the spawner tool). Factory hands the item over; it does not queue
+  // tasks internally or manage lanes.
+  const ctx = await loadRepoContext(process.cwd())
+  const spawn = ctx.config.dispatch?.spawn ?? null
+  if (!scan.ok) {
+    // Only --limit takes a value; a missing one is the same misuse as a bad one.
+    log.fail('--limit needs a positive number')
+    return 1
+  }
+  const dryRun = scan.flags['--dry-run']
+  const limitValue = scan.flags['--limit'][0]
+  const limit = limitValue !== undefined ? Number(limitValue) : Number.POSITIVE_INFINITY
+  if (Number.isNaN(limit) || limit <= 0) {
+    log.fail('--limit needs a positive number')
+    return 1
+  }
+  const entries = await loadBacklog(ctx)
+  if (entries.length === 0) {
+    log.info('backlog is empty')
+    return 0
+  }
+  let spawned = 0
+  for (const entry of entries) {
+    if (spawned >= limit) {
+      break
     }
-    const entries = await loadBacklog(ctx)
-    if (entries.length === 0) {
-      log.info('backlog is empty')
-      return 0
-    }
-    let spawned = 0
-    for (const entry of entries) {
-      if (spawned >= limit) {
-        break
-      }
-      if (dryRun) {
-        log.info(`would dispatch ${entry.id}: ${entry.intent.split('\n')[0]}`)
-        spawned++
-        continue
-      }
-      log.step(`dispatching ${entry.id}`)
-      const ok = spawn ? await spawnViaCommand(ctx, entry, spawn) : await spawnBuiltin(ctx, entry)
-      if (!ok) {
-        log.info('stopping dispatch; the item stays in the backlog')
-        return 1
-      }
-      await removeBacklog(ctx, entry.id)
-      log.ok(`dispatched ${entry.id}`)
+    if (dryRun) {
+      log.info(`would dispatch ${entry.id}: ${entry.intent.split('\n')[0]}`)
       spawned++
+      continue
     }
+    log.step(`dispatching ${entry.id}`)
+    const ok = spawn ? await spawnViaCommand(ctx, entry, spawn) : await spawnBuiltin(ctx, entry)
+    if (!ok) {
+      log.info('stopping dispatch; the item stays in the backlog')
+      return 1
+    }
+    await removeBacklog(ctx, entry.id)
+    log.ok(`dispatched ${entry.id}`)
+    spawned++
+  }
+  log.info(`${dryRun ? 'would dispatch' : 'dispatched'} ${spawned} item${spawned === 1 ? '' : 's'}`)
+  return 0
+}
+
+async function harvestCommand(scan: Scanned<typeof HARVEST_OPTIONS>): Promise<number> {
+  // Post-ship feedback harvesting: human rework and MR discussion on shipped
+  // tasks. --all re-checks previously harvested tasks too.
+  const ctx = await loadContext(process.cwd())
+  const all = scan.flags['--all']
+  const query = scan.positionals[0]
+  const tasks = await loadTasks(ctx)
+  const targets = query
+    ? tasks.filter((t) => t.id.includes(query))
+    : tasks.filter((t) => t.meta.status === 'done' && (all || !t.meta.harvestedAt))
+  if (targets.length === 0) {
     log.info(
-      `${dryRun ? 'would dispatch' : 'dispatched'} ${spawned} item${spawned === 1 ? '' : 's'}`
+      query ? `no task matching ${query}` : 'no unharvested done tasks (use --all to re-check)'
     )
     return 0
   }
+  let reworked = 0
+  for (const task of targets) {
+    const result = await harvestTask(ctx, task)
+    logHarvest(result)
+    if (result.reworkCommits.length > 0) {
+      reworked++
+    }
+  }
+  log.info(
+    `harvested ${targets.length} task${targets.length === 1 ? '' : 's'} · ${reworked} with human rework`
+  )
+  return 0
+}
 
-  if (cmd === 'harvest') {
-    // Post-ship feedback harvesting: human rework and MR discussion on shipped
-    // tasks. --all re-checks previously harvested tasks too.
-    const ctx = await loadContext(process.cwd())
-    const all = rest.includes('--all')
-    const query = rest.find((a) => !a.startsWith('--'))
-    const tasks = await loadTasks(ctx)
-    const targets = query
-      ? tasks.filter((t) => t.id.includes(query))
-      : tasks.filter((t) => t.meta.status === 'done' && (all || !t.meta.harvestedAt))
-    if (targets.length === 0) {
-      log.info(
-        query ? `no task matching ${query}` : 'no unharvested done tasks (use --all to re-check)'
-      )
-      return 0
-    }
-    let reworked = 0
-    for (const task of targets) {
-      const result = await harvestTask(ctx, task)
-      logHarvest(result)
-      if (result.reworkCommits.length > 0) {
-        reworked++
-      }
-    }
-    log.info(
-      `harvested ${targets.length} task${targets.length === 1 ? '' : 's'} · ${reworked} with human rework`
-    )
+async function closeCommand(args: string[]): Promise<number> {
+  // Terminal close without a commit: the task is abandoned or superseded
+  // (typically flagged moot — the intent already landed through other work).
+  const usage = 'usage: factory close [task-id] [-m <reason> | --edit]'
+  const ctx = await loadContext(process.cwd())
+  const parsed = parseInputArgs(args, usage)
+  if (!parsed.ok) {
+    log.fail(parsed.error)
+    return 1
+  }
+  const task = parsed.taskQuery
+    ? await findTask(ctx, parsed.taskQuery)
+    : await latestTask(ctx, ['needs-input', 'blocked', 'retrying'])
+  if (!task) {
+    log.fail(parsed.taskQuery ? `no task matching ${parsed.taskQuery}` : 'no parked task to close')
+    return 1
+  }
+  if (task.meta.status === 'done' || task.meta.status === 'closed') {
+    log.fail(`${task.id} is already ${task.meta.status}`)
+    return 1
+  }
+  const reason = (await resolveMessage(parsed, 'optional')) || 'closed by the human'
+  await setStatus(task, 'closed', reason)
+  log.ok(`${task.id}: closed — ${reason}`)
+  return 0
+}
+
+async function gcCommand(flags: FlagValues<typeof GC_OPTIONS>): Promise<number> {
+  // Worktrees are ephemeral in the workstream model (spawned per task, torn
+  // down on done); their session state is debris once the worktree is gone.
+  // Durable value (metrics, lessons, evals, delivery history) lives at the
+  // repo level and is never touched here.
+  const dryRun = flags['--dry-run']
+  const base = sessionsDir()
+  let entries: string[] = []
+  try {
+    entries = (await readdir(base, { withFileTypes: true }))
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+  } catch {
+    log.info('no session state to collect')
     return 0
   }
-
-  if (cmd === 'close') {
-    // Terminal close without a commit: the task is abandoned or superseded
-    // (typically flagged moot — the intent already landed through other work).
-    const usage = 'usage: factory close [task-id] [-m <reason> | --edit]'
-    const ctx = await loadContext(process.cwd())
-    const parsed = parseInputArgs(rest, usage)
-    if (!parsed.ok) {
-      log.fail(parsed.error)
-      return 1
-    }
-    const task = parsed.taskQuery
-      ? await findTask(ctx, parsed.taskQuery)
-      : await latestTask(ctx, ['needs-input', 'blocked', 'retrying'])
-    if (!task) {
-      log.fail(
-        parsed.taskQuery ? `no task matching ${parsed.taskQuery}` : 'no parked task to close'
-      )
-      return 1
-    }
-    if (task.meta.status === 'done' || task.meta.status === 'closed') {
-      log.fail(`${task.id} is already ${task.meta.status}`)
-      return 1
-    }
-    const reason = (await resolveMessage(parsed, 'optional')) || 'closed by the human'
-    await setStatus(task, 'closed', reason)
-    log.ok(`${task.id}: closed — ${reason}`)
-    return 0
-  }
-
-  if (cmd === 'gc') {
-    // Worktrees are ephemeral in the workstream model (spawned per task, torn
-    // down on done); their session state is debris once the worktree is gone.
-    // Durable value (metrics, lessons, evals, delivery history) lives at the
-    // repo level and is never touched here.
-    const dryRun = rest.includes('--dry-run')
-    const base = sessionsDir()
-    let entries: string[] = []
+  const currentRoot = await repoRootOrNull(process.cwd())
+  let removed = 0
+  let kept = 0
+  let unknown = 0
+  for (const name of entries) {
+    const dir = `${base}/${name}`
+    let root: string | null = null
     try {
-      entries = (await readdir(base, { withFileTypes: true }))
-        .filter((e) => e.isDirectory())
-        .map((e) => e.name)
+      const marker = await Bun.file(worktreeMarkerPath(dir)).json()
+      root = z.object({ root: z.string() }).parse(marker).root
     } catch {
-      log.info('no session state to collect')
-      return 0
+      unknown++
+      continue // no marker → can't prove the worktree is gone; leave it
     }
-    const currentRoot = await repoRootOrNull(process.cwd())
-    let removed = 0
-    let kept = 0
-    let unknown = 0
-    for (const name of entries) {
-      const dir = `${base}/${name}`
-      let root: string | null = null
-      try {
-        const marker = await Bun.file(worktreeMarkerPath(dir)).json()
-        root = z.object({ root: z.string() }).parse(marker).root
-      } catch {
-        unknown++
-        continue // no marker → can't prove the worktree is gone; leave it
-      }
-      if (root === currentRoot) {
-        kept++
-        continue
-      }
-      const worktreeExists = await stat(root).then(
-        (s) => s.isDirectory(),
-        () => false
-      )
-      if (worktreeExists) {
-        kept++
-        continue
-      }
-      if (dryRun) {
-        log.info(`would remove ${dir} (worktree gone: ${root})`)
-      } else {
-        await rm(dir, { recursive: true, force: true })
-        log.ok(`removed ${dir} (worktree gone: ${root})`)
-      }
-      removed++
+    if (root === currentRoot) {
+      kept++
+      continue
     }
-    log.info(
-      `${dryRun ? 'would remove' : 'removed'} ${removed} · kept ${kept} live` +
-        (unknown ? ` · ${unknown} unidentifiable (no worktree marker; left alone)` : '')
+    const worktreeExists = await stat(root).then(
+      (s) => s.isDirectory(),
+      () => false
     )
-    return 0
-  }
-
-  if (cmd === 'status') {
-    const ctx = await loadContext(process.cwd())
-    await printStatus(ctx)
-    return 0
-  }
-
-  if (cmd === 'ask') {
-    const ctx = await loadContext(process.cwd())
-    return askFactory(ctx, rest)
-  }
-
-  if (cmd === 'session') {
-    const ctx = await loadContext(process.cwd())
-    return openAgentSession(ctx, rest, { commandName: 'session' })
-  }
-
-  if (cmd === 'deck') {
-    const ctx = await loadContext(process.cwd())
-    return openDeck(ctx, rest)
-  }
-
-  if (cmd === 'delivery') {
-    const ctx = await loadContext(process.cwd())
-    return taskDelivery(ctx, rest)
-  }
-
-  if (cmd === 'codex' || cmd === 'claude') {
-    const ctx = await loadContext(process.cwd())
-    return openAgentSession(ctx, rest, { defaultAgent: cmd, commandName: cmd })
-  }
-
-  if (cmd === 'config') {
-    const ctx = await loadContext(process.cwd())
-    if (['set', 'get', 'unset', 'inherit'].includes(rest[0] ?? '')) {
-      log.fail('task delivery moved out of config; use: factory delivery [--task <id>] ...')
-      return 1
+    if (worktreeExists) {
+      kept++
+      continue
     }
-    if (rest[0] === 'edit') {
-      const dirFlag = rest.indexOf('--dir')
-      const explicitDir = dirFlag === -1 ? null : rest[dirFlag + 1]
-      if (dirFlag !== -1 && !explicitDir) {
+    if (dryRun) {
+      log.info(`would remove ${dir} (worktree gone: ${root})`)
+    } else {
+      await rm(dir, { recursive: true, force: true })
+      log.ok(`removed ${dir} (worktree gone: ${root})`)
+    }
+    removed++
+  }
+  log.info(
+    `${dryRun ? 'would remove' : 'removed'} ${removed} · kept ${kept} live` +
+      (unknown ? ` · ${unknown} unidentifiable (no worktree marker; left alone)` : '')
+  )
+  return 0
+}
+
+async function statusCommand(): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  await printStatus(ctx)
+  return 0
+}
+
+async function askCommand(args: string[]): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  return askFactory(ctx, args)
+}
+
+async function sessionCommand(args: string[]): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  return openAgentSession(ctx, args, { commandName: 'session' })
+}
+
+async function deckCommand(args: string[]): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  return openDeck(ctx, args)
+}
+
+async function deliveryCommand(scan: ScanResult<typeof DELIVERY_OPTIONS>): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  return taskDelivery(ctx, scan)
+}
+
+// Shared by `codex` and `claude`.
+async function interactiveSessionCommand(agent: InteractiveAgent, args: string[]): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  return openAgentSession(ctx, args, { defaultAgent: agent, commandName: agent })
+}
+
+async function configCommand(rest: string[]): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  if (['set', 'get', 'unset', 'inherit'].includes(rest[0] ?? '')) {
+    log.fail('task delivery moved out of config; use: factory delivery [--task <id>] ...')
+    return 1
+  }
+  const subcommands: Record<SubcommandNames<'config'>, () => Promise<number>> = {
+    edit: async () => {
+      const subArgs = rest.slice(1)
+      const scan = scanArgs(CONFIG_EDIT_OPTIONS, subArgs, {
+        unknown: 'ignore',
+        flagish: 'double-dash',
+      })
+      if (!scan.ok) {
         log.fail('usage: factory config edit --dir <dir>')
         return 1
       }
-      const legacyDir = rest[1] && !rest[1].startsWith('--') ? rest[1] : null
-      if (rest.includes('--repo')) {
+      const explicitDir = scan.flags['--dir'][0] ?? null
+      if (scan.flags['--dir'].length > 0 && !explicitDir) {
+        log.fail('usage: factory config edit --dir <dir>')
+        return 1
+      }
+      // The legacy positional directory form: only the token right after
+      // `edit` counts, as before.
+      const legacyDir = subArgs[0] && !subArgs[0].startsWith('--') ? subArgs[0] : null
+      if (scan.flags['--repo']) {
         const repoPath = await repoConfigFile(ctx.root)
         if (!repoPath) {
           log.fail('not in a git repo — the --repo config layer is keyed by repo identity')
@@ -2052,13 +2060,11 @@ export async function main(opts: MainOptions = {}): Promise<number> {
         await openEditor(repoPath)
         return 0
       }
-      const target = rest.includes('--worktree')
+      const target = scan.flags['--worktree']
         ? ctx.root
-        : rest.includes('--repo-parent')
+        : scan.flags['--repo-parent']
           ? dirname(ctx.root)
-          : explicitDir
-            ? explicitDir
-            : legacyDir
+          : (explicitDir ?? legacyDir)
       const path = target
         ? `${target.replace(/^~/, process.env['HOME'] ?? '~')}/.factory.json`
         : globalConfigFile()
@@ -2068,16 +2074,21 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       log.info(`editing ${path}`)
       await openEditor(path)
       return 0
-    }
-    await printConfig(ctx)
-    return 0
+    },
   }
+  const sub = pickSubcommand(subcommands, rest[0])
+  if (sub) {
+    return await sub()
+  }
+  await printConfig(ctx)
+  return 0
+}
 
-  if (cmd === 'skills') {
-    const ctx = await loadContext(process.cwd())
-    const sub = rest[0] ?? 'list'
-    const repoLayerDir = `${ctx.repoStateDir}/skills`
-    if (sub === 'list') {
+async function skillsCommand(rest: string[]): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  const repoLayerDir = `${ctx.repoStateDir}/skills`
+  const subcommands: Record<SubcommandNames<'skills'>, () => Promise<number>> = {
+    list: async () => {
       const effective = await listDeliverySkills(ctx.root, ctx.repoStateDir)
       if (effective.length === 0) {
         log.info('no delivery skills registered')
@@ -2090,16 +2101,20 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       )
       log.info('edit: factory skills edit <name> [--repo|--global|--committed]')
       return 0
-    }
-    if (sub === 'edit') {
+    },
+    edit: async () => {
       const name = rest[1]
       if (!name || name.startsWith('--')) {
         log.fail('usage: factory skills edit <name> [--repo|--global|--committed]')
         return 1
       }
-      const layer = rest.includes('--global')
+      const { flags } = scanFlags(SKILLS_EDIT_OPTIONS, rest.slice(1), {
+        unknown: 'ignore',
+        flagish: 'double-dash',
+      })
+      const layer = flags['--global']
         ? globalSkillsDir()
-        : rest.includes('--committed')
+        : flags['--committed']
           ? `${ctx.root}/.skills`
           : repoLayerDir
       const path = `${layer}/${name}/SKILL.md`
@@ -2113,45 +2128,140 @@ export async function main(opts: MainOptions = {}): Promise<number> {
       log.info(`editing ${path}`)
       await openEditor(path)
       return 0
-    }
+    },
+  }
+  const sub = pickSubcommand(subcommands, rest[0] ?? 'list')
+  if (!sub) {
     log.fail('usage: factory skills [list | edit <name> [--repo|--global|--committed]]')
     return 1
   }
+  return await sub()
+}
 
-  if (cmd === 'show') {
-    const ctx = await loadContext(process.cwd())
-    return printShow(ctx, rest[0], rest[1])
-  }
+async function showCommand(args: string[]): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  return printShow(ctx, args[0], args[1])
+}
 
-  if (cmd === 'lessons') {
-    const ctx = await loadContext(process.cwd())
-    return lessonsCommand(ctx, rest)
-  }
+async function lessonsCliCommand(args: string[]): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  return lessonsCommand(ctx, args)
+}
 
-  if (cmd === 'report') {
-    const ctx = await loadContext(process.cwd())
-    // Default to the current task (like `show`); `--all` for the repo roll-up.
-    if (rest.includes('--all')) {
-      printReport(ctx)
-      return 0
-    }
-    const query = rest.find((a) => !a.startsWith('-'))
-    const task = query ? await findTask(ctx, query) : await latestTask(ctx)
-    if (!task) {
-      if (query) {
-        log.fail(`no task matching "${query}"`)
-        return 1
-      }
-      log.info('no tasks in this worktree — use `factory report --all` for the repo roll-up')
-      return 0
-    }
-    printReport(ctx, task.id)
+async function reportCommand(scan: Scanned<typeof REPORT_OPTIONS>): Promise<number> {
+  const ctx = await loadContext(process.cwd())
+  // Default to the current task (like `show`); `--all` for the repo roll-up.
+  if (scan.flags['--all']) {
+    printReport(ctx)
     return 0
   }
+  const query = scan.positionals[0]
+  const task = query ? await findTask(ctx, query) : await latestTask(ctx)
+  if (!task) {
+    if (query) {
+      log.fail(`no task matching "${query}"`)
+      return 1
+    }
+    log.info('no tasks in this worktree — use `factory report --all` for the repo roll-up')
+    return 0
+  }
+  printReport(ctx, task.id)
+  return 0
+}
 
-  log.fail(`unknown command: ${cmd}`)
+function helpCommand(): number {
   log.log(HELP)
-  return 1
+  return 0
+}
+
+function versionCommand(): number {
+  log.log(FACTORY_VERSION)
+  return 0
+}
+
+async function upgradeCommand(opts: MainOptions): Promise<number> {
+  return await (opts.upgrade ?? upgradeFactory)()
+}
+
+function completionCommand(args: string[], opts: MainOptions): number {
+  return (opts.completion ?? runCompletion)(args)
+}
+
+// Every registry command has exactly one handler — a command added to COMMANDS
+// without one (or vice versa) is a compile error. This record is the dispatch
+// boundary: scanner-grammar commands are scanned HERE against their registry
+// spec (with the per-command token policy reproducing their historical
+// parser), so their handlers receive only typed flags/positionals and can
+// never read an undeclared flag. The other entries pass their declared
+// freeform tail to a frozen parser module or a subcommand tree that scans
+// one level down.
+const HANDLERS: Record<CommandName, CommandHandler> = {
+  add: (args) => addCommand(args),
+  run: (args) => runLoopCommand(scanFlags(RUN_OPTIONS, args, { unknown: 'ignore' }).flags),
+  retry: (args) => retryCommand('retry', args),
+  feedback: (args) => feedbackCommand(args),
+  correct: (args) => correctCommand(args),
+  close: (args) => closeCommand(args),
+  backlog: (args) => backlogCommand(args),
+  dispatch: (args) => dispatchCommand(scanArgs(DISPATCH_OPTIONS, args, { unknown: 'ignore' })),
+  config: (args) => configCommand(args),
+  status: () => statusCommand(),
+  ask: (args) => askCommand(args),
+  session: (args) => sessionCommand(args),
+  codex: (args) => interactiveSessionCommand('codex', args),
+  claude: (args) => interactiveSessionCommand('claude', args),
+  show: (args) => showCommand(args),
+  deck: (args) => deckCommand(args),
+  // Policy text is freeform — flag-looking words flow into it ('collect').
+  delivery: (args) => deliveryCommand(scanArgs(DELIVERY_OPTIONS, args, { unknown: 'collect' })),
+  // A lone '-' is flag-ish here (ignored), matching the old token rule.
+  report: (args) =>
+    reportCommand(scanFlags(REPORT_OPTIONS, args, { unknown: 'ignore', loneDash: 'flagish' })),
+  harvest: (args) =>
+    harvestCommand(scanFlags(HARVEST_OPTIONS, args, { unknown: 'ignore', flagish: 'double-dash' })),
+  gc: (args) => gcCommand(scanFlags(GC_OPTIONS, args, { unknown: 'ignore' }).flags),
+  skills: (args) => skillsCommand(args),
+  evals: (args) => evalsCommand(args),
+  lessons: (args) => lessonsCliCommand(args),
+  version: () => versionCommand(),
+  upgrade: (_args, opts) => upgradeCommand(opts),
+  completion: (args, opts) => completionCommand(args, opts),
+  help: () => helpCommand(),
+  answer: (args) => answerCommand(args),
+  resume: (args) => retryCommand('resume', args),
+  __complete: (args) => runComplete(args),
+}
+
+function normalizeCommandName(cmd: string | undefined): string {
+  if (!cmd || cmd === '-h' || cmd === '--help') {
+    return 'help'
+  }
+  if (cmd === '--version') {
+    return 'version'
+  }
+  return cmd
+}
+
+export async function main(opts: MainOptions = {}): Promise<number> {
+  const [cmd, ...rest] = opts.argv ?? process.argv.slice(2)
+
+  const spec = resolveCommand(normalizeCommandName(cmd))
+  if (!spec) {
+    log.fail(`unknown command: ${cmd}`)
+    log.log(HELP)
+    return 1
+  }
+
+  // help/version/upgrade/completion/__complete are exempt (autoUpgrade: false):
+  // they must work without a repo, without state, and without ever prompting.
+  if (spec.autoUpgrade) {
+    const autoUpgrade = await (opts.autoUpgrade ?? maybeAutoUpgrade)({ command: spec.name })
+    if (autoUpgrade.kind === 'exit') {
+      return autoUpgrade.code
+    }
+  }
+
+  return await HANDLERS[spec.name](rest, opts)
 }
 
 // A bad config or running outside a repo is user error, not a crash: print it
