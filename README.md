@@ -264,7 +264,7 @@ factory retry [task-id] [-m "<note>" | --edit]     # pick a blocked task back up
 factory feedback [task-id] [-m "<feedback>" | --edit]  # critique existing progress, generalized on next pass
 factory correct [task-id] [-m "<note>" | --edit]   # record your manual fix of a blocked task as a lesson
 factory backlog [add|rm] ...                       # repo-level backlog, drained by dispatch
-factory dispatch [--limit N] [--dry-run]           # spawn one workstream per backlog item (dispatch.spawn)
+factory dispatch [--limit N] [--dry-run]           # spawn one workstream per backlog item (built-in or dispatch.spawn)
 factory evals [list|run [case] [--keep]]           # replay harvested eval cases against this build
 factory harvest [task-id] [--all]                  # post-ship human rework + MR discussion -> feedback signal
 factory close [task-id] [-m <reason>]              # terminally close a parked/superseded task
@@ -545,10 +545,13 @@ Fields:
   confirmation pause when the repo's rolling telemetry clears the bar — and
   reverts to confirming the moment the numbers dip. Default `null` (always
   confirm).
-- **`dispatch`** — `{ "spawn": "<command>" }` wires `factory dispatch` to your
-  workstream spawner (worktree + tmux + `factory run --until-done`): one backlog
-  item per spawn, `FACTORY_INTENT`/`FACTORY_NAME`/`FACTORY_VERIFY` in its env,
-  exit 0 removes the item. Factory never queues tasks internally or manages lanes.
+- **`dispatch`** — optional override for `factory dispatch`. The zero-config
+  default spawns each backlog item as a sibling worktree on a `factory/<name>`
+  branch running a detached `factory run --until-done` (logs under
+  `$FACTORY_HOME/logs/`). Set `{ "spawn": "<command>" }` to route through your
+  own tooling instead (tmux windows, custom worktree layout): one backlog item
+  per spawn, `FACTORY_INTENT`/`FACTORY_NAME`/`FACTORY_VERIFY` in its env, exit 0
+  removes the item. Factory never queues tasks internally or manages lanes.
 - **Config cascade note:** `agents` and `specialists` **merge per key** across the
   cascade (a worktree override of one role no longer silently resets its
   siblings); `hooks` concatenates; everything else is closest-wins.
