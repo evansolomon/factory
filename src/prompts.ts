@@ -781,6 +781,26 @@ function humanAnswersBlock(answers: string | null): string {
   return answers ? `\n\n## Human answers (settled decisions for this task)\n${answers}` : ''
 }
 
+// The reviewer-facing variant of humanAnswersBlock. Reviewers historically never
+// saw the answers, so panels relitigated settled decisions and blocked on risks
+// the human had explicitly accepted — one real task churned 10 review rounds
+// while the answer that resolved them sat visible only to the consolidator.
+function reviewerAnswersBlock(answers: string | null): string {
+  return answers
+    ? `\n\n## Human answers (settled decisions for this task)\nThese are constraints, not review targets: do not raise findings that dispute a decided approach — a finding about a decided approach is valid only when that approach is implemented defectively. When an answer explicitly accepts a class of residual risk, restating that risk is ADVISORY at most; the fix is to document it (commit message / MR description), not to redesign around it.\n\n${answers}`
+    : ''
+}
+
+// The previous round's consolidated verdict, shown to gating reviewers on fix
+// passes. Without it every round re-reviews with fresh eyes: panels have issued
+// blocking findings that directly reversed their own prior-round guidance, and
+// the fixer obeyed both. Memory turns re-review into verification of the fixes.
+function priorReviewBlock(priorReview: string | null): string {
+  return priorReview
+    ? `\n\n## Prior review round (the diff has since been revised to address it)\nThe findings below were already adjudicated and the implementer revised the diff in response. Verify the fixes rather than re-arguing settled adjudications. Do NOT issue guidance that reverses what this prior round advised unless you can name the concrete defect that advice causes — and if you do, prefix the finding with \`REVERSAL:\` so the consolidator weighs the flip explicitly. Your fresh attention is most valuable on what changed since.\n\n${priorReview}`
+    : ''
+}
+
 // Used on a retry after a gate (review or verify) failed: feed the failure and
 // current diff back so the implementer fixes it in place.
 export function fixPrompt(
@@ -1069,7 +1089,9 @@ export function reviewPrompt(
   finalPlan: string,
   diff: string,
   baselineDiff: string | null,
-  guidance: string | null
+  guidance: string | null,
+  answers: string | null = null,
+  priorReview: string | null = null
 ): string {
   return `You are a senior staff engineer pairing with the person who wrote the diff below. You didn't write it, so you bring fresh eyes — verify against the actual code rather than assuming the implementer got it right. Your job is to help make this change correct and ship-worthy, not to find fault. Read files in the repo as needed.
 
@@ -1087,7 +1109,7 @@ If the change is correct and meets its requirements, say so plainly — that's a
 ${intent}${verifyBlock(verify)}
 
 ## Agreed plan
-${finalPlan}
+${finalPlan}${reviewerAnswersBlock(answers)}${priorReviewBlock(priorReview)}
 
 ## Diff
 \`\`\`diff
@@ -1189,7 +1211,9 @@ export function securityPrompt(
   finalPlan: string,
   diff: string,
   baselineDiff: string | null,
-  guidance: string | null
+  guidance: string | null,
+  answers: string | null = null,
+  priorReview: string | null = null
 ): string {
   return `You are a red-team security researcher auditing the diff below for the task. Assume an adversary controls every input the changed code can reach. You did not write it — trace the data flow through the repo as needed.
 
@@ -1206,7 +1230,7 @@ Report ONLY real, exploitable issues introduced or left open by THIS diff — na
 ${intent}
 
 ## Agreed plan
-${finalPlan}
+${finalPlan}${reviewerAnswersBlock(answers)}${priorReviewBlock(priorReview)}
 
 ## Diff
 \`\`\`diff
@@ -1219,12 +1243,16 @@ For each exploitable finding, name the attack and cite the specific code (file:l
 // The deploy-safety expert audits rollout mechanics rather than local correctness:
 // mixed-version compatibility, migrations/backfills, env/config, queues/events,
 // and rollback. Unlike general risk, concrete unsafe rollout paths may block.
+// answers only, no priorReview: deploy safety can block on the first pass (where
+// pre-implementation answers already exist) but never runs on fix passes, so it
+// has no prior round to see.
 export function deploySafetyPrompt(
   intent: string,
   finalPlan: string,
   diff: string,
   baselineDiff: string | null,
-  guidance: string | null
+  guidance: string | null,
+  answers: string | null = null
 ): string {
   return `You are a release engineer auditing whether the diff below is safe to deploy. Judge mixed-version reality, not just whether the code works locally: old and new app versions may overlap, old queued data may meet new workers, old clients may call new APIs, rollback may happen after writes, and migrations/config may arrive before or after code depending on the deploy system.
 
@@ -1242,7 +1270,7 @@ Report ONLY deploy hazards introduced or left open by THIS diff. Do not manufact
 ${intent}
 
 ## Agreed plan
-${finalPlan}
+${finalPlan}${reviewerAnswersBlock(answers)}
 
 ## Diff
 \`\`\`diff
@@ -1269,7 +1297,9 @@ export function uxReviewPrompt(
   finalPlan: string,
   diff: string,
   baselineDiff: string | null,
-  guidance: string | null
+  guidance: string | null,
+  answers: string | null = null,
+  priorReview: string | null = null
 ): string {
   return `You are a senior UI/UX and design-systems engineer pairing on the diff below for a USER-FACING change. Read the repo to compare against how this product's UI is already built. Your job is to help the experience and design consistency land well — NOT code correctness or security (others cover those). Judge the user experience, not taste.
 
@@ -1286,7 +1316,7 @@ Apply a HIGH bar: only material design-system violations or clearly broken/incon
 ${intent}
 
 ## Agreed plan
-${finalPlan}
+${finalPlan}${reviewerAnswersBlock(answers)}${priorReviewBlock(priorReview)}
 
 ## Diff
 \`\`\`diff
@@ -1315,7 +1345,8 @@ Do this:
 - Drop non-issues: style nits, subjective polish, speculative concerns, or anything not grounded in the actual diff. Manufacturing work just drives churn.
 - Resolve conflicts by this priority (higher wins): correctness > security > deploy safety > test integrity (tests must have teeth) > the task's stated requirements > consistency with the codebase > simplicity > performance > UX polish > docs.
 - Classify each surviving finding as BLOCKING (a correctness, security, deploy-safety, requirements, or test-integrity defect that must be fixed before this ships) or ADVISORY (a real but non-blocking improvement). The experts' own BLOCKING/ADVISORY tags are hints, not votes — you own this call. Block on genuine defects, including concrete unsafe rollout, migration, compatibility, config, or rollback hazards. Treat general risk scores as context, not a veto; when a finding is borderline or a matter of degree, prefer ADVISORY so good work ships.
-- Human answers, when present below, are settled decisions: do not block on whether a decided approach is the right call, and never demand it be reversed. A finding about a decided approach stays BLOCKING only when it is a genuine defect within that decision — e.g. the decided behavior is implemented unsafely when a safe implementation exists.
+- A finding that reverses guidance a prior review round gave (whether or not the expert marked it \`REVERSAL:\`) is BLOCKING only when it names the concrete defect that guidance causes; otherwise drop it or demote it to ADVISORY, and state the contradiction explicitly. A panel that flips direction round over round makes convergence impossible.
+- Human answers, when present below, are settled decisions: do not block on whether a decided approach is the right call, and never demand it be reversed. A finding about a decided approach stays BLOCKING only when it is a genuine defect within that decision — e.g. the decided behavior is implemented unsafely when a safe implementation exists. When an answer explicitly accepts a class of residual risk, a finding that restates that risk is ADVISORY at most — route it to commit-message/MR documentation, not another fix pass.
 
 ## Task
 ${intent}

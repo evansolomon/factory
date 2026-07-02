@@ -958,7 +958,8 @@ async function setAside(
       stuckQuestions(
         'retry',
         `${task.meta.autoRetries} auto-retries were spent on a failure that keeps recurring`,
-        detail ?? reason
+        detail ?? reason,
+        (await readFailures(task)).map((f) => `${f.gate}: ${f.summary}`)
       )
     )
   }
@@ -1030,10 +1031,22 @@ async function worktreeDiffHash(root: string): Promise<string> {
   return Bun.hash(await worktreeDiff(root)).toString(16)
 }
 
-function stuckQuestions(gate: string, reason: string, detail: string): string {
+// The trend line matters as much as the latest failure: a human deciding
+// hint/continue/stop needs to see whether attempts were converging, plateaued,
+// or flip-flopping — without excavating failures.jsonl by hand.
+function stuckQuestions(gate: string, reason: string, detail: string, history: string[]): string {
+  const trend = history.length
+    ? [
+        'How the attempts trended (oldest first):',
+        '',
+        ...history.map((s, i) => `${i + 1}. ${s}`),
+        '',
+      ]
+    : []
   return [
     `Factory mechanically stopped an unproductive ${gate} fix loop: ${reason}.`,
     '',
+    ...trend,
     'Latest failure:',
     '',
     detail,
@@ -1093,7 +1106,8 @@ async function assessFailure(
       questions: stuckQuestions(
         gate,
         'the failure is identical to the previous attempt and the fix pass changed nothing',
-        detail
+        detail,
+        failures.map((f) => `${f.gate}: ${f.summary}`)
       ),
     }
   }
@@ -1116,7 +1130,12 @@ async function assessFailure(
     )
     return {
       kind: 'needs-input',
-      questions: stuckQuestions(gate, `the fix-attempt cap (retries: ${hardCap}) is spent`, detail),
+      questions: stuckQuestions(
+        gate,
+        `the fix-attempt cap (retries: ${hardCap}) is spent`,
+        detail,
+        failures.map((f) => `${f.gate}: ${f.summary}`)
+      ),
     }
   }
   return judged.action
@@ -2408,6 +2427,13 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       const gating = new Set(['correctness', 'security', 'ux'])
       reviewEntries = reviewEntries.filter((entry) => gating.has(entry.kind))
     }
+    // On fix passes the gating lenses see the previous consolidated verdict:
+    // without it every round re-reviews with fresh eyes, and panels have issued
+    // blockers that reversed their own prior-round guidance (the fixer obeyed
+    // both directions in turn — churn no fingerprint can catch). The reviewers
+    // also see the human answers so settled decisions and explicitly accepted
+    // risks stop resurfacing as findings.
+    const priorReview = attempt > 0 ? await readArtifact(task, 'consolidated.md') : null
     const agents = agentChoiceMap(ctx)
     const panel: Array<{ key: string; label: string; agent: Agent; prompt: string }> = []
     for (const entry of reviewEntries) {
@@ -2427,7 +2453,9 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             combineGuidance(
               stageGuidance('review'),
               await renderPolicies(ctx, entry.policies, 'review.correctness')
-            )
+            ),
+            answers,
+            priorReview
           ),
         })
       } else if (entry.kind === 'security') {
@@ -2443,7 +2471,9 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             combineGuidance(
               stageGuidance('security'),
               await renderPolicies(ctx, entry.policies, 'review.security')
-            )
+            ),
+            answers,
+            priorReview
           ),
         })
       } else if (entry.kind === 'risk') {
@@ -2472,7 +2502,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             combineGuidance(
               stageGuidance('deploy-safety'),
               await renderPolicies(ctx, entry.policies, 'review.deploy')
-            )
+            ),
+            answers
           ),
         })
       } else if (entry.kind === 'ux') {
@@ -2488,7 +2519,9 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             combineGuidance(
               stageGuidance('ux-review'),
               await renderPolicies(ctx, entry.policies, 'review.ux')
-            )
+            ),
+            answers,
+            priorReview
           ),
         })
       }
@@ -2525,14 +2558,11 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         })
       }
     }
-    if (attempt > 0) {
-      const prior = await readArtifact(task, 'consolidated.md')
-      if (prior) {
-        reports.push({
-          label: 'prior consolidated verdict (before this fix attempt)',
-          text: prior,
-        })
-      }
+    if (priorReview) {
+      reports.push({
+        label: 'prior consolidated verdict (before this fix attempt)',
+        text: priorReview,
+      })
     }
 
     // CONSOLIDATE — one judge dedupes, drops nits, resolves conflicts by priority,
