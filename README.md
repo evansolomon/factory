@@ -643,6 +643,16 @@ pre-implementation artifacts, not completion briefs; they are visible through
     disable a pool inherited from a parent layer.
     The optional `description` on an agent is shown to triage as the routing
     policy — it's how you tell the router what each entry is good for.
+
+    A non-empty pool also becomes an **in-flight delegation menu**: implement
+    and fix prompts list each entry as a runnable `factory delegate` one-shot
+    command (subtask prompt on stdin, report on stdout), so the implementing
+    agent can hand clearly-mechanical subtasks — repetitive edits, fixture
+    sweeps, boilerplate — to a cheaper agent mid-stage while keeping judgment
+    work itself. This is CLI-neutral (plain bash, works from codex and claude
+    implementers alike) and tracked: each delegated run appends token usage to
+    a per-task ledger that lands in the meter and telemetry as `delegate`
+    stage rows under the delegate's agent label.
   - `namer` — cheaply summarizes new task intents into short task ids. This is
     best-effort; if the model call fails, `factory add` falls back to the local
     prompt-prefix slug.

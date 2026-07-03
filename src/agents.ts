@@ -148,11 +148,14 @@ function parseClaudeStream(label: string, stdout: string): AgentResult {
   return out
 }
 
-// access → filesystem/network reach. read: explore only, no network. research:
-// read + network for data lookup, no push — codex needs workspace-write here
-// since read-only blocks the network outright (so this lone, non-parallel stage
-// can also technically write; that's fine, it shows in the reviewed diff). write:
-// edit the worktree. full: also push/network (for the delivery step).
+// access → filesystem reach. read: explore only. research: read + network for
+// data lookup, no push — codex needs workspace-write here since read-only
+// blocks the network outright (so this lone, non-parallel stage can also
+// technically write; that's fine, it shows in the reviewed diff). write: edit
+// the worktree. full: also push (for the delivery step). Network is on for
+// every workspace-write level (research lookups, `factory delegate` children
+// spawned by implement stages), matching claude's bypassPermissions posture;
+// only read stays network-less, inherent to codex's read-only sandbox.
 const CODEX_SANDBOX: Record<Access, string> = {
   read: 'read-only',
   research: 'workspace-write',
@@ -172,9 +175,12 @@ async function runCodex(agent: Agent, opts: AgentRun): Promise<AgentResult> {
     CODEX_SANDBOX[opts.access],
     '-c',
     'approval_policy="never"',
-    // research must reach the network for data lookup; read-only blocks it, so
-    // it runs under workspace-write — force network on regardless of config.
-    ...(opts.access === 'research' ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
+    // Force network on for every workspace-write level regardless of user
+    // config — research needs data lookup, and implement/fix stages may spawn
+    // `factory delegate` children that must reach a model API.
+    ...(CODEX_SANDBOX[opts.access] === 'workspace-write'
+      ? ['-c', 'sandbox_workspace_write.network_access=true']
+      : []),
     // Route to a non-default OpenAI-compatible backend (xAI, local/hosted OSS)
     // defined in ~/.codex/config.toml; absent → codex's default provider.
     ...(agent.provider ? ['-c', `model_provider="${agent.provider}"`] : []),

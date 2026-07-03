@@ -1,8 +1,9 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, rm } from 'node:fs/promises'
 import { type AgentResult, agentLabel, runAgent } from './agents.ts'
 import { cleanCommitMessage, fallbackCommitMessage } from './commit-message.ts'
 import { type Agent, type AgentSpec, normAgent, type WorkContext } from './config.ts'
 import { buildDeckHtml } from './deck.ts'
+import { collectDelegatedUsage, delegateCommand, delegateUsageFile } from './delegate.ts'
 import {
   appendDeliveryHistory,
   applyDeliveryConfirmation,
@@ -57,6 +58,7 @@ import {
   consolidatePrompt,
   convergePrompt,
   critiquePrompt,
+  type DelegateOption,
   deckPrompt,
   deliverySelectPrompt,
   deploySafetyPrompt,
@@ -2369,6 +2371,20 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     ? implementerPool[routedImplementerName]
     : null
   const routedImplementer = routedImplementerSpec ? normAgent(routedImplementerSpec) : lead
+  // In-flight delegation menu: the implementers pool rendered as runnable
+  // one-shot commands (delegate.ts). Delegated usage lands in a per-task tmp
+  // ledger folded into the meter after each implement/fix stage; leftovers
+  // from an interrupted prior pass are dropped so they can't be misattributed.
+  const delegateLedger = delegateUsageFile(task.id)
+  const delegates: DelegateOption[] = Object.entries(implementerPool).map(([name, spec]) => {
+    const agent = normAgent(spec)
+    return {
+      name,
+      command: delegateCommand(agent, delegateLedger),
+      description: agent.description ?? null,
+    }
+  })
+  await rm(delegateLedger, { force: true })
   while (true) {
     stats.retries = attempt
     if (skipImplement) {
@@ -2409,7 +2425,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             stageGuidance('fix'),
             feedbackContext?.analysis ?? null,
             prototype,
-            answers
+            answers,
+            delegates
           )
         : implementPrompt(
             intent,
@@ -2419,7 +2436,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             riskAssessment,
             stageGuidance('implement'),
             feedbackContext?.analysis ?? null,
-            prototype
+            prototype,
+            delegates
           )
       // Fix passes always escalate to the default implementer: a failed gate is
       // direct evidence the "easy" routing call was wrong.
@@ -2436,6 +2454,28 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           outFile: `${task.dir}/implement.log.md`,
         })
       )
+
+      // Fold any delegated runs into the meter as their own stage rows so
+      // spend the parent CLI can't see (bash children) still lands in totals
+      // and per-agent telemetry.
+      const delegated = await collectDelegatedUsage(delegateLedger)
+      for (const d of delegated) {
+        meter.inTok += d.inputTokens
+        meter.outTok += d.outputTokens
+        meter.stages.push({
+          stage: 'delegate',
+          agent: d.label,
+          inTok: d.inputTokens,
+          outTok: d.outputTokens,
+          ms: d.ms,
+        })
+        log.done(
+          `delegate ${d.label} ${fmtSecs(d.ms)} · ${fmtTok(d.inputTokens)}→${fmtTok(d.outputTokens)} tok`
+        )
+      }
+      if (delegated.length > 0) {
+        await persistLiveMeter(meter)
+      }
 
       if (!(await hasChanges(ctx.root))) {
         return blocked(

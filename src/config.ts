@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { mainWorktreeRoot, originUrl, repoRoot } from './git.ts'
 import { log } from './log.ts'
 
-const ReasoningEffortSchema = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh'])
+export const ReasoningEffortSchema = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh'])
 type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>
 
 // An agent is a CLI, optionally pinned to a model and Codex reasoning effort.

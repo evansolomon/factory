@@ -15,6 +15,7 @@ import {
   BACKLOG_ADD_OPTIONS,
   CONFIG_EDIT_OPTIONS,
   type CommandName,
+  DELEGATE_OPTIONS,
   DELIVERY_OPTIONS,
   DISPATCH_OPTIONS,
   EVALS_RUN_OPTIONS,
@@ -47,6 +48,7 @@ import {
   worktreeMarkerPath,
 } from './config.ts'
 import { openDeck } from './deck.ts'
+import { delegateCli } from './delegate.ts'
 import {
   deliveryAction,
   deliveryLabel,
@@ -2229,6 +2231,7 @@ const HANDLERS: Record<CommandName, CommandHandler> = {
   help: () => helpCommand(),
   answer: (args) => answerCommand(args),
   resume: (args) => retryCommand('resume', args),
+  delegate: (args) => delegateCli(scanArgs(DELEGATE_OPTIONS, args, { unknown: 'error' })),
   __complete: (args) => runComplete(args),
 }
 

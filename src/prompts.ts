@@ -496,6 +496,29 @@ This change is user-facing. Reuse existing components and design tokens — do n
     : ''
 }
 
+// One agents.implementers entry rendered as a runnable delegation command
+// (built by delegate.ts and passed in pre-shaped; prompts.ts stays import-free).
+export type DelegateOption = { name: string; command: string; description: string | null }
+
+// In-flight delegation menu for the implement/fix stages. CLI-neutral by
+// design: delegation happens through plain bash commands, not any agent's
+// built-in subagent mechanism, so codex and claude implementers get the same
+// channel. Empty pool renders to '' — prompts are byte-identical to before.
+function delegationBlock(delegates: DelegateOption[]): string {
+  if (delegates.length === 0) {
+    return ''
+  }
+  const menu = delegates
+    .map((d) => `- \`${d.command}\` — ${d.name}${d.description ? `: ${d.description}` : ''}`)
+    .join('\n')
+  return `\n\n## Delegation
+You may delegate subtasks to the cheaper agents below. Each command runs one agent to completion in the current directory: pipe a self-contained subtask prompt to its stdin; it prints the agent's report to stdout.
+
+${menu}
+
+Delegate only work that is clearly mechanical — repetitive edits across files, fixture sweeps, boilerplate, renames, applying an established pattern. Give a precise, self-contained prompt (exact files, exact pattern to follow) and review the changes before building on them: you own the result. Keep design decisions, tricky logic, and anything requiring judgment yourself. Delegation has real overhead — for small subtasks doing the work yourself is cheaper, and when torn, do it yourself. If a delegation command fails, do the work yourself and move on.`
+}
+
 export function implementPrompt(
   intent: string,
   finalPlan: string,
@@ -504,7 +527,8 @@ export function implementPrompt(
   riskAssessment: string | null,
   guidance: string | null,
   feedbackAnalysis: string | null = null,
-  prototypeContext: string | null = null
+  prototypeContext: string | null = null,
+  delegates: DelegateOption[] = []
 ): string {
   return `Implement the plan below in the repository at your working directory. Make the code changes it calls for and nothing more — do not fix, refactor, or comment on unrelated code.
 
@@ -518,7 +542,7 @@ Do NOT commit — leave the changes in the working tree.
 ${intent}
 
 ## Plan
-${finalPlan}${riskBlock(riskAssessment)}${prototypeBlock(prototypeContext)}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. RUN it (or the most scoped subset of it that covers your change) before you finish, and iterate until it passes. If your sandbox cannot execute it (permission/socket/service errors), say exactly what failed to run — do not guess that the change works. Discovering failures here is dramatically cheaper than discovering them at the verify gate.` : ''}${uxBuildNote(userFacing)}`
+${finalPlan}${riskBlock(riskAssessment)}${prototypeBlock(prototypeContext)}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${delegationBlock(delegates)}${verify ? `\n\n## Verification\nThe change is checked with \`${verify}\`. RUN it (or the most scoped subset of it that covers your change) before you finish, and iterate until it passes. If your sandbox cannot execute it (permission/socket/service errors), say exactly what failed to run — do not guess that the change works. Discovering failures here is dramatically cheaper than discovering them at the verify gate.` : ''}${uxBuildNote(userFacing)}`
 }
 
 export function prototypePrompt(
@@ -846,7 +870,8 @@ export function fixPrompt(
   guidance: string | null,
   feedbackAnalysis: string | null = null,
   prototypeContext: string | null = null,
-  answers: string | null = null
+  answers: string | null = null,
+  delegates: DelegateOption[] = []
 ): string {
   const tried = history.length
     ? `\n\n## Already attempted (these fixes did NOT work — do not repeat them)\n${history.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
@@ -865,7 +890,7 @@ ${failure}${tried}
 ## Current diff
 \`\`\`diff
 ${diff}
-\`\`\`${riskBlock(riskAssessment)}${prototypeBlock(prototypeContext)}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${uxBuildNote(userFacing)}`
+\`\`\`${riskBlock(riskAssessment)}${prototypeBlock(prototypeContext)}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${delegationBlock(delegates)}${uxBuildNote(userFacing)}`
 }
 
 // The verify-gate doctor: runs with FULL access when the verify command fails.

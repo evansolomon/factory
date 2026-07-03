@@ -203,6 +203,64 @@ describe('feedback prompts', () => {
   })
 })
 
+describe('implement stage delegation menu', () => {
+  const delegates = [
+    {
+      name: 'quick',
+      command: 'factory delegate --cli codex --model gpt-5.4-mini --usage-file /tmp/ledger.jsonl',
+      description: 'small mechanical edits',
+    },
+    {
+      name: 'haiku',
+      command: 'factory delegate --cli claude --model haiku --usage-file /tmp/ledger.jsonl',
+      description: null,
+    },
+  ]
+
+  test('implementPrompt with no delegates contains no delegation section', () => {
+    const prompt = implementPrompt('Task', 'Plan', null, false, null, null)
+
+    expect(prompt).not.toContain('Delegation')
+    expect(prompt).not.toContain('factory delegate')
+  })
+
+  test('implementPrompt lists each delegate command with its description', () => {
+    const prompt = implementPrompt('Task', 'Plan', null, false, null, null, null, null, delegates)
+
+    expect(prompt).toContain('## Delegation')
+    expect(prompt).toContain(
+      '- `factory delegate --cli codex --model gpt-5.4-mini --usage-file /tmp/ledger.jsonl` — quick: small mechanical edits'
+    )
+    expect(prompt).toContain(
+      '- `factory delegate --cli claude --model haiku --usage-file /tmp/ledger.jsonl` — haiku'
+    )
+    expect(prompt).toContain('clearly mechanical')
+    expect(prompt).toContain('when torn, do it yourself')
+  })
+
+  test('fixPrompt gets the same delegation menu', () => {
+    const bare = fixPrompt('Task', 'Plan', 'Failed', [], 'diff', false, null, null)
+    const prompt = fixPrompt(
+      'Task',
+      'Plan',
+      'Failed',
+      [],
+      'diff',
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      delegates
+    )
+
+    expect(bare).not.toContain('Delegation')
+    expect(prompt).toContain('## Delegation')
+    expect(prompt).toContain('quick: small mechanical edits')
+  })
+})
+
 describe('learned lesson prompt injection', () => {
   test('plan keeps legacy lessons and structured learned lessons separate', () => {
     const prompt = planPrompt(
