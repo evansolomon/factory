@@ -87,7 +87,7 @@ Or build a local executable for this machine:
 ```bash
 bun run build:local
 ./dist/factory
-./dist/factory --version # 0.1.1-dev.20260621010203
+./dist/factory --version # 0.2.3-dev.20260702123456
 
 # or choose the executable path
 bun run build:local -- /path/to/factory
@@ -279,6 +279,7 @@ factory show [task-id] [step]                       # drill into one task / a st
 factory report                                     # telemetry roll-up (manage by numbers)
 factory lessons [list|show|rm|edit|curate] ...   # inspect, manage, and curate learned lessons
 factory config [edit ...]                           # show/edit effective config defaults
+factory skills [list|edit <name>]                  # inspect/edit delivery skills
 factory version | --version                         # print the current CLI version
 factory upgrade                                     # install the latest GitHub Release
 factory completion zsh                              # print the zsh completion script
@@ -301,8 +302,9 @@ factory completion zsh                              # print the zsh completion s
 - **`factory add`** is state-aware. It answers a `needs-input` task, records
   feedback on active progress, queues a linked follow-up for completed work, retries
   blocked/retrying work, or creates a new task when there is no current work. If
-  you queue a second fresh task in the same worktree, factory warns but allows it;
-  one active task per worktree keeps provenance easiest to reason about.
+  you queue a second fresh task in the same worktree, factory errors unless you
+  pass `--force-new`; one active task per worktree keeps provenance easiest to
+  reason about.
 - **`factory retry`** (for **blocked**) **reuses** the saved plan + the diff
   already in the worktree and re-enters at the stage that failed — no re-planning.
   Omit the id for the latest blocked/retrying task (or one stranded mid-stage by a
@@ -468,9 +470,13 @@ file at a worktree root can still override per-branch.
 
 Beneath the whole tree sits one **global base**, `~/.factory/config.json` (or
 `$FACTORY_HOME/config.json` when `FACTORY_HOME` is set) — the **lowest priority**
-layer, applied to every repo regardless of where it lives, and overridden by any
-`.factory.json` in the cascade. Use it for machine-wide defaults (agents,
-`retries`) so you don't repeat them per repo.
+layer, applied to every repo regardless of where it lives. Above that is an
+optional **repo-identity layer** at `$FACTORY_HOME/repos/<repo-key>/config.json`,
+shared by every worktree/clone of the same repo on this machine without committing
+anything. Ancestor `.factory.json` files then cascade on top, with the closest
+file winning. Use the global layer for machine-wide defaults (agents, `retries`),
+the repo layer for per-repo local defaults, and `.factory.json` for tree-local
+rules you want discovered by walking the filesystem.
 
 Fields:
 
@@ -487,8 +493,10 @@ Fields:
   URL (e.g. `github.com/evansolomon/factory` → `github.com-evansolomon-factory`)
   under `<base>/repos/<repo-key>/` — so all clones and hosts of one repo share one
   body of lessons, metrics, eval candidates, and delivery history. Repos with no
-  origin fall back to the path key. Machine-specific knowledge (the environment
-  playbook) lives in a per-host layer at `repos/<repo-key>/env/<host>.md`.
+  origin fall back to the main worktree's path key. A relative `dir` is the
+  exception: both per-worktree and repo-level state stay in the main worktree at
+  `<root>/<dir>`. Machine-specific knowledge (the environment playbook) lives in a
+  per-host layer at `repos/<repo-key>/env/<host>.md`.
 - **`retries`** — hard cap on auto-fix iterations after a failed gate
   (review-panel/verify), **enforced mechanically**: at the cap the judge's
   CONTINUE is overridden and the human is asked. Two more mechanical bounds ride
@@ -587,6 +595,11 @@ Fields:
   task; choosing a side-effecting delivery for that task runs delivery immediately.
   Delivery failure is treated like a transient gate failure: the task is set aside
   for auto-retry and only blocks after the auto-retry cap is spent.
+
+  Manage delivery skills with `factory skills`: `factory skills list` shows the
+  effective merged skill set and layer order; `factory skills edit <name>` edits
+  the repo-identity layer by default, with `--global` for the machine-wide layer
+  and `--committed` for the repo's `.skills/`.
 
 Successful pipeline-completed tasks also get local completion artifacts after
 optional delivery: `feedback.md` for the concise markdown handoff, and best-effort
@@ -780,8 +793,9 @@ finishes: then `task.md` is replaced with the refined spec. A complexity overrid
 from `factory add --trivial` or `--complexity trivial|complex` lives in
 `meta.json`; feedback bookkeeping lives there too as `feedbackCount`,
 `feedbackConsumed`, and `feedbackSourceTaskId` for linked follow-ups. `triage.md`
-exists only for model triage output. Repo-level state lives under the main
-worktree's state dir, shared across linked worktrees:
+exists only for model triage output. Repo-level state lives under the repo state
+dir, shared across linked worktrees and keyed by repo identity unless `dir` is
+relative:
 `LESSONS.md`, `LESSONS.candidates.md`, `metrics.db`, `eval-candidates/`, and
 `backlog/`. Structured learned lessons live in global factory state under
 `$FACTORY_HOME/guidance/items/*.json`.
@@ -835,7 +849,7 @@ touched-file overlap against the captured reference — the regression gate for
 prompt/policy changes and for factory's changes to itself.
 
 `LESSONS.md` remains legacy curated repo guidance at the repo-level state root,
-keyed by the main worktree, and is still read into planning and critique.
+keyed by repo identity, and is still read into planning and critique.
 `LESSONS.candidates.md` remains the raw human-curation queue for blocked runs,
 needs-input events, postmortems, and manual corrections. `factory lessons curate`
 uses eval replay as the promotion gate for recurring raw candidates. Dynamic
@@ -916,8 +930,8 @@ has a commit, feedback queues a linked follow-up instead of reopening it.
 ## Telemetry (`factory report`)
 
 The quantitative meta loop — "manage by numbers." Every task pass writes one row
-to a repo-level SQLite db (`metrics.db`, keyed by the main worktree like the
-backlog), plus a child row per pipeline stage. `factory report` rolls it up:
+to a repo-level SQLite db (`metrics.db`, in the repo state dir), plus a child row
+per pipeline stage. `factory report` rolls it up:
 **first-pass yield** (done with no retries, of implement attempts),
 **escalation rate**, **blocked rate**, **retry success**, a token-cost proxy
 (total input tokens, total output tokens, combined total tokens, and median total
@@ -962,13 +976,16 @@ the most likely thing to need tuning:
 - **codex** (read-only stages):
   `codex exec -C <root> -s read-only -c approval_policy="never" --json -o <file> -`
   (prompt on stdin; final message to `<file>`; the `--json` event stream on stdout
-  is read for token usage). `-s` governs filesystem access — `workspace-write` for
-  implement, `danger-full-access` for ship; `approval_policy="never"` prevents an
-  interactive hang in an unattended run. An agent with a `provider` set (see
-  Configuration) adds `-c model_provider="<name>"`, routing to a non-default
-  OpenAI-compatible backend. Heads-up: codex's `turn.completed` usage may be empty
-  for some non-OpenAI providers — usage parsing degrades to zero (the loop never
-  breaks), so `factory report` token figures can read low for those models.
+  is read for token usage). `-s` governs filesystem access: ordinary read-only
+  stages use `read-only`; research uses `workspace-write` plus network enabled
+  because Codex's read-only sandbox blocks network lookup; implementation/fix use
+  `workspace-write` or `danger-full-access` depending on `implementerAccess`; ship
+  uses `danger-full-access`. `approval_policy="never"` prevents an interactive
+  hang in an unattended run. An agent with a `provider` set (see Configuration)
+  adds `-c model_provider="<name>"`, routing to a non-default OpenAI-compatible
+  backend. Heads-up: codex's `turn.completed` usage may be empty for some
+  non-OpenAI providers — usage parsing degrades to zero (the loop never breaks), so
+  `factory report` token figures can read low for those models.
 - **claude** (read-only stages):
   `claude -p --add-dir <root> --output-format stream-json --verbose --permission-mode bypassPermissions --disallowedTools Edit Write NotebookEdit`
   (bypass prompts so it can't hang; disallow Claude's dedicated edit tools and
