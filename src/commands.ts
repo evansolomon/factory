@@ -203,6 +203,26 @@ export const DELIVERY_OPTIONS = [
   { name: '--task', description: 'Target a specific task', value: TASK_ID },
 ] as const satisfies readonly OptionSpec[]
 
+// Flags mirror the object AgentSpec fields; the conductor renders these
+// commands from validated pool entries (delegate.ts), so no value completion.
+export const DELEGATE_OPTIONS = [
+  {
+    name: '--cli',
+    description: 'Agent CLI to run',
+    value: { kind: 'static', choices: AGENT_CHOICES },
+    equals: true,
+  },
+  { name: '--model', description: 'Model override', value: NONE, equals: true },
+  { name: '--reasoning-effort', description: 'Codex reasoning effort', value: NONE, equals: true },
+  { name: '--provider', description: 'Codex model provider', value: NONE, equals: true },
+  {
+    name: '--usage-file',
+    description: 'Append a JSON token-usage record to this file',
+    value: NONE,
+    equals: true,
+  },
+] as const satisfies readonly OptionSpec[]
+
 export const DISPATCH_OPTIONS = [
   { name: '--dry-run', description: 'Show what would be dispatched without spawning' },
   { name: '--limit', description: 'Dispatch at most N backlog items', value: NONE },
@@ -502,6 +522,13 @@ export const COMMANDS = [
     hidden: true,
     options: MESSAGE_OPTIONS,
     positionals: [TASK_ID_POSITIONAL],
+  },
+  {
+    name: 'delegate',
+    description: 'Run a one-shot delegated agent for an implement stage (internal)',
+    autoUpgrade: false,
+    hidden: true,
+    options: DELEGATE_OPTIONS,
   },
   {
     name: '__complete',

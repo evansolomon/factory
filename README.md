@@ -621,7 +621,11 @@ pre-implementation artifacts, not completion briefs; they are visible through
 - **`agents`** — which agent fills each role:
   - `planners` (list) — draft + cross-critique + revise. **≥2 different agents
     enables the cross-model ensemble**; 1 → single planner, no critique.
-  - `implementer` — also runs triage, research, reconcile, and select (the "lead").
+  - the lead implementer is the `implementers` pool's reserved `default` entry —
+    it also runs triage, research, reconcile, and select (the "lead"), and all
+    fix passes escalate to it. (The old top-level `implementer` key is
+    deprecated: it still resolves when no `default` entry exists, with a
+    warning.)
   - `reviewer` — the fresh adversarial diff review, red-team security gate, risk
     assessment, and deploy-safety review
     (best a *different* model from the implementer, to avoid self-bias).
@@ -630,28 +634,44 @@ pre-implementation artifacts, not completion briefs; they are visible through
   - `rescue` — last-chance read-only strategist before terminal blocking.
   - `researchers` / `reviewers` — optional named maps the workforce router can
     select for specific scouts or lenses, e.g. `{ "runtime": "claude" }`.
-  - `implementers` — optional named map of cheaper/faster alternative
-    implementers, e.g. `{ "quick": { "cli": "codex", "model": "gpt-5.4-mini",
-    "description": "small mechanical edits" } }`. When non-empty, triage also
-    picks which agent writes the code: clearly-easy, low-risk tasks route to a
-    pool entry for the attempt-0 implement stage; everything else (and any
-    missing/unknown/`DEFAULT` pick) uses `implementer`. Fix passes always
-    escalate back to `implementer`, and tasks with declared complexity or
-    `"triage": false` never consult the pool. Empty (the default) = feature off.
+  - `implementers` — the implementer pool: the reserved `default` key is the
+    lead, and any other entries are named alternatives, e.g.
+    `{ "default": "codex", "quick": { "cli": "codex", "model": "gpt-5.4-mini",
+    "description": "small mechanical edits" } }`. With non-default entries
+    present, triage also picks which agent writes the code: it matches the
+    task against each entry's `description` (the `default` entry renders as
+    the `DEFAULT` menu line) and routes the attempt-0 implement stage to the
+    best fit; a missing/unknown/`DEFAULT` pick uses the lead. Fix passes
+    always escalate back to the lead, and tasks with declared complexity or
+    `"triage": false` never consult the pool. No non-default entries (the
+    default) = routing/delegation off.
     Like `researchers`/`reviewers`, inherited pools merge per key across the
     config cascade — a child config setting `"implementers": {}` does not
     disable a pool inherited from a parent layer.
-    The optional `description` on an agent is shown to triage as the routing
-    policy — it's how you tell the router what each entry is good for.
+    The `description` on each agent (including the `default` entry, shown as
+    the `DEFAULT` line) is the entire routing policy: the prompts carry only
+    the mechanism, and the deciding model weighs capability against cost from
+    what the descriptions say. Tune descriptions, not code, to shift routing.
+
+    A non-empty pool also becomes an **in-flight delegation menu**: implement
+    and fix prompts list each entry as a runnable `factory delegate` one-shot
+    command (subtask prompt on stdin, report on stdout), so the implementing
+    agent can hand subtasks to whichever pool agent's description fits, at its
+    own judgment. This is CLI-neutral (plain bash, works from codex and claude
+    implementers alike) and tracked: each delegated run appends token usage to
+    a per-task ledger that lands in the meter and telemetry as `delegate`
+    stage rows under the delegate's agent label.
   - `namer` — cheaply summarizes new task intents into short task ids. This is
     best-effort; if the model call fails, `factory add` falls back to the local
     prompt-prefix slug.
 
   Each value is `"codex"` / `"claude"` or
   `{ "cli": "codex"|"claude", "model"?: "…", "reasoningEffort"?: "low", "provider"?: "…", "description"?: "…" }`.
-  Default: `{"planners": ["codex","claude"], "implementer": "codex",
+  Default: `{"planners": ["codex","claude"], "implementers": {},
   "reviewer": "claude", "delivery": "claude", "workforce": "claude", "rescue": "claude",
-  "namer": {"cli": "codex", "model": "gpt-5.4-mini", "reasoningEffort": "low"}}`.
+  "namer": {"cli": "codex", "model": "gpt-5.4-mini", "reasoningEffort": "low"}}`,
+  with the lead implementer falling back to `"codex"` when no
+  `implementers.default` entry is set.
   `reasoningEffort` is codex-only and maps to Codex's `model_reasoning_effort`.
   Only `codex` and `claude` are built in (each needs an adapter — see below).
 
@@ -875,7 +895,7 @@ The proactive complement to the reactive reconcile valve: resolve ambiguity afte
 triage and before planning. When state-aware `factory add` creates a new task, it
 queues the raw intent immediately with `sharpen: pending`; the long-lived
 `factory run` process then sharpens non-trivial pending tasks. Trivial tasks skip
-sharpening and take the fast path. An agent (the configured `implementer`) turns
+sharpening and take the fast path. An agent (the lead implementer) turns
 the raw intent into a
 self-contained spec, reading the repo itself to answer what it can. The
 spec is the durable handoff: problem, goal, context, verified current state,

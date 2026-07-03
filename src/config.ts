@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { mainWorktreeRoot, originUrl, repoRoot } from './git.ts'
 import { log } from './log.ts'
 
-const ReasoningEffortSchema = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh'])
+export const ReasoningEffortSchema = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh'])
 type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>
 
 // An agent is a CLI, optionally pinned to a model and Codex reasoning effort.
@@ -82,7 +82,11 @@ const AgentMapSchema = z.record(z.string(), AgentSpecSchema)
 
 const AgentsSchema = z.object({
   planners: z.array(AgentSpecSchema).default((): AgentSpec[] => ['codex', 'claude']),
-  implementer: AgentSpecSchema.default('codex'),
+  // DEPRECATED spelling of the lead implementer. The lead now lives in the
+  // `implementers` pool under the reserved `default` key; this is honored as a
+  // fallback (with a warning) so existing configs don't silently flip to the
+  // built-in default. Remove once configs have migrated.
+  implementer: AgentSpecSchema.optional(),
   reviewer: AgentSpecSchema.default('claude'),
   delivery: AgentSpecSchema.default('claude'),
   // Read-only router for dynamic research/review/policy selection.
@@ -93,9 +97,13 @@ const AgentsSchema = z.object({
   // and review lenses to, e.g. { "runtime": "claude" }.
   researchers: AgentMapSchema.default({}),
   reviewers: AgentMapSchema.default({}),
-  // Optional named pool of alternative implementers. When non-empty, triage
-  // additionally picks one (or DEFAULT) for the attempt-0 implement stage;
-  // fix passes always escalate to `implementer`. Empty = feature off.
+  // The implementer pool. The reserved `default` key is the LEAD — it runs
+  // triage, reconcile/select, the implement stage, and all fix-pass
+  // escalations (falls back to the deprecated `implementer`, then built-in
+  // codex). Other entries are named alternatives: triage may route the
+  // attempt-0 implement stage to one, and implement/fix prompts offer the
+  // whole pool as an in-flight delegation menu. No non-default entries =
+  // routing/delegation off.
   implementers: AgentMapSchema.default({}),
   // Cheap, low-latency model used only to turn a raw task intent into a short id.
   // Best-effort callers fall back to the local slug heuristic if this is unavailable.
@@ -118,7 +126,7 @@ const AskSchema = z
 
 type AgentsConfig = {
   planners: AgentSpec[]
-  implementer: AgentSpec
+  implementer?: AgentSpec
   reviewer: AgentSpec
   delivery: AgentSpec
   workforce: AgentSpec
@@ -249,7 +257,6 @@ const ConfigSchema = z.object({
   agents: AgentsSchema.default(
     (): AgentsConfig => ({
       planners: ['codex', 'claude'],
-      implementer: 'codex',
       reviewer: 'claude',
       delivery: 'claude',
       workforce: 'claude',
@@ -519,9 +526,22 @@ export type WorkContext = {
 
 function resolveAgents(config: Config): RoleAgents {
   const a = config.agents
+  // The lead implementer is the pool's reserved `default` entry. The legacy
+  // top-level `implementer` is honored behind it so an un-migrated config keeps
+  // its chosen agent instead of silently flipping to the built-in default —
+  // config keys unknown to older schemas are warn-and-ignore, so removal
+  // without a fallback would be a silent behavior change.
+  const lead = a.implementers['default'] ?? a.implementer ?? 'codex'
+  if (a.implementer !== undefined) {
+    log.warn(
+      a.implementers['default'] !== undefined
+        ? 'agents.implementer is ignored: agents.implementers.default takes precedence'
+        : 'agents.implementer is deprecated: move it to agents.implementers.default'
+    )
+  }
   return {
     planners: a.planners.map(normAgent),
-    implementer: normAgent(a.implementer),
+    implementer: normAgent(lead),
     reviewer: normAgent(a.reviewer),
     delivery: normAgent(a.delivery),
     namer: normAgent(a.namer),

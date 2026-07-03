@@ -62,6 +62,12 @@ describe('resolveImplementer', () => {
     expect(resolveImplementer(' Default ', pool)).toBeNull()
   })
 
+  test('the reserved default pool entry can never route as a named entry', () => {
+    // The lead lives in the pool under `default`; the sentinel check intercepts
+    // the name before pool lookup, so it always means "use the lead".
+    expect(resolveImplementer('default', { default: 'codex', quick: 'claude' })).toBeNull()
+  })
+
   test('an exact pool name resolves, tolerating surrounding whitespace', () => {
     expect(resolveImplementer('quick', pool)).toBe('quick')
     expect(resolveImplementer('  quick ', pool)).toBe('quick')

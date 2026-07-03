@@ -1,8 +1,9 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, rm } from 'node:fs/promises'
 import { type AgentResult, agentLabel, runAgent } from './agents.ts'
 import { cleanCommitMessage, fallbackCommitMessage } from './commit-message.ts'
 import { type Agent, type AgentSpec, normAgent, type WorkContext } from './config.ts'
 import { buildDeckHtml } from './deck.ts'
+import { collectDelegatedUsage, delegateCommand, delegateUsageFile } from './delegate.ts'
 import {
   appendDeliveryHistory,
   applyDeliveryConfirmation,
@@ -57,6 +58,7 @@ import {
   consolidatePrompt,
   convergePrompt,
   critiquePrompt,
+  type DelegateOption,
   deckPrompt,
   deliverySelectPrompt,
   deploySafetyPrompt,
@@ -2098,6 +2100,10 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // Raw IMPLEMENTER marker from the triage output; stays null when triage is skipped.
     let triageImplementer: string | null = null
     const pool = ctx.config.agents.implementers
+    // Named alternatives to the lead: the reserved `default` entry IS the lead
+    // (rendered as the DEFAULT menu line in triage), so only the other entries
+    // are routable by name.
+    const routable = Object.fromEntries(Object.entries(pool).filter(([name]) => name !== 'default'))
     const complexityDecision = decideComplexity(task.meta.complexity, ctx.config.triage)
     if (complexityDecision.source === 'declared') {
       trivial = complexityDecision.trivial
@@ -2105,7 +2111,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       log.info(`${task.id}: ${label} — using declared complexity (skipping triage)`)
     } else if (complexityDecision.source === 'triage') {
       await progress(ctx, task, 'triage', 'triage — trivial or complex?')
-      const implementerOptions = Object.entries(pool).map(([name, spec]) => {
+      const implementerOptions = Object.entries(routable).map(([name, spec]) => {
         const agent = normAgent(spec)
         return { name, label: agentLabel(agent), description: agent.description ?? null }
       })
@@ -2115,7 +2121,10 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         agentLabel(lead),
         runAgent(lead, {
           root: ctx.root,
-          prompt: triagePrompt(intent, verify, implementerOptions),
+          prompt: triagePrompt(intent, verify, implementerOptions, {
+            label: agentLabel(lead),
+            description: lead.description ?? null,
+          }),
           access: 'read',
           outFile: `${task.dir}/triage.md`,
         })
@@ -2151,8 +2160,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // marker) both resolve to null, so a name routed by an earlier run can't leak
     // into this run or a later resume of it. Fail-safe — missing/unknown/DEFAULT
     // → null (the default implementer); never a block.
-    const routedName = freshRunImplementer(complexityDecision, triageImplementer, pool)
-    if (complexityDecision.source === 'triage' && Object.keys(pool).length > 0) {
+    const routedName = freshRunImplementer(complexityDecision, triageImplementer, routable)
+    if (complexityDecision.source === 'triage' && Object.keys(routable).length > 0) {
       if (routedName) {
         log.info(`${task.id}: triage routed the implement stage to "${routedName}"`)
       } else if (triageImplementer === null) {
@@ -2369,6 +2378,20 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     ? implementerPool[routedImplementerName]
     : null
   const routedImplementer = routedImplementerSpec ? normAgent(routedImplementerSpec) : lead
+  // In-flight delegation menu: the implementers pool rendered as runnable
+  // one-shot commands (delegate.ts). Delegated usage lands in a per-task tmp
+  // ledger folded into the meter after each implement/fix stage; leftovers
+  // from an interrupted prior pass are dropped so they can't be misattributed.
+  const delegateLedger = delegateUsageFile(task.id)
+  const delegates: DelegateOption[] = Object.entries(implementerPool).map(([name, spec]) => {
+    const agent = normAgent(spec)
+    return {
+      name,
+      command: delegateCommand(agent, delegateLedger),
+      description: agent.description ?? null,
+    }
+  })
+  await rm(delegateLedger, { force: true })
   while (true) {
     stats.retries = attempt
     if (skipImplement) {
@@ -2409,7 +2432,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             stageGuidance('fix'),
             feedbackContext?.analysis ?? null,
             prototype,
-            answers
+            answers,
+            delegates
           )
         : implementPrompt(
             intent,
@@ -2419,7 +2443,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             riskAssessment,
             stageGuidance('implement'),
             feedbackContext?.analysis ?? null,
-            prototype
+            prototype,
+            delegates
           )
       // Fix passes always escalate to the default implementer: a failed gate is
       // direct evidence the "easy" routing call was wrong.
@@ -2436,6 +2461,28 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           outFile: `${task.dir}/implement.log.md`,
         })
       )
+
+      // Fold any delegated runs into the meter as their own stage rows so
+      // spend the parent CLI can't see (bash children) still lands in totals
+      // and per-agent telemetry.
+      const delegated = await collectDelegatedUsage(delegateLedger)
+      for (const d of delegated) {
+        meter.inTok += d.inputTokens
+        meter.outTok += d.outputTokens
+        meter.stages.push({
+          stage: 'delegate',
+          agent: d.label,
+          inTok: d.inputTokens,
+          outTok: d.outputTokens,
+          ms: d.ms,
+        })
+        log.done(
+          `delegate ${d.label} ${fmtSecs(d.ms)} · ${fmtTok(d.inputTokens)}→${fmtTok(d.outputTokens)} tok`
+        )
+      }
+      if (delegated.length > 0) {
+        await persistLiveMeter(meter)
+      }
 
       if (!(await hasChanges(ctx.root))) {
         return blocked(

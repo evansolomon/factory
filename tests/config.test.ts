@@ -232,6 +232,60 @@ describe('config cascade', () => {
   })
 })
 
+describe('lead implementer resolution', () => {
+  async function gitRoot(prefix: string): Promise<string> {
+    const base = await tempDir(prefix)
+    const root = `${base}/repo`
+    await mkdir(root, { recursive: true })
+    await $`git -C ${root} init`.quiet()
+    return root
+  }
+
+  test('implementers.default is the lead and wins over the deprecated implementer', async () => {
+    await withFactoryHome(async () => {
+      const root = await gitRoot('lead-default')
+      await writeJson(`${root}/.factory.json`, {
+        agents: {
+          implementer: 'claude',
+          implementers: {
+            default: { cli: 'codex', model: 'gpt-5.5', description: 'workhorse' },
+          },
+        },
+      })
+
+      const ctx = await loadContext(root)
+
+      expect(ctx.agents.implementer).toEqual({
+        cli: 'codex',
+        model: 'gpt-5.5',
+        description: 'workhorse',
+      })
+    })
+  })
+
+  test('the deprecated agents.implementer still resolves without a default entry', async () => {
+    await withFactoryHome(async () => {
+      const root = await gitRoot('lead-legacy')
+      await writeJson(`${root}/.factory.json`, { agents: { implementer: 'claude' } })
+
+      const ctx = await loadContext(root)
+
+      expect(ctx.agents.implementer).toEqual({ cli: 'claude' })
+    })
+  })
+
+  test('with neither spelling the built-in codex default applies', async () => {
+    await withFactoryHome(async () => {
+      const root = await gitRoot('lead-builtin')
+      await writeJson(`${root}/.factory.json`, { agents: { reviewer: 'claude' } })
+
+      const ctx = await loadContext(root)
+
+      expect(ctx.agents.implementer).toEqual({ cli: 'codex' })
+    })
+  })
+})
+
 describe('repo identity', () => {
   test('normalizes the common origin URL shapes to one canonical form', () => {
     const canonical = 'github.com/evansolomon/factory'
