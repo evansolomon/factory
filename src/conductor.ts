@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { type AgentResult, agentLabel, runAgent } from './agents.ts'
 import { cleanCommitMessage, fallbackCommitMessage } from './commit-message.ts'
-import { type Agent, normAgent, type WorkContext } from './config.ts'
+import { type Agent, type AgentSpec, normAgent, type WorkContext } from './config.ts'
 import { buildDeckHtml } from './deck.ts'
 import {
   appendDeliveryHistory,
@@ -644,6 +644,11 @@ type RunStats = {
   triage: 'trivial' | 'complex' | null
   retries: number
   verifyFirstTry: boolean | null
+  // Agent label of this pass's FIRST implement stage (the routing decision for
+  // attempt-0 passes); null if this pass ran none (gates-only resume,
+  // delivery-only). Set once and never overwritten by fix passes — first-pass
+  // yield must attribute to the agent that wrote the original code.
+  implementer: string | null
 }
 
 export type ComplexityDecision =
@@ -662,6 +667,39 @@ export function decideComplexity(
     return { source: 'declared', trivial: false, complexity: declared }
   }
   return triageEnabled ? { source: 'triage' } : { source: 'none' }
+}
+
+// Resolve a raw IMPLEMENTER marker value (or a meta-persisted pool name)
+// against the current pool. Returns the pool key, or null meaning "use the
+// default implementer". Fail-safe: DEFAULT (any case), unknown names, and
+// empty pools all resolve to null — routing can never crash or block a task.
+// Pool keys match exactly (after trimming the input): AgentMapSchema allows
+// case-variant sibling keys, so a forgiving match could pick the wrong agent.
+export function resolveImplementer(
+  raw: string | null,
+  pool: Record<string, AgentSpec>
+): string | null {
+  const name = raw?.trim()
+  if (!name || name.toUpperCase() === 'DEFAULT') {
+    return null
+  }
+  // hasOwn, not `in`: a marker value like "constructor" must not resolve via
+  // the object prototype chain.
+  return Object.hasOwn(pool, name) ? name : null
+}
+
+// The routing decision a fresh run persists to task.meta.implementer after the
+// complexity phase. Only a triaged run can route — and resolveImplementer
+// fail-safes an empty pool (where the prompt never asked for the marker) to
+// null — so declared complexity, triage off, and a removed pool all CLEAR a
+// stale decision left by an earlier triaged run instead of letting it route a
+// later resume once a pool reappears.
+export function freshRunImplementer(
+  decision: ComplexityDecision,
+  triageMarker: string | null,
+  pool: Record<string, AgentSpec>
+): string | null {
+  return decision.source === 'triage' ? resolveImplementer(triageMarker, pool) : null
 }
 
 export function implementationAttemptCount(failures: Failure[]): number {
@@ -701,6 +739,7 @@ function recordTask(
     triage: stats.triage,
     retries: stats.retries,
     verifyFirstTry: stats.verifyFirstTry,
+    implementer: stats.implementer,
     ms: Date.now() - meter.startedAt,
     inTokens: meter.inTok,
     outTokens: meter.outTok,
@@ -2007,7 +2046,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   const meter = newMeter(task)
   await persistLiveMeter(meter)
   const lead = ctx.agents.implementer
-  const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null }
+  const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null, implementer: null }
   const stageGuidance = await stageGuidanceForRun(ctx, meter)
 
   const baselineDiff = await worktreeDiff(ctx.root)
@@ -2056,6 +2095,9 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
 
     // 0. TRIAGE — classify the task; trivial ones skip the whole plan ensemble.
     let trivial = false
+    // Raw IMPLEMENTER marker from the triage output; stays null when triage is skipped.
+    let triageImplementer: string | null = null
+    const pool = ctx.config.agents.implementers
     const complexityDecision = decideComplexity(task.meta.complexity, ctx.config.triage)
     if (complexityDecision.source === 'declared') {
       trivial = complexityDecision.trivial
@@ -2063,13 +2105,17 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       log.info(`${task.id}: ${label} — using declared complexity (skipping triage)`)
     } else if (complexityDecision.source === 'triage') {
       await progress(ctx, task, 'triage', 'triage — trivial or complex?')
+      const implementerOptions = Object.entries(pool).map(([name, spec]) => {
+        const agent = normAgent(spec)
+        return { name, label: agentLabel(agent), description: agent.description ?? null }
+      })
       const verdict = await agentStep(
         meter,
         'triage',
         agentLabel(lead),
         runAgent(lead, {
           root: ctx.root,
-          prompt: triagePrompt(intent, verify),
+          prompt: triagePrompt(intent, verify, implementerOptions),
           access: 'read',
           outFile: `${task.dir}/triage.md`,
         })
@@ -2094,7 +2140,31 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       userFacing = ctx.config.ux && classifiedUserFacing
       triageClassifiedUserFacing = true
       task.meta.userFacing = classifiedUserFacing
+      triageImplementer = triage.implementer
       task.meta.updatedAt = new Date().toISOString()
+      await saveMeta(task)
+    }
+
+    // Routing: meta.implementer is THIS fresh run's decision. freshRunImplementer
+    // clears anything staler — a triage-skipped run (declared complexity, triage
+    // off) and a triage run with an empty pool (the prompt never asked for the
+    // marker) both resolve to null, so a name routed by an earlier run can't leak
+    // into this run or a later resume of it. Fail-safe — missing/unknown/DEFAULT
+    // → null (the default implementer); never a block.
+    const routedName = freshRunImplementer(complexityDecision, triageImplementer, pool)
+    if (complexityDecision.source === 'triage' && Object.keys(pool).length > 0) {
+      if (routedName) {
+        log.info(`${task.id}: triage routed the implement stage to "${routedName}"`)
+      } else if (triageImplementer === null) {
+        log.warn(
+          `${task.id}: triage output missing IMPLEMENTER marker; using the default implementer`
+        )
+      } else if (triageImplementer.trim().toUpperCase() !== 'DEFAULT') {
+        log.warn(`${task.id}: unknown implementer "${triageImplementer}" — using the default`)
+      }
+    }
+    if (task.meta.implementer !== routedName) {
+      task.meta.implementer = routedName
       await saveMeta(task)
     }
 
@@ -2289,6 +2359,16 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     skipImplement = false
     attempt = Math.max(1, implementationAttemptCount(failures))
   }
+  // Routed implementer for attempt 0. task.meta.implementer covers both the
+  // fresh path (just written or cleared by triage above) and a resume that
+  // re-implements at attempt 0 (resume never re-triages), re-resolved against
+  // the CURRENT pool so a deleted entry degrades to the default implementer.
+  const implementerPool = ctx.config.agents.implementers
+  const routedImplementerName = resolveImplementer(task.meta.implementer, implementerPool)
+  const routedImplementerSpec = routedImplementerName
+    ? implementerPool[routedImplementerName]
+    : null
+  const routedImplementer = routedImplementerSpec ? normAgent(routedImplementerSpec) : lead
   while (true) {
     stats.retries = attempt
     if (skipImplement) {
@@ -2341,11 +2421,15 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             feedbackContext?.analysis ?? null,
             prototype
           )
+      // Fix passes always escalate to the default implementer: a failed gate is
+      // direct evidence the "easy" routing call was wrong.
+      const implementAgent = fixing ? lead : routedImplementer
+      stats.implementer ??= agentLabel(implementAgent)
       await agentStep(
         meter,
         'implement',
-        agentLabel(lead),
-        runAgent(lead, {
+        agentLabel(implementAgent),
+        runAgent(implementAgent, {
           root: ctx.root,
           prompt: stagePrompt,
           access: ctx.config.implementerAccess === 'full' ? 'full' : 'write',
@@ -2991,7 +3075,7 @@ export async function deliverTask(ctx: WorkContext, task: Task): Promise<TaskOut
   await sweepInterruptedMeter(task)
   const meter = newMeter(task)
   await persistLiveMeter(meter)
-  const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null }
+  const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null, implementer: null }
   return shipAndFinish(ctx, task, intent, meter, stats, await stageGuidanceForRun(ctx, meter))
 }
 

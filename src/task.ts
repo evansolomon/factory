@@ -105,6 +105,11 @@ const MetaSchema = z.object({
   autoRetries: z.number().int().default(0),
   // Explicit complexity declared by `factory add`; null means runtime triage decides.
   complexity: TaskComplexitySchema.nullable().default(null),
+  // Pool name of the implementer the most recent fresh run chose
+  // (agents.implementers key), or null for the default. Written by triage,
+  // cleared by triage-skipped fresh runs, re-resolved against the current pool
+  // on resume — a deleted entry falls back to the default implementer.
+  implementer: z.string().nullable().default(null),
   // Task-local delivery decision. Pending tasks choose delivery after the task is
   // clarified, before planning/implementation, using repo context, available
   // skills, history, and the task spec.
@@ -244,6 +249,7 @@ export async function addTask(
     retryAt: null,
     autoRetries: 0,
     complexity: options.complexity ?? null,
+    implementer: null,
     delivery: options.delivery ?? { mode: 'pending' },
     deliveryProposal: undefined,
     deliveryProposalAt: null,

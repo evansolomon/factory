@@ -52,6 +52,7 @@ const config: Config = {
     rescue: 'claude',
     researchers: {},
     reviewers: {},
+    implementers: {},
     namer: { cli: 'codex', model: 'gpt-5.4-mini', reasoningEffort: 'low' },
   },
   ask: { agent: 'claude' },
@@ -247,6 +248,7 @@ describe('task state transitions', () => {
     expect(task?.meta.resumeKind).toBeNull()
     expect(task?.meta.autoRetries).toBe(0)
     expect(task?.meta.complexity).toBeNull()
+    expect(task?.meta.implementer).toBeNull()
     expect(task?.meta.delivery).toEqual({ mode: 'pending' })
     expect(task?.meta.feedbackCount).toBe(0)
     expect(task?.meta.feedbackConsumed).toBe(0)
@@ -285,6 +287,20 @@ describe('task state transitions', () => {
     const task = (await loadTasks(ctx)).find((t) => t.id === added.id)
 
     expect(task?.meta.complexity).toBe('complex')
+  })
+
+  test('round-trips the triage-chosen implementer pool name', async () => {
+    const ctx = await workContext()
+    const added = await addTask(ctx, 'Fix typo', null)
+
+    expect(added.meta.implementer).toBeNull()
+
+    added.meta.implementer = 'quick'
+    await saveMeta(added)
+
+    const task = (await loadTasks(ctx)).find((t) => t.id === added.id)
+
+    expect(task?.meta.implementer).toBe('quick')
   })
 
   test('parallel adds with the same slug claim distinct task ids', async () => {

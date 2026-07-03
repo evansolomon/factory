@@ -562,7 +562,8 @@ Fields:
   removes the item. Factory never queues tasks internally or manages lanes.
 - **Config cascade note:** `agents` and `specialists` **merge per key** across the
   cascade (a worktree override of one role no longer silently resets its
-  siblings); `hooks` concatenates; everything else is closest-wins.
+  siblings), including the nested `researchers`/`reviewers`/`implementers` pools;
+  `hooks` concatenates; everything else is closest-wins.
 - **Delivery** is task-local, not static config. After sharpen/triage clarifies the
   task, factory chooses whether a completed task should stop after the local
   commit, run a named delivery skill, or follow a one-off policy. The selector
@@ -629,12 +630,25 @@ pre-implementation artifacts, not completion briefs; they are visible through
   - `rescue` — last-chance read-only strategist before terminal blocking.
   - `researchers` / `reviewers` — optional named maps the workforce router can
     select for specific scouts or lenses, e.g. `{ "runtime": "claude" }`.
+  - `implementers` — optional named map of cheaper/faster alternative
+    implementers, e.g. `{ "quick": { "cli": "codex", "model": "gpt-5.4-mini",
+    "description": "small mechanical edits" } }`. When non-empty, triage also
+    picks which agent writes the code: clearly-easy, low-risk tasks route to a
+    pool entry for the attempt-0 implement stage; everything else (and any
+    missing/unknown/`DEFAULT` pick) uses `implementer`. Fix passes always
+    escalate back to `implementer`, and tasks with declared complexity or
+    `"triage": false` never consult the pool. Empty (the default) = feature off.
+    Like `researchers`/`reviewers`, inherited pools merge per key across the
+    config cascade — a child config setting `"implementers": {}` does not
+    disable a pool inherited from a parent layer.
+    The optional `description` on an agent is shown to triage as the routing
+    policy — it's how you tell the router what each entry is good for.
   - `namer` — cheaply summarizes new task intents into short task ids. This is
     best-effort; if the model call fails, `factory add` falls back to the local
     prompt-prefix slug.
 
   Each value is `"codex"` / `"claude"` or
-  `{ "cli": "codex"|"claude", "model"?: "…", "reasoningEffort"?: "low", "provider"?: "…" }`.
+  `{ "cli": "codex"|"claude", "model"?: "…", "reasoningEffort"?: "low", "provider"?: "…", "description"?: "…" }`.
   Default: `{"planners": ["codex","claude"], "implementer": "codex",
   "reviewer": "claude", "delivery": "claude", "workforce": "claude", "rescue": "claude",
   "namer": {"cli": "codex", "model": "gpt-5.4-mini", "reasoningEffort": "low"}}`.

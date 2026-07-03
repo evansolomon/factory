@@ -554,11 +554,43 @@ ${intent}
 ${finalPlan}${riskBlock(riskAssessment)}${learnedLessonsBlock(guidance)}`
 }
 
+// A configured alternative implementer, pre-shaped for the triage prompt:
+// pool name, agent label (cli:model), and the human's routing description.
+export type ImplementerOption = { name: string; label: string; description: string | null }
+
 // First pass: decide whether a task is trivial enough to skip the planning
 // ensemble, AND whether it is user-facing (gates the UI/UX lenses). Biased toward
-// COMPLEX so only clearly-small work takes the fast path.
-export function triagePrompt(intent: string, verify: string | null): string {
-  return `Classify the task below on two axes. Look at the repo briefly if it helps.
+// COMPLEX so only clearly-small work takes the fast path. When an implementer
+// pool is configured, triage also picks which implementer writes the code —
+// with an empty pool the prompt is byte-identical to the two-axis version.
+export function triagePrompt(
+  intent: string,
+  verify: string | null,
+  implementers: ImplementerOption[]
+): string {
+  const axes = implementers.length > 0 ? 'three' : 'two'
+  const implementerSection =
+    implementers.length > 0
+      ? `
+IMPLEMENTER — which agent writes the code. The named agents below are cheaper/faster alternatives to the default implementer, for the code-writing stage ONLY; every other stage (planning, review, verification, fix passes) stays on the default. Pick a named agent only when the task is clearly easy AND low-risk; anything ambiguous, cross-cutting, or data/security-sensitive → DEFAULT. Genuinely torn → DEFAULT.
+
+Available implementers:
+${implementers.map((i) => `- ${i.name} — ${i.label}${i.description ? `: ${i.description}` : ''}`).join('\n')}
+
+Calibration: the review panel, verify gate, and default-model fix passes are the safety net either way — a misroute costs one failed gate, not a broken task. Do not use DEFAULT as a hedge on clearly-small mechanical work; that is exactly what the pool is for.
+
+Implementer examples (assuming a pool entry named "quick"):
+- "Fix the typo on the login button" → quick
+- "Bump the eslint version in package.json" → quick
+- "Add pagination to the transactions API" → DEFAULT
+- "Sync RSVP state between the two calendar systems" → DEFAULT
+`
+      : ''
+  const implementerLine =
+    implementers.length > 0
+      ? `\nIMPLEMENTER: ${implementers.map((i) => i.name).join('|')}|DEFAULT`
+      : ''
+  return `Classify the task below on ${axes} axes. Look at the repo briefly if it helps.
 
 COMPLEXITY — decides whether the full planning ensemble (research, two competing plans, cross-critique, reconcile, revise, select) runs before implementation. That ensemble costs real money and ~20+ minutes; it earns its cost ONLY when there are genuine design choices to compare. TRIVIAL tasks skip straight to implementation and are STILL fully reviewed by the expert panel and verified — trivial is a routing decision, not a safety decision.
 
@@ -581,13 +613,13 @@ Examples:
 - "Add a settings page for notification preferences" → COMPLEX, YES
 - "Add pagination to the transactions API" → COMPLEX, NO
 - "Sync RSVP state between the two calendar systems" → COMPLEX, NO
-
+${implementerSection}
 ## Task
 ${intent}${verifyBlock(verify)}
 
-Output ONLY these two final lines:
+Output ONLY these ${axes} final lines:
 COMPLEXITY: TRIVIAL|COMPLEX
-USER-FACING: YES|NO`
+USER-FACING: YES|NO${implementerLine}`
 }
 
 export function deliverySelectPrompt(input: {

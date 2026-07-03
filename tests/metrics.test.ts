@@ -1,3 +1,4 @@
+import { Database } from 'bun:sqlite'
 import { describe, expect, test } from 'bun:test'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -8,11 +9,15 @@ async function metricsPath(): Promise<string> {
   return `${dir}/metrics.db`
 }
 
-function run(record: Omit<RunRecord, 'ts' | 'createdAt' | 'verifyFirstTry' | 'ms'>): RunRecord {
+function run(
+  record: Omit<RunRecord, 'ts' | 'createdAt' | 'verifyFirstTry' | 'implementer' | 'ms'> &
+    Partial<Pick<RunRecord, 'implementer'>>
+): RunRecord {
   return {
     ts: '2026-01-01T00:00:00.000Z',
     createdAt: '2026-01-01T00:00:00.000Z',
     verifyFirstTry: null,
+    implementer: null,
     ms: 1_000,
     ...record,
   }
@@ -186,5 +191,63 @@ describe('metrics report aggregation', () => {
       })
     )
     expect(readReport(path, 'missing')).toBeNull()
+  })
+
+  // No read path consumes the column yet, so a direct sqlite read is the only
+  // proof the routing decision actually lands in the runs row.
+  test('persists the implement-stage agent label on the runs row', async () => {
+    const path = await metricsPath()
+    recordRun(
+      path,
+      run({
+        task: 'task-a',
+        outcome: 'done',
+        triage: 'trivial',
+        retries: 0,
+        implementer: 'codex:gpt-5.4-mini',
+        inTokens: 10,
+        outTokens: 10,
+        stages: [],
+      })
+    )
+
+    const db = new Database(path, { readonly: true })
+    try {
+      const row = db.query<{ implementer: string | null }, []>('SELECT implementer FROM runs').get()
+      expect(row?.implementer).toBe('codex:gpt-5.4-mini')
+    } finally {
+      db.close()
+    }
+  })
+
+  test('rebuilds an old-schema db on version mismatch', async () => {
+    const path = await metricsPath()
+    // A v1 db without the implementer column.
+    const old = new Database(path, { create: true })
+    old.run('CREATE TABLE runs (id INTEGER PRIMARY KEY, task TEXT)')
+    old.run('PRAGMA user_version = 1')
+    old.close()
+
+    recordRun(
+      path,
+      run({
+        task: 'task-a',
+        outcome: 'done',
+        triage: null,
+        retries: 0,
+        implementer: 'claude',
+        inTokens: 10,
+        outTokens: 10,
+        stages: [],
+      })
+    )
+
+    const db = new Database(path, { readonly: true })
+    try {
+      const row = db.query<{ implementer: string | null }, []>('SELECT implementer FROM runs').get()
+      expect(row?.implementer).toBe('claude')
+    } finally {
+      db.close()
+    }
   })
 })
