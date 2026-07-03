@@ -2100,6 +2100,10 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // Raw IMPLEMENTER marker from the triage output; stays null when triage is skipped.
     let triageImplementer: string | null = null
     const pool = ctx.config.agents.implementers
+    // Named alternatives to the lead: the reserved `default` entry IS the lead
+    // (rendered as the DEFAULT menu line in triage), so only the other entries
+    // are routable by name.
+    const routable = Object.fromEntries(Object.entries(pool).filter(([name]) => name !== 'default'))
     const complexityDecision = decideComplexity(task.meta.complexity, ctx.config.triage)
     if (complexityDecision.source === 'declared') {
       trivial = complexityDecision.trivial
@@ -2107,7 +2111,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       log.info(`${task.id}: ${label} — using declared complexity (skipping triage)`)
     } else if (complexityDecision.source === 'triage') {
       await progress(ctx, task, 'triage', 'triage — trivial or complex?')
-      const implementerOptions = Object.entries(pool).map(([name, spec]) => {
+      const implementerOptions = Object.entries(routable).map(([name, spec]) => {
         const agent = normAgent(spec)
         return { name, label: agentLabel(agent), description: agent.description ?? null }
       })
@@ -2156,8 +2160,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // marker) both resolve to null, so a name routed by an earlier run can't leak
     // into this run or a later resume of it. Fail-safe — missing/unknown/DEFAULT
     // → null (the default implementer); never a block.
-    const routedName = freshRunImplementer(complexityDecision, triageImplementer, pool)
-    if (complexityDecision.source === 'triage' && Object.keys(pool).length > 0) {
+    const routedName = freshRunImplementer(complexityDecision, triageImplementer, routable)
+    if (complexityDecision.source === 'triage' && Object.keys(routable).length > 0) {
       if (routedName) {
         log.info(`${task.id}: triage routed the implement stage to "${routedName}"`)
       } else if (triageImplementer === null) {
