@@ -37,6 +37,7 @@ const config: Config = {
     rescue: 'claude',
     researchers: {},
     reviewers: {},
+    implementers: {},
     namer: { cli: 'codex', model: 'gpt-5.4-mini', reasoningEffort: 'low' },
   },
   ask: { agent: 'claude' },

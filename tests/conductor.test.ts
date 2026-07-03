@@ -2,8 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import {
   decideComplexity,
   deliveryConfirmationQuestions,
+  freshRunImplementer,
   implementationAttemptCount,
   resolveDeliveryProposal,
+  resolveImplementer,
   resumeUserFacing,
 } from '../src/conductor.ts'
 import type { TaskDelivery } from '../src/delivery.ts'
@@ -43,6 +45,70 @@ describe('decideComplexity', () => {
 
   test('no declaration uses no shortcut when triage is disabled', () => {
     expect(decideComplexity(null, false)).toEqual({ source: 'none' })
+  })
+})
+
+describe('resolveImplementer', () => {
+  const pool = { quick: 'codex' as const }
+
+  test('missing or blank marker values resolve to the default', () => {
+    expect(resolveImplementer(null, pool)).toBeNull()
+    expect(resolveImplementer('   ', pool)).toBeNull()
+  })
+
+  test('the DEFAULT sentinel resolves to the default in any case', () => {
+    expect(resolveImplementer('DEFAULT', pool)).toBeNull()
+    expect(resolveImplementer('default', pool)).toBeNull()
+    expect(resolveImplementer(' Default ', pool)).toBeNull()
+  })
+
+  test('an exact pool name resolves, tolerating surrounding whitespace', () => {
+    expect(resolveImplementer('quick', pool)).toBe('quick')
+    expect(resolveImplementer('  quick ', pool)).toBe('quick')
+  })
+
+  test('unknown and case-mismatched names fail safe to the default', () => {
+    // Exact matching is the contract: AgentMapSchema allows case-variant
+    // sibling keys, so a forgiving match could pick the wrong agent.
+    expect(resolveImplementer('Quick', pool)).toBeNull()
+    expect(resolveImplementer('no-such-agent', pool)).toBeNull()
+    // Prototype-chain properties are not pool entries.
+    expect(resolveImplementer('constructor', pool)).toBeNull()
+  })
+
+  test('an empty pool always resolves to the default', () => {
+    expect(resolveImplementer('quick', {})).toBeNull()
+  })
+})
+
+// The meta transition every fresh run applies after the complexity phase —
+// the ONLY writer of task.meta.implementer.
+describe('freshRunImplementer', () => {
+  const pool = { quick: 'codex' as const }
+
+  test('a triaged run with a pool persists the resolved routing decision', () => {
+    expect(freshRunImplementer({ source: 'triage' }, 'quick', pool)).toBe('quick')
+    expect(freshRunImplementer({ source: 'triage' }, 'DEFAULT', pool)).toBeNull()
+    expect(freshRunImplementer({ source: 'triage' }, null, pool)).toBeNull()
+  })
+
+  test('a triaged run with an empty pool clears a stale routing decision', () => {
+    // Regression: the pool was removed after an earlier run routed this task.
+    // Triage no longer asks for the marker, and whatever meta held must not
+    // survive this run to route a later resume once the pool is restored.
+    expect(freshRunImplementer({ source: 'triage' }, null, {})).toBeNull()
+    expect(freshRunImplementer({ source: 'triage' }, 'quick', {})).toBeNull()
+  })
+
+  test('triage-skipped runs never route, whatever the marker or pool', () => {
+    expect(
+      freshRunImplementer(
+        { source: 'declared', trivial: true, complexity: 'trivial' },
+        'quick',
+        pool
+      )
+    ).toBeNull()
+    expect(freshRunImplementer({ source: 'none' }, 'quick', pool)).toBeNull()
   })
 })
 

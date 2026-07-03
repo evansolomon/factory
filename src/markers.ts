@@ -28,6 +28,10 @@ export type TriageResult = {
   userFacing: boolean
   complexityMarker: boolean
   userFacingMarker: boolean
+  // Raw IMPLEMENTER marker value (only requested when an implementer pool is
+  // configured). Pure extraction — DEFAULT and unknown names pass through;
+  // the conductor resolves against the pool.
+  implementer: string | null
 }
 export type ShipResult = { ok: true } | { ok: false; reason: string }
 type DeliveryConfidence = 'low' | 'medium' | 'high' | null
@@ -77,6 +81,7 @@ export function parseTriage(text: string): TriageResult {
     /^COMPLEXITY:\s*(TRIVIAL|COMPLEX)\s*$/i
   )?.[1]?.toUpperCase()
   const userFacing = lastMarkerMatch(text, /^USER-FACING:\s*(YES|NO)\s*$/i)?.[1]?.toUpperCase()
+  const implementer = lastMarkerMatch(text, /^IMPLEMENTER:\s*(.+)$/i)?.[1]?.trim() ?? null
 
   return {
     trivial: complexity === 'TRIVIAL',
@@ -86,6 +91,7 @@ export function parseTriage(text: string): TriageResult {
     // USER-FACING silently disabled the UX review gate before this.
     complexityMarker: complexity !== undefined,
     userFacingMarker: userFacing !== undefined,
+    implementer,
   }
 }
 

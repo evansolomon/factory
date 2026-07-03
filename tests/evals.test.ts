@@ -53,6 +53,7 @@ function testConfig(): Config {
       rescue: agent,
       researchers: {},
       reviewers: {},
+      implementers: {},
       namer: agent,
     },
     ask: { agent },

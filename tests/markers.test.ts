@@ -21,6 +21,7 @@ describe('marker parsing', () => {
       userFacing: true,
       complexityMarker: true,
       userFacingMarker: true,
+      implementer: null,
     })
     // Trailing prose or reordered markers no longer break parsing.
     expect(
@@ -37,7 +38,23 @@ describe('marker parsing', () => {
       userFacing: false,
       complexityMarker: false,
       userFacingMarker: false,
+      implementer: null,
     })
+  })
+
+  test('extracts the raw IMPLEMENTER marker without validating it', () => {
+    const base = 'COMPLEXITY: TRIVIAL\nUSER-FACING: NO'
+    expect(parseTriage(`${base}\nIMPLEMENTER: quick`).implementer).toBe('quick')
+    // DEFAULT and unknown names pass through raw — resolution is the conductor's job.
+    expect(parseTriage(`${base}\nIMPLEMENTER: DEFAULT`).implementer).toBe('DEFAULT')
+    expect(parseTriage(`${base}\nIMPLEMENTER: no-such-agent`).implementer).toBe('no-such-agent')
+    // Last match wins, matching every other marker.
+    expect(parseTriage(`IMPLEMENTER: quick\n${base}\nIMPLEMENTER: DEFAULT`).implementer).toBe(
+      'DEFAULT'
+    )
+    // A quoted marker is not a whole marker line.
+    expect(parseTriage(`${base}\n> IMPLEMENTER: quick`).implementer).toBeNull()
+    expect(parseTriage(base).implementer).toBeNull()
   })
 
   test('parses review verdicts anywhere, last match wins', () => {

@@ -175,6 +175,47 @@ describe('config cascade', () => {
     })
   })
 
+  test('configures an implementer pool with routing descriptions', async () => {
+    await withFactoryHome(async () => {
+      const root = await tempDir('implementer-pool')
+
+      // Empty pool is the default — the feature is off.
+      expect((await loadConfig(root)).agents.implementers).toEqual({})
+
+      await writeJson(`${root}/.factory.json`, {
+        agents: {
+          implementers: {
+            quick: { cli: 'codex', model: 'gpt-5.4-mini', description: 'Small mechanical edits' },
+            local: 'claude',
+          },
+        },
+      })
+
+      const config = await loadConfig(root)
+
+      expect(config.agents.implementers['quick']).toEqual({
+        cli: 'codex',
+        model: 'gpt-5.4-mini',
+        description: 'Small mechanical edits',
+      })
+      expect(config.agents.implementers['local']).toBe('claude')
+    })
+  })
+
+  test('rejects codex-only options on claude pool entries', async () => {
+    await withFactoryHome(async () => {
+      const root = await tempDir('invalid-pool-agent')
+      await writeJson(`${root}/.factory.json`, {
+        agents: { implementers: { quick: { cli: 'claude', reasoningEffort: 'low' } } },
+      })
+
+      await expect(loadConfig(root)).rejects.toThrow(ConfigError)
+      await expect(loadConfig(root)).rejects.toThrow(
+        'reasoningEffort is only supported for the codex cli'
+      )
+    })
+  })
+
   test('resolves the default state directory under FACTORY_HOME sessions', async () => {
     await withFactoryHome(async (home) => {
       const base = await tempDir('repo')
@@ -276,6 +317,28 @@ describe('cascade deep-merge for agents and specialists', () => {
       expect(config.agents.researchers).toEqual({ runtime: 'claude', history: 'codex' })
       // Untouched roles still default.
       expect(config.agents.planners).toEqual(['codex', 'claude'])
+    })
+  })
+
+  test('an unrelated agents override does not wipe a lower-layer implementer pool', async () => {
+    await withFactoryHome(async (home) => {
+      const base = await tempDir('implementers-merge')
+      const root = `${base}/repo`
+      await mkdir(root, { recursive: true })
+      await writeJson(`${home}/config.json`, {
+        agents: { implementers: { quick: { cli: 'codex', model: 'gpt-5.4-mini' } } },
+      })
+      await writeJson(`${root}/.factory.json`, {
+        agents: { reviewer: 'codex', implementers: { local: 'claude' } },
+      })
+
+      const config = await loadConfig(root)
+
+      expect(config.agents.reviewer).toBe('codex')
+      expect(config.agents.implementers).toEqual({
+        quick: { cli: 'codex', model: 'gpt-5.4-mini' },
+        local: 'claude',
+      })
     })
   })
 

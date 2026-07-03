@@ -61,13 +61,20 @@ export type RunRecord = {
   triage: 'trivial' | 'complex' | null
   retries: number
   verifyFirstTry: boolean | null
+  // Resolved agent label of this pass's first implement stage (the routing
+  // decision for attempt-0 passes — a pool agent's label when triage routed,
+  // the default implementer's otherwise). Null when the pass ran no implement
+  // stage (gates-only resume, delivery-only). Grouping a task's terminal
+  // outcome by its first implementer joins passes on `task`; the stages table
+  // already labels every stage's agent.
+  implementer: string | null
   ms: number
   inTokens: number
   outTokens: number
   stages: StageStat[]
 }
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -102,6 +109,7 @@ function ensureSchema(db: Database): void {
     triage TEXT,
     retries INTEGER NOT NULL,
     verify_first_try INTEGER,
+    implementer TEXT,
     ms INTEGER NOT NULL,
     in_tokens INTEGER NOT NULL,
     out_tokens INTEGER NOT NULL
@@ -122,8 +130,8 @@ function insertRun(db: Database, r: RunRecord): void {
     const res = db
       .query(
         `INSERT INTO runs
-           (task, ts, created_at, outcome, triage, retries, verify_first_try, ms, in_tokens, out_tokens)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           (task, ts, created_at, outcome, triage, retries, verify_first_try, implementer, ms, in_tokens, out_tokens)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         r.task,
@@ -133,6 +141,7 @@ function insertRun(db: Database, r: RunRecord): void {
         r.triage,
         r.retries,
         r.verifyFirstTry === null ? null : r.verifyFirstTry ? 1 : 0,
+        r.implementer,
         r.ms,
         r.inTokens,
         r.outTokens

@@ -23,11 +23,15 @@ const AgentSpecSchema = z
         // passed through as `-c model_provider=`. This is how a single agent
         // routes to xAI or a local/hosted OSS model without a new adapter.
         provider: z.string().optional(),
+        // Human-authored routing/policy hint shown in the triage prompt when
+        // this spec sits in a named pool (e.g. what work the agent is good
+        // for). Valid for both clis.
+        description: z.string().optional(),
       }),
     ],
     {
       error:
-        'expected "codex" or "claude", or { "cli": "codex"|"claude", "model"?: string, "reasoningEffort"?: string, "provider"?: string }',
+        'expected "codex" or "claude", or { "cli": "codex"|"claude", "model"?: string, "reasoningEffort"?: string, "provider"?: string, "description"?: string }',
     }
   )
   // reasoningEffort maps to codex's `model_reasoning_effort`; claude has a
@@ -55,6 +59,7 @@ export type Agent = {
   model?: string
   reasoningEffort?: ReasoningEffort
   provider?: string
+  description?: string
 }
 
 function defaultNamerAgent(): AgentSpec {
@@ -88,6 +93,10 @@ const AgentsSchema = z.object({
   // and review lenses to, e.g. { "runtime": "claude" }.
   researchers: AgentMapSchema.default({}),
   reviewers: AgentMapSchema.default({}),
+  // Optional named pool of alternative implementers. When non-empty, triage
+  // additionally picks one (or DEFAULT) for the attempt-0 implement stage;
+  // fix passes always escalate to `implementer`. Empty = feature off.
+  implementers: AgentMapSchema.default({}),
   // Cheap, low-latency model used only to turn a raw task intent into a short id.
   // Best-effort callers fall back to the local slug heuristic if this is unavailable.
   // Pin the Codex-recommended fast/lower-cost model and low reasoning so this
@@ -116,6 +125,7 @@ type AgentsConfig = {
   rescue: AgentSpec
   researchers: Record<string, AgentSpec>
   reviewers: Record<string, AgentSpec>
+  implementers: Record<string, AgentSpec>
   namer: AgentSpec
 }
 
@@ -246,6 +256,7 @@ const ConfigSchema = z.object({
       rescue: 'claude',
       researchers: {},
       reviewers: {},
+      implementers: {},
       namer: defaultNamerAgent(),
     })
   ),
@@ -397,7 +408,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 // closest-file-wins for the whole object. A worktree override like
 // {"agents": {"implementer": "codex"}} used to silently reset every OTHER role
 // (reviewer, planners, namer) to defaults — the single worst config footgun.
-// Within `agents`, the nested researcher/reviewer pools merge per key too.
+// Within `agents`, the nested researcher/reviewer/implementer pools merge per
+// key too.
 function mergeObjectKey(base: unknown, incoming: unknown, nestedMergeKeys: string[] = []): unknown {
   if (!isPlainObject(base) || !isPlainObject(incoming)) {
     return incoming
@@ -463,7 +475,11 @@ export async function loadConfig(root: string): Promise<Config> {
       merged['hooks'] = mergeHooks(prior['hooks'] as Record<string, string[]> | undefined, hooks)
     }
     if ('agents' in raw) {
-      merged['agents'] = mergeObjectKey(prior['agents'], raw.agents, ['researchers', 'reviewers'])
+      merged['agents'] = mergeObjectKey(prior['agents'], raw.agents, [
+        'researchers',
+        'reviewers',
+        'implementers',
+      ])
     }
     if ('specialists' in raw) {
       merged['specialists'] = mergeObjectKey(prior['specialists'], raw.specialists)

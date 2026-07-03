@@ -16,6 +16,7 @@ import {
   rescuePrompt,
   reviewPrompt,
   securityPrompt,
+  triagePrompt,
   uxReviewPrompt,
 } from '../src/prompts.ts'
 
@@ -23,6 +24,75 @@ const guidance = [
   '## Learned lessons (auto-applied; edit with `factory lessons edit <id>`)',
   '- [global abc123] Keep marker contracts stable.',
 ].join('\n')
+
+describe('triage prompt implementer routing', () => {
+  test('an empty pool keeps the two-marker contract with no IMPLEMENTER anywhere', () => {
+    const prompt = triagePrompt('Fix the typo', null, [])
+
+    expect(prompt).toContain(
+      'Output ONLY these two final lines:\nCOMPLEXITY: TRIVIAL|COMPLEX\nUSER-FACING: YES|NO'
+    )
+    expect(prompt).toContain('Classify the task below on two axes.')
+    expect(prompt).not.toContain('IMPLEMENTER')
+  })
+
+  // Frozen copy of the pre-pool triage prompt: the empty-pool contract is
+  // byte-identity with the two-axis prompt that shipped before routing existed,
+  // not just substring presence. An intentional edit to the shared template
+  // text must update this literal in the same change.
+  test('an empty pool renders the pre-pool two-axis prompt byte-for-byte', () => {
+    expect(
+      triagePrompt('Fix the typo', null, [])
+    ).toBe(`Classify the task below on two axes. Look at the repo briefly if it helps.
+
+COMPLEXITY — decides whether the full planning ensemble (research, two competing plans, cross-critique, reconcile, revise, select) runs before implementation. That ensemble costs real money and ~20+ minutes; it earns its cost ONLY when there are genuine design choices to compare. TRIVIAL tasks skip straight to implementation and are STILL fully reviewed by the expert panel and verified — trivial is a routing decision, not a safety decision.
+
+TRIVIAL — a competent engineer would just start typing: the change is mechanical or obvious once stated, however many lines it touches. One-to-few-line edits, renames, deletions, flag/config/dependency changes, adding an option that mirrors an existing one, an obvious localized fix, updating text or docs.
+COMPLEX — a competent engineer would sketch a design first: real alternatives exist and choosing wrong is costly; or the task is ambiguous, spans multiple components with coupling decisions, changes a data model or API contract, or is security/data-sensitive.
+
+Calibration: over-classifying as COMPLEX has been this system's dominant failure (dozens of real tasks, zero classified TRIVIAL — including adding a single build flag). Do not use COMPLEX as a hedge; the review panel and verify gate are the safety net either way. Genuinely torn AFTER thinking it through → COMPLEX.
+
+USER-FACING:
+YES — the change alters something an end user sees or interacts with: UI, a page/screen/component, styling, layout, copy/labels, or an interaction flow.
+NO — purely internal: backend/API with no UI, data, infra, build, tooling, or an internal refactor.
+
+Examples:
+- "Bump the eslint version in package.json" → TRIVIAL, NO
+- "Fix the typo on the login button" → TRIVIAL, YES
+- "Rename \`foo\` to \`userId\` in cache.ts" → TRIVIAL, NO
+- "Make the release binaries smaller, e.g. try --minify" → TRIVIAL, NO
+- "Amend the last commit message; it's malformed" → TRIVIAL, NO
+- "Add a --force flag that skips the confirmation prompt" → TRIVIAL, NO
+- "Add a settings page for notification preferences" → COMPLEX, YES
+- "Add pagination to the transactions API" → COMPLEX, NO
+- "Sync RSVP state between the two calendar systems" → COMPLEX, NO
+
+## Task
+Fix the typo
+
+Output ONLY these two final lines:
+COMPLEXITY: TRIVIAL|COMPLEX
+USER-FACING: YES|NO`)
+  })
+
+  test('a non-empty pool lists entries and requests the third marker line', () => {
+    const prompt = triagePrompt('Fix the typo', null, [
+      { name: 'quick', label: 'codex:gpt-5.4-mini', description: 'Small mechanical edits' },
+      { name: 'local', label: 'claude', description: null },
+    ])
+
+    expect(prompt).toContain('Classify the task below on three axes.')
+    expect(prompt).toContain('- quick — codex:gpt-5.4-mini: Small mechanical edits')
+    expect(prompt).toContain('- local — claude')
+    // Conservative selection guidance: pool only for clearly easy AND low-risk.
+    expect(prompt).toContain('clearly easy AND low-risk')
+    expect(prompt).toContain('Genuinely torn → DEFAULT.')
+    // The original two markers are still requested, plus the third line.
+    expect(prompt).toContain(
+      'Output ONLY these three final lines:\nCOMPLEXITY: TRIVIAL|COMPLEX\nUSER-FACING: YES|NO\nIMPLEMENTER: quick|local|DEFAULT'
+    )
+  })
+})
 
 describe('feedback prompts', () => {
   test('feedbackAnalysisPrompt requires abstraction and root-cause inference', () => {
