@@ -76,21 +76,35 @@ USER-FACING: YES|NO`)
   })
 
   test('a non-empty pool lists entries and requests the third marker line', () => {
-    const prompt = triagePrompt('Fix the typo', null, [
-      { name: 'quick', label: 'codex:gpt-5.4-mini', description: 'Small mechanical edits' },
-      { name: 'local', label: 'claude', description: null },
-    ])
+    const prompt = triagePrompt(
+      'Fix the typo',
+      null,
+      [
+        { name: 'quick', label: 'codex:gpt-5.4-mini', description: 'Small mechanical edits' },
+        { name: 'local', label: 'claude', description: null },
+      ],
+      { label: 'codex:gpt-5.5', description: 'highly capable workhorse' }
+    )
 
     expect(prompt).toContain('Classify the task below on three axes.')
+    expect(prompt).toContain('- DEFAULT — codex:gpt-5.5: highly capable workhorse')
     expect(prompt).toContain('- quick — codex:gpt-5.4-mini: Small mechanical edits')
     expect(prompt).toContain('- local — claude')
-    // Conservative selection guidance: pool only for clearly easy AND low-risk.
-    expect(prompt).toContain('clearly easy AND low-risk')
-    expect(prompt).toContain('Genuinely torn → DEFAULT.')
+    // Policy lives in the config-authored descriptions, not the template.
+    expect(prompt).toContain("Each entry's description is its routing policy")
+    expect(prompt).toContain('Do not hedge to DEFAULT')
     // The original two markers are still requested, plus the third line.
     expect(prompt).toContain(
       'Output ONLY these three final lines:\nCOMPLEXITY: TRIVIAL|COMPLEX\nUSER-FACING: YES|NO\nIMPLEMENTER: quick|local|DEFAULT'
     )
+  })
+
+  test('an undescribed default implementer still gets a DEFAULT menu line', () => {
+    const prompt = triagePrompt('Fix the typo', null, [
+      { name: 'quick', label: 'codex:gpt-5.4-mini', description: null },
+    ])
+
+    expect(prompt).toContain('- DEFAULT — the default implementer')
   })
 })
 
@@ -234,8 +248,8 @@ describe('implement stage delegation menu', () => {
     expect(prompt).toContain(
       '- `factory delegate --cli claude --model haiku --usage-file /tmp/ledger.jsonl` — haiku'
     )
-    expect(prompt).toContain('clearly mechanical')
-    expect(prompt).toContain('when torn, do it yourself')
+    expect(prompt).toContain('Each description says what its agent is suited for')
+    expect(prompt).toContain('Use your own judgment')
   })
 
   test('fixPrompt gets the same delegation menu', () => {

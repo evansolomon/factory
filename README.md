@@ -630,26 +630,28 @@ pre-implementation artifacts, not completion briefs; they are visible through
   - `rescue` — last-chance read-only strategist before terminal blocking.
   - `researchers` / `reviewers` — optional named maps the workforce router can
     select for specific scouts or lenses, e.g. `{ "runtime": "claude" }`.
-  - `implementers` — optional named map of cheaper/faster alternative
-    implementers, e.g. `{ "quick": { "cli": "codex", "model": "gpt-5.4-mini",
+  - `implementers` — optional named map of alternative implementers, e.g.
+    `{ "quick": { "cli": "codex", "model": "gpt-5.4-mini",
     "description": "small mechanical edits" } }`. When non-empty, triage also
-    picks which agent writes the code: clearly-easy, low-risk tasks route to a
-    pool entry for the attempt-0 implement stage; everything else (and any
-    missing/unknown/`DEFAULT` pick) uses `implementer`. Fix passes always
+    picks which agent writes the code: it matches the task against each
+    entry's `description` (and the default implementer's) and routes the
+    attempt-0 implement stage to the best fit; a missing/unknown/`DEFAULT`
+    pick uses `implementer`. Fix passes always
     escalate back to `implementer`, and tasks with declared complexity or
     `"triage": false` never consult the pool. Empty (the default) = feature off.
     Like `researchers`/`reviewers`, inherited pools merge per key across the
     config cascade — a child config setting `"implementers": {}` does not
     disable a pool inherited from a parent layer.
-    The optional `description` on an agent is shown to triage as the routing
-    policy — it's how you tell the router what each entry is good for.
+    The `description` on each agent (including `implementer` itself, shown as
+    the `DEFAULT` line) is the entire routing policy: the prompts carry only
+    the mechanism, and the deciding model weighs capability against cost from
+    what the descriptions say. Tune descriptions, not code, to shift routing.
 
     A non-empty pool also becomes an **in-flight delegation menu**: implement
     and fix prompts list each entry as a runnable `factory delegate` one-shot
     command (subtask prompt on stdin, report on stdout), so the implementing
-    agent can hand clearly-mechanical subtasks — repetitive edits, fixture
-    sweeps, boilerplate — to a cheaper agent mid-stage while keeping judgment
-    work itself. This is CLI-neutral (plain bash, works from codex and claude
+    agent can hand subtasks to whichever pool agent's description fits, at its
+    own judgment. This is CLI-neutral (plain bash, works from codex and claude
     implementers alike) and tracked: each delegated run appends token usage to
     a per-task ledger that lands in the meter and telemetry as `delegate`
     stage rows under the delegate's agent label.

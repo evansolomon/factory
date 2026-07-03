@@ -512,11 +512,11 @@ function delegationBlock(delegates: DelegateOption[]): string {
     .map((d) => `- \`${d.command}\` — ${d.name}${d.description ? `: ${d.description}` : ''}`)
     .join('\n')
   return `\n\n## Delegation
-You may delegate subtasks to the cheaper agents below. Each command runs one agent to completion in the current directory: pipe a self-contained subtask prompt to its stdin; it prints the agent's report to stdout.
+The agents below are alternative implementers you can hand work to. Each command runs one agent to completion in the current directory: pipe a self-contained subtask prompt to its stdin; it prints the agent's report to stdout.
 
 ${menu}
 
-Delegate only work that is clearly mechanical — repetitive edits across files, fixture sweeps, boilerplate, renames, applying an established pattern. Give a precise, self-contained prompt (exact files, exact pattern to follow) and review the changes before building on them: you own the result. Keep design decisions, tricky logic, and anything requiring judgment yourself. Delegation has real overhead — for small subtasks doing the work yourself is cheaper, and when torn, do it yourself. If a delegation command fails, do the work yourself and move on.`
+Each description says what its agent is suited for. Use your own judgment about when handing off a subtask beats doing the work yourself, weighing the capability the subtask needs against cost and the overhead of a handoff. Hand-offs work best as precise, self-contained prompts (exact files, exact pattern to follow). Review a delegate's changes before building on them — you own the combined result, and this task's review and verify gates judge the whole diff. If a delegation command fails, do the work yourself and move on.`
 }
 
 export function implementPrompt(
@@ -590,24 +590,26 @@ export type ImplementerOption = { name: string; label: string; description: stri
 export function triagePrompt(
   intent: string,
   verify: string | null,
-  implementers: ImplementerOption[]
+  implementers: ImplementerOption[],
+  // The default implementer, shown as the DEFAULT menu line so the router can
+  // weigh named entries against what it is routing away from. Policy lives
+  // entirely in the config-authored descriptions, not in this template.
+  defaultImplementer: { label: string; description: string | null } | null = null
 ): string {
   const axes = implementers.length > 0 ? 'three' : 'two'
+  const defaultLine = defaultImplementer
+    ? `- DEFAULT — ${defaultImplementer.label}${defaultImplementer.description ? `: ${defaultImplementer.description}` : ''}`
+    : '- DEFAULT — the default implementer'
   const implementerSection =
     implementers.length > 0
       ? `
-IMPLEMENTER — which agent writes the code. The named agents below are cheaper/faster alternatives to the default implementer, for the code-writing stage ONLY; every other stage (planning, review, verification, fix passes) stays on the default. Pick a named agent only when the task is clearly easy AND low-risk; anything ambiguous, cross-cutting, or data/security-sensitive → DEFAULT. Genuinely torn → DEFAULT.
+IMPLEMENTER — which agent writes the code. The agents below are alternative implementers for the code-writing stage ONLY; every other stage (planning, review, verification, fix passes) stays on the default. Each entry's description is its routing policy: pick the implementer whose description best fits this task, using your own judgment about the capability the task actually needs versus the cost of over- or under-shooting it.
 
 Available implementers:
+${defaultLine}
 ${implementers.map((i) => `- ${i.name} — ${i.label}${i.description ? `: ${i.description}` : ''}`).join('\n')}
 
-Calibration: the review panel, verify gate, and default-model fix passes are the safety net either way — a misroute costs one failed gate, not a broken task. Do not use DEFAULT as a hedge on clearly-small mechanical work; that is exactly what the pool is for.
-
-Implementer examples (assuming a pool entry named "quick"):
-- "Fix the typo on the login button" → quick
-- "Bump the eslint version in package.json" → quick
-- "Add pagination to the transactions API" → DEFAULT
-- "Sync RSVP state between the two calendar systems" → DEFAULT
+Calibration: the review panel, verify gate, and default-implementer fix passes are the safety net either way — a misroute costs one failed gate, not a broken task. Do not hedge to DEFAULT when another entry's description squarely fits the task; the pool only earns its existence if it is used.
 `
       : ''
   const implementerLine =

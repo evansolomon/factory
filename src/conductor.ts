@@ -2117,7 +2117,10 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         agentLabel(lead),
         runAgent(lead, {
           root: ctx.root,
-          prompt: triagePrompt(intent, verify, implementerOptions),
+          prompt: triagePrompt(intent, verify, implementerOptions, {
+            label: agentLabel(lead),
+            description: lead.description ?? null,
+          }),
           access: 'read',
           outFile: `${task.dir}/triage.md`,
         })
