@@ -516,7 +516,7 @@ The agents below are alternative implementers you can hand work to. Each command
 
 ${menu}
 
-Each description says what its agent is suited for. Use your own judgment about when handing off a subtask beats doing the work yourself, weighing the capability the subtask needs against cost and the overhead of a handoff. Hand-offs work best as precise, self-contained prompts (exact files, exact pattern to follow). Review a delegate's changes before building on them — you own the combined result, and this task's review and verify gates judge the whole diff. If a delegation command fails, do the work yourself and move on.`
+The \`--model\` flag accepts any model its CLI supports — the entries above are the curated set, not a limit. Each description says what its agent is suited for. Use your own judgment about when handing off a subtask beats doing the work yourself, weighing the capability the subtask needs against cost and the overhead of a handoff. Hand-offs work best as precise, self-contained prompts (exact files, exact pattern to follow). Review a delegate's changes before building on them — you own the combined result, and this task's review and verify gates judge the whole diff. If a delegation command fails, do the work yourself and move on.`
 }
 
 export function implementPrompt(

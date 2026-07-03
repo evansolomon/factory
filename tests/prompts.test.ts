@@ -250,6 +250,8 @@ describe('implement stage delegation menu', () => {
     )
     expect(prompt).toContain('Each description says what its agent is suited for')
     expect(prompt).toContain('Use your own judgment')
+    // The menu is curation, not a whitelist: any CLI-supported model works.
+    expect(prompt).toContain('the entries above are the curated set, not a limit')
   })
 
   test('fixPrompt gets the same delegation menu', () => {
