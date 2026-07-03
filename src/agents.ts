@@ -113,9 +113,23 @@ const ClaudeResultEvent = z.object({
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
     })),
+  // Per-model session totals (camelCase, unlike `usage`). Unlike `usage`, which
+  // covers only the main loop, this includes the CLI's native subagents and
+  // auxiliary calls — the complete spend of the invocation.
+  modelUsage: z
+    .record(
+      z.string(),
+      z.object({
+        inputTokens: z.number().default(0),
+        outputTokens: z.number().default(0),
+        cacheReadInputTokens: z.number().default(0),
+        cacheCreationInputTokens: z.number().default(0),
+      })
+    )
+    .optional(),
 })
 
-function parseClaudeStream(label: string, stdout: string): AgentResult {
+export function parseClaudeStream(label: string, stdout: string): AgentResult {
   let out: AgentResult | null = null
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim()
@@ -130,15 +144,31 @@ function parseClaudeStream(label: string, stdout: string): AgentResult {
     }
     const ev = ClaudeResultEvent.safeParse(parsed)
     if (ev.success) {
+      const models = Object.values(ev.data.modelUsage ?? {})
       const u = ev.data.usage
-      out = {
-        text: ev.data.result.trim(),
-        usage: {
-          // Total tokens fed to the model, including cache hits/writes.
-          inputTokens: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
-          outputTokens: u.output_tokens,
-        },
-      }
+      // Prefer summing modelUsage: it covers the whole session (native
+      // subagents included), where `usage` covers only the main loop — an
+      // implementer that spawns its own subagents would otherwise under-report.
+      // Input counts include cache hits/writes: total tokens fed to the model.
+      const usage: Usage =
+        models.length > 0
+          ? models.reduce(
+              (acc, m) => ({
+                inputTokens:
+                  acc.inputTokens +
+                  m.inputTokens +
+                  m.cacheReadInputTokens +
+                  m.cacheCreationInputTokens,
+                outputTokens: acc.outputTokens + m.outputTokens,
+              }),
+              ZERO_USAGE
+            )
+          : {
+              inputTokens:
+                u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
+              outputTokens: u.output_tokens,
+            }
+      out = { text: ev.data.result.trim(), usage }
     }
   }
   if (!out) {
