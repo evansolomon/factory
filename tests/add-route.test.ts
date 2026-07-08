@@ -15,12 +15,14 @@ function task(id: string, overrides: Partial<AddRouteTask> = {}): AddRouteTask {
 }
 
 describe('selectAddRoute', () => {
-  test('answers the latest needs-input task first', () => {
+  test('answers the live needs-input task', () => {
+    // The second live task is a legacy-queue leftover; the latest-touched live
+    // task is the lane's task.
     expect(
       selectAddRoute(
         [
-          task('blocked', { status: 'blocked', updatedAt: '2026-01-03T00:00:00.000Z' }),
-          task('question', { status: 'needs-input', updatedAt: '2026-01-02T00:00:00.000Z' }),
+          task('blocked', { status: 'blocked', updatedAt: '2026-01-02T00:00:00.000Z' }),
+          task('question', { status: 'needs-input', updatedAt: '2026-01-03T00:00:00.000Z' }),
         ],
         false,
         false

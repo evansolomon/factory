@@ -23,7 +23,7 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo'],
       raw: false,
       complexity: 'trivial',
-      forceNew: false,
+      allowDirty: false,
       name: null,
     })
   })
@@ -33,7 +33,7 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo'],
       raw: false,
       complexity: 'trivial',
-      forceNew: false,
+      allowDirty: false,
       name: null,
     })
   })
@@ -43,7 +43,7 @@ describe('parseAddOptions', () => {
       args: ['Refactor', 'parser'],
       raw: false,
       complexity: 'complex',
-      forceNew: false,
+      allowDirty: false,
       name: null,
     })
   })
@@ -53,7 +53,7 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo'],
       raw: false,
       complexity: 'trivial',
-      forceNew: false,
+      allowDirty: false,
       name: null,
     })
   })
@@ -83,7 +83,7 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo', '--verify', 'bun', 'test'],
       raw: false,
       complexity: 'trivial',
-      forceNew: false,
+      allowDirty: false,
       name: null,
     })
   })
@@ -102,7 +102,7 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo', '--verify', 'bun', 'test', '--raw'],
       raw: false,
       complexity: null,
-      forceNew: false,
+      allowDirty: false,
       name: null,
     })
   })
@@ -112,19 +112,19 @@ describe('parseAddOptions', () => {
       args: ['Fix', 'typo'],
       raw: true,
       complexity: null,
-      forceNew: false,
+      allowDirty: false,
       name: null,
     })
   })
 })
 
-describe('parseAddOptions --force-new', () => {
-  test('parses --force-new and strips it from intent args', () => {
-    expect(expectParsed(['--force-new', 'Second', 'task'])).toEqual({
-      args: ['Second', 'task'],
+describe('parseAddOptions --allow-dirty', () => {
+  test('parses --allow-dirty and strips it from intent args', () => {
+    expect(expectParsed(['--allow-dirty', 'New', 'task'])).toEqual({
+      args: ['New', 'task'],
       raw: false,
       complexity: null,
-      forceNew: true,
+      allowDirty: true,
       name: null,
     })
   })
@@ -136,7 +136,7 @@ describe('parseAddOptions --name', () => {
       args: ['Fix', 'the', 'upload'],
       raw: false,
       complexity: null,
-      forceNew: false,
+      allowDirty: false,
       name: 'fix-upload',
     })
   })

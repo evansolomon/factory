@@ -153,7 +153,7 @@ export const ADD_PARSE_OPTIONS = [
     description: 'Declare the new task complexity',
     value: { kind: 'static', choices: COMPLEXITY_CHOICES },
   },
-  { name: '--force-new', description: 'Queue another fresh task deliberately' },
+  { name: '--allow-dirty', description: 'Start a new task on a dirty worktree deliberately' },
   { name: '--name', description: 'Name the task directly (skips the AI namer)', value: NONE },
   {
     name: '--verify',
@@ -165,7 +165,6 @@ export const ADD_PARSE_OPTIONS = [
 
 export const RUN_OPTIONS = [
   { name: '--once', description: 'Do one ready task, then exit' },
-  { name: '--drain', description: 'Work until the stream is idle, then exit' },
   { name: '--until-done', description: 'Exit when the workstream task completes or blocks' },
   { name: '--no-prompt', description: 'Do not prompt inline for answers' },
 ] as const satisfies readonly OptionSpec[]

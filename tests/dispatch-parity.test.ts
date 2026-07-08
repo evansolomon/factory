@@ -125,6 +125,48 @@ describe('add parsing parity', () => {
   })
 })
 
+describe('add single-lane invariant', () => {
+  test('a second fresh task is an error', async () => {
+    const cwd = await gitRepo()
+    const home = await tempDir('home')
+
+    const first = await runFactory(['add', '--name', 'task-a', 'first', 'thing'], cwd, home)
+    expect(first.code).toBe(0)
+    const second = await runFactory(['add', '--name', 'task-b', 'second', 'thing'], cwd, home)
+    expect(second.code).toBe(1)
+    expect(second.stdout).toContain('already has a fresh queued task: task-a')
+  })
+
+  test('a new task on a dirty worktree is an error without --allow-dirty', async () => {
+    const cwd = await gitRepo()
+    const home = await tempDir('home')
+    await Bun.write(`${cwd}/leftover.txt`, 'uncommitted\n')
+
+    const denied = await runFactory(['add', '--name', 'task-a', 'new', 'thing'], cwd, home)
+    expect(denied.code).toBe(1)
+    expect(denied.stdout).toContain('uncommitted changes')
+
+    const allowed = await runFactory(
+      ['add', '--allow-dirty', '--name', 'task-a', 'new', 'thing'],
+      cwd,
+      home
+    )
+    expect(allowed.code).toBe(0)
+    expect(allowed.stdout).toContain('queued task-a')
+  })
+
+  test('--allow-dirty is rejected when add routes into existing work', async () => {
+    const cwd = await gitRepo()
+    const home = await tempDir('home')
+    const tasksDir = await sessionTasksDir(cwd, home)
+    await writeTask(tasksDir, 'parked', 'needs-input')
+
+    const result = await runFactory(['add', '--allow-dirty', 'an', 'answer'], cwd, home)
+    expect(result.code).toBe(1)
+    expect(result.stdout).toContain('--allow-dirty only applies when add queues a new task')
+  })
+})
+
 describe('backlog add parsing parity', () => {
   test('--raw counts and is stripped even inside the --verify tail', async () => {
     const cwd = await gitRepo()
@@ -240,9 +282,9 @@ describe('tolerant-command parsing parity', () => {
     const cwd = await gitRepo()
     const home = await tempDir('home')
 
-    const result = await runFactory(['run', '--drain', '--bogus'], cwd, home)
+    const result = await runFactory(['run', '--once', '--bogus'], cwd, home)
     expect(result.code).toBe(0)
-    expect(result.stdout).toContain('draining queue')
+    expect(result.stdout).toContain('running one task')
   })
 })
 

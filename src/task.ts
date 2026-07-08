@@ -55,6 +55,13 @@ export type TaskComplexity = z.infer<typeof TaskComplexitySchema>
 // interrupted sharpening stage.
 const SETTLED: readonly Status[] = ['ready', 'needs-input', 'retrying', 'done', 'blocked', 'closed']
 
+// Terminal = the task record is history: committed work (done) or an abandoned/
+// superseded record (closed). Everything else is the worktree's live task —
+// `factory add` enforces at most one of those per worktree.
+export function isTerminal(status: Status): boolean {
+  return status === 'done' || status === 'closed'
+}
+
 // A task left in a live stage with no loop on it: its run-loop was killed mid-stage
 // (Ctrl-C / crash) and never transitioned the status. Safe to reclaim because the
 // loop is sequential and one-per-worktree, so it only looks for work *between* tasks
@@ -319,36 +326,34 @@ export async function loadTasks(ctx: WorkContext): Promise<Task[]> {
   return tasks.sort((a, b) => a.meta.createdAt.localeCompare(b.meta.createdAt))
 }
 
-// The next task for the run loop to execute, in priority order: a ready task; else a
-// task stranded mid-stage by a killed loop (Ctrl-C/crash), reclaimed where it left
-// off; else a due auto-retry — a 'retrying' task whose backoff has elapsed. The last
-// two are promoted to a resume (reuse the saved plan + diff). Ready work takes
-// priority so reclaims/retries fill idle time rather than starving fresh tasks.
-// Returns null when nothing is runnable yet.
+// The task for the run loop to execute. There is at most one live (non-terminal)
+// task per worktree, so this is not a scheduling decision — it asks whether that
+// task is runnable now: ready; stranded mid-stage by a killed loop (Ctrl-C/crash),
+// reclaimed where it left off; or a due auto-retry whose backoff has elapsed. The
+// last two are promoted to a resume (reuse the saved plan + diff). Returns null
+// when the task is parked (or there is none). Legacy multi-task queues still
+// drain oldest-first through the same loop.
 export async function nextRunnable(
   ctx: WorkContext,
   now: number = Date.now()
 ): Promise<Task | null> {
-  const tasks = await loadTasks(ctx)
-  const ready = tasks.find((t) => t.meta.status === 'ready')
-  if (ready) {
-    return ready
+  const live = (await loadTasks(ctx)).filter((t) => !isTerminal(t.meta.status))
+  for (const task of live) {
+    if (task.meta.status === 'ready') {
+      return task
+    }
+    if (isStranded(task.meta.status)) {
+      return recoverStranded(task)
+    }
+    if (
+      task.meta.status === 'retrying' &&
+      task.meta.retryAt !== null &&
+      Date.parse(task.meta.retryAt) <= now
+    ) {
+      return resumeRun(task, 'auto-retry')
+    }
   }
-  const stranded = tasks.find((t) => isStranded(t.meta.status))
-  if (stranded) {
-    return recoverStranded(stranded)
-  }
-  const due = tasks
-    .filter(
-      (t) =>
-        t.meta.status === 'retrying' && t.meta.retryAt !== null && Date.parse(t.meta.retryAt) <= now
-    )
-    .sort((a, b) => (a.meta.retryAt ?? '').localeCompare(b.meta.retryAt ?? ''))
-  const first = due[0]
-  if (!first) {
-    return null
-  }
-  return resumeRun(first, 'auto-retry')
+  return null
 }
 
 // Flip a not-ready task into a resumed ready run: the conductor consumes meta.resume
