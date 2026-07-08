@@ -110,10 +110,11 @@ genuinely ambiguous — it asks, you answer, it keeps going.
 
 The durable state still uses task directories. Treat those as task records:
 artifact boundaries for plans, answers, retries, feedback, proof, and history.
-In normal fleet usage, each worktree is a single-lane workstream and usually has
-one active task. Multiple queued task records remain supported for set-aside
-answers, retries, linked follow-ups, and deliberate batching, but they are no
-longer the primary mental model.
+Each worktree is a single-lane workstream: **at most one non-terminal task per
+worktree**, enforced by `factory add`. A worktree accumulates task records over
+time — done work, closed records, linked follow-ups — but never more than one
+task that is queued, working, or parked. Parallelism lives at the worktree
+level (`factory backlog` + `factory dispatch`), not in a per-worktree queue.
 
 There is **one phase, not two.** Refinement isn't a separate planning session;
 it's `factory` pausing mid-cycle to ask. "Good enough, proceed" is the default —
@@ -249,17 +250,17 @@ decisions only you can make. The bar is deliberately tunable in the prompt; if i
 asks too much or too little, that's the prompt to adjust (and a `LESSONS.md`
 candidate — see Meta).
 
-A `needs-input` task is **set aside, not blocking**. If you deliberately queued
-other ready work in this worktree, `factory` can keep going; otherwise it waits
-for your answer and picks the task back up.
+A `needs-input` task is **set aside, not crashing**: the loop stays up, waits
+for your answer, and picks the task back up — in watch mode on a terminal it
+prompts you inline.
 
 ## Usage
 
 `factory` is the CLI binary.
 
 ```bash
-factory add [--raw] [--trivial | --complexity trivial|complex] [--force-new] [--name <slug>] "<intent...>" [--verify "<cmd...>"]   # tell this workstream something
-factory run [--once|--drain|--until-done]          # process the workstream (one lock-enforced loop per worktree)
+factory add [--raw] [--trivial | --complexity trivial|complex] [--allow-dirty] [--name <slug>] "<intent...>" [--verify "<cmd...>"]   # tell this workstream something
+factory run [--once|--until-done]                  # process the workstream (one lock-enforced loop per worktree)
 factory retry [task-id] [-m "<note>" | --edit]     # pick a blocked task back up where it left off
 factory feedback [task-id] [-m "<feedback>" | --edit]  # critique existing progress, generalized on next pass
 factory correct [task-id] [-m "<note>" | --edit]   # record your manual fix of a blocked task as a lesson
@@ -292,7 +293,8 @@ factory completion zsh                              # print the zsh completion s
   restarting after a Ctrl-C just resumes the interrupted task. Its lifetime = the
   tmux window's lifetime.
   - `--once` — process one ready task, then exit (for proving things out).
-  - `--drain` — process until no ready tasks, then exit (batch).
+  - `--until-done` — exit 0 when the task completes, 2 when it blocks (the
+    spawner-teardown contract used by dispatch).
 - **`factory add --trivial`** is shorthand for `--complexity trivial`: it skips
   sharpening, persists the declared complexity in `meta.json`, and the later run
   uses the existing trivial fast path without model triage. `--complexity complex`
@@ -301,10 +303,13 @@ factory completion zsh                              # print the zsh completion s
   `--raw` skips sharpening only — it does not declare runtime complexity.
 - **`factory add`** is state-aware. It answers a `needs-input` task, records
   feedback on active progress, queues a linked follow-up for completed work, retries
-  blocked/retrying work, or creates a new task when there is no current work. If
-  you queue a second fresh task in the same worktree, factory errors unless you
-  pass `--force-new`; one active task per worktree keeps provenance easiest to
-  reason about.
+  blocked/retrying work, or creates a new task when there is no current work.
+  Queueing a second fresh task in the same worktree is an error — one live task
+  per worktree is the model; batch through the backlog + dispatch instead. A new
+  task on a worktree with uncommitted changes is also an error, because the
+  task's commit (`git add -A`) would sweep those changes in as its own work;
+  commit or stash them first, or pass `--allow-dirty` to include them
+  deliberately.
 - **`factory retry`** (for **blocked**) **reuses** the saved plan + the diff
   already in the worktree and re-enters at the stage that failed — no re-planning.
   Omit the id for the latest blocked/retrying task (or one stranded mid-stage by a
@@ -745,7 +750,7 @@ Events and their payloads:
 | `task.retrying` | set aside for auto-retry | `task, reason, retryAt` |
 | `task.done` | committed/shipped | `task, commit` |
 | `task.stale` | parked (needs-input/blocked) past 24h | `task, state` |
-| `loop.idle` | queue drained | `state` |
+| `loop.idle` | nothing runnable | `state` |
 
 `attention.state = needs-input` means factory is waiting at an intentional human
 prompt. That includes a queued task paused for answers from the sharpen or
@@ -834,14 +839,16 @@ relative:
 `backlog/`. Structured learned lessons live in global factory state under
 `$FACTORY_HOME/guidance/items/*.json`.
 
-factory treats the **whole worktree** as the task surface. It does not refuse a
-dirty worktree and it does not try to split preexisting hunks from agent-created
-hunks before committing. At task start it writes `baseline.patch`; when the
-worktree was already dirty, review prompts include that baseline so reviewers can
-see what existed before this run. For the cleanest provenance, run one task per
-worktree and start from a clean tree. The plural task directories are still the
-right durable model: they preserve history, set-aside questions, retries,
-follow-ups, and crash recovery without making the active workstream ambiguous.
+factory treats the **whole worktree** as the task surface: it does not try to
+split preexisting hunks from agent-created hunks before committing. That is why
+`factory add` refuses to start a **new** task on a dirty worktree unless you
+pass `--allow-dirty` — swept-in changes would ship inside the task's commit,
+unreviewed and under a message that describes only the task. When you do opt
+in, the task start writes `baseline.patch` and review prompts include it, so
+reviewers can see what existed before this run. The plural task directories are
+still the right durable model: they preserve history, set-aside questions,
+retries, follow-ups, and crash recovery — as records over time, not a queue;
+the live task is always singular.
 
 ## Meta loop and learned lessons
 
@@ -1109,8 +1116,9 @@ Run factory only in repositories and worktrees you trust, with verify and delive
 commands you are willing to execute unattended. Treat `.factory.json`,
 `~/.factory/config.json` / `$FACTORY_HOME/config.json`, and hook scripts as
 executable automation inputs. factory commits the current worktree with
-`git add -A`; use a dedicated worktree for each task if you do not want unrelated
-local edits included.
+`git add -A`; starting a new task on a dirty worktree is an error unless you opt
+in with `--allow-dirty`, and edits made while a task is running are still swept
+into its commit — use a dedicated worktree per task.
 
 **Integration is yours, not the tool's.** factory only emits [hooks](#hooks) and
 writes state files — the tmux hook script and its `~/.factory/config.json` wiring

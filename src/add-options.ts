@@ -3,17 +3,18 @@ import { ADD_PARSE_OPTIONS } from './commands.ts'
 import { type TaskComplexity, TaskComplexitySchema } from './task.ts'
 
 const ADD_USAGE =
-  'usage: factory add [--raw] [--trivial | --complexity trivial|complex] [--force-new] ' +
+  'usage: factory add [--raw] [--trivial | --complexity trivial|complex] [--allow-dirty] ' +
   '[--name <slug>] [intent...] [--verify <cmd...>] [--edit]'
 
 export type ParsedAddOptions = {
   args: string[]
   raw: boolean
   complexity: TaskComplexity | null
-  // Allow queueing a second fresh task in a worktree that already has one. The
-  // workstream model is one active task per worktree; a second fresh task is an
-  // error unless the batching is deliberate.
-  forceNew: boolean
+  // Start a new task on a worktree that already has uncommitted changes. The
+  // task's commit stages the whole tree (git add -A), so preexisting edits
+  // would be swept into it under a message that describes only the new task —
+  // starting dirty is an error unless it is deliberate.
+  allowDirty: boolean
   // Explicit task id/slug from the caller (spawner tools already named the
   // worktree) — skips the namer model call entirely.
   name: string | null
@@ -88,7 +89,7 @@ export function parseAddOptions(args: string[]): ParseAddOptionsResult {
       args: tail === undefined ? scan.positionals : [...scan.positionals, '--verify', ...tail],
       raw: scan.flags['--raw'],
       complexity,
-      forceNew: scan.flags['--force-new'],
+      allowDirty: scan.flags['--allow-dirty'],
       name,
     },
   }

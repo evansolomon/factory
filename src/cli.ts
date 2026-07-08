@@ -110,6 +110,7 @@ import {
   appendFeedback,
   findTask,
   isStranded,
+  isTerminal,
   latestTask,
   loadTasks,
   markFeedbackConsumed,
@@ -143,7 +144,7 @@ COMMANDS
       command (your worktree/tmux bootstrap tooling). Factory hands each item to
       the spawner with FACTORY_INTENT/FACTORY_NAME/FACTORY_VERIFY in the
       environment; exit 0 removes it from the backlog.
-  factory add [--raw] [--trivial | --complexity trivial|complex] [--force-new] [--name <slug>] [intent...] [--verify <cmd...>] [--edit]
+  factory add [--raw] [--trivial | --complexity trivial|complex] [--allow-dirty] [--name <slug>] [intent...] [--verify <cmd...>] [--edit]
       Tell this factory/workstream something. If a current task needs input, has
       progress, is blocked/retrying, or just completed, the input is routed into
       that task. If there is no current work, it queues a new task. A running
@@ -155,12 +156,14 @@ COMMANDS
       declared runtime complexity instead of triage. A directive like $ship or
       /ship maps to a repo skill when present; plain delivery wording is resolved
       by the run loop before planning/implementation.
-      One ACTIVE task per workstream is enforced: queueing a second fresh task is
-      an error (use a new worktree, or --force-new to batch deliberately).
+      One ACTIVE task per workstream is enforced: queueing a second fresh task
+      is an error (use a new worktree, or the repo backlog + dispatch). A new
+      task on a worktree with uncommitted changes is also an error — the task's
+      commit would sweep them in — unless --allow-dirty makes it deliberate.
       --name <slug> names the task directly (skips the AI namer) — for spawner
       tools that already named the worktree.
 
-  factory run [--once | --drain | --until-done] [--no-prompt]
+  factory run [--once | --until-done] [--no-prompt]
       Work the stream. Default: stay running and pick up tasks as they're added
       (factory add), unblocked (factory retry), due for an auto-retry, or
       stranded mid-stage by a previously killed loop (Ctrl-C/crash) — shovel coal
@@ -172,7 +175,6 @@ COMMANDS
       be resumed later.
       One run loop per worktree is enforced with a lock; a second loop fails fast.
         --once        do one ready task, then exit (good for trying it out)
-        --drain       work until the stream is idle, then exit
         --until-done  exit 0 when the workstream's task completes, 2 when it
                       blocks — the spawner-teardown contract
         --no-prompt   don't prompt inline; needs-input waits for factory add
@@ -419,9 +421,7 @@ async function inferTaskTarget(ctx: WorkContext, taskQuery: string | null): Prom
     return task
   }
 
-  const tasks = (await loadTasks(ctx)).filter(
-    (task) => task.meta.status !== 'done' && task.meta.status !== 'closed'
-  )
+  const tasks = (await loadTasks(ctx)).filter((task) => !isTerminal(task.meta.status))
   if (tasks.length === 0) {
     throw new Error('no active task in this factory')
   }
@@ -914,12 +914,18 @@ async function taskDelivery(
   }
 }
 
-// The queue's most-important state for attention and the idle label:
-// blocked > needs-input > all-done > nothing.
+// The lane's state for attention and the idle label: the live task's parked
+// status when it is waiting on a human, 'done' when nothing is live and work
+// finished, else nothing. (Legacy multi-task queues: blocked wins.)
 function queueState(tasks: Task[]): AlertState | null {
-  const has = (s: string) => tasks.some((t) => t.meta.status === s)
-  const allDone = tasks.length > 0 && tasks.every((t) => t.meta.status === 'done')
-  return has('blocked') ? 'blocked' : has('needs-input') ? 'needs-input' : allDone ? 'done' : null
+  const live = tasks.filter((t) => !isTerminal(t.meta.status))
+  if (live.length > 0) {
+    if (live.some((t) => t.meta.status === 'blocked')) {
+      return 'blocked'
+    }
+    return live.some((t) => t.meta.status === 'needs-input') ? 'needs-input' : null
+  }
+  return tasks.some((t) => t.meta.status === 'done') ? 'done' : null
 }
 
 async function hasSavedPlan(task: Task): Promise<boolean> {
@@ -961,6 +967,9 @@ function addOptionsRequireNewTask(options: ParsedAddOptions): string | null {
   if (options.complexity !== null) {
     return '--trivial/--complexity only apply when add queues a new task'
   }
+  if (options.allowDirty) {
+    return '--allow-dirty only applies when add queues a new task'
+  }
   return null
 }
 
@@ -984,8 +993,7 @@ async function suggestTaskSlug(ctx: WorkContext, intent: string): Promise<string
 async function queueNewTask(
   ctx: WorkContext,
   base: { intent: string; verify: string | null },
-  options: ParsedAddOptions,
-  existingFreshTaskIds: string[] = []
+  options: ParsedAddOptions
 ): Promise<void> {
   // factory add only enqueues a new task record when there is no current work; the
   // run loop sharpens non-trivial pending intents. --raw, a declared complexity, or
@@ -1012,15 +1020,6 @@ async function queueNewTask(
     delivery: task.meta.delivery,
   })
   log.ok(`queued ${task.id}${suffix}`)
-  if (existingFreshTaskIds.length > 0) {
-    const count = existingFreshTaskIds.length
-    const plural = count === 1 ? '' : 's'
-    log.warn(
-      `this factory already has ${count} fresh queued task${plural}: ` +
-        existingFreshTaskIds.join(', ')
-    )
-    log.info('one task per worktree keeps the workstream and commit provenance clean')
-  }
 }
 
 // Idle-loop housekeeping for parked needs-input tasks. Two jobs:
@@ -1220,11 +1219,8 @@ async function addCommand(args: string[]): Promise<number> {
   const ctx = await loadContext(process.cwd())
   const tasks = await loadTasks(ctx)
   const routeTasks = await addRouteTasks(tasks)
-  const route = selectAddRoute(
-    routeTasks,
-    await hasChanges(ctx.root),
-    (await runLockHolder(ctx.stateDir)) !== null
-  )
+  const dirty = await hasChanges(ctx.root)
+  const route = selectAddRoute(routeTasks, dirty, (await runLockHolder(ctx.stateDir)) !== null)
   if (route.kind === 'new-task') {
     const existingFreshTaskIds = routeTasks
       .filter(
@@ -1232,16 +1228,25 @@ async function addCommand(args: string[]): Promise<number> {
           task.status === 'ready' && !task.hasPlan && !task.hasCommit && !task.pendingFeedback
       )
       .map((task) => task.id)
-    if (existingFreshTaskIds.length > 0 && !parsed.options.forceNew) {
-      // One active task per workstream, enforced. A second fresh task belongs
-      // in its own worktree; deliberate batching needs the explicit flag.
+    if (existingFreshTaskIds.length > 0) {
+      // At most one non-terminal task per worktree, enforced. A second fresh
+      // task belongs in its own worktree (factory backlog + dispatch batches).
       log.fail(
         `this workstream already has a fresh queued task: ${existingFreshTaskIds.join(', ')}`
       )
-      log.info('start it in a new worktree, or pass --force-new to batch deliberately')
+      log.info('start it in a new worktree, or queue it with: factory backlog add "…"')
       return 1
     }
-    await queueNewTask(ctx, base, parsed.options, existingFreshTaskIds)
+    if (dirty && !parsed.options.allowDirty) {
+      // A new task commits the whole worktree (git add -A), so preexisting
+      // changes would ship inside its commit, unreviewed (reviewers exclude
+      // them as baseline) and under a message describing only the new task.
+      log.fail('the worktree has uncommitted changes — a new task would commit them as its own')
+      log.info('inspect with: git status')
+      log.info('commit or stash them first, or pass --allow-dirty to sweep them in deliberately')
+      return 1
+    }
+    await queueNewTask(ctx, base, parsed.options)
     return 0
   }
   const newTaskOnlyError = addOptionsRequireNewTask(parsed.options)
@@ -1377,18 +1382,15 @@ async function backlogCommand(rest: string[]): Promise<number> {
 
 async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<number> {
   const once = flags['--once']
-  const drain = flags['--drain']
   const untilDone = flags['--until-done']
   const noPrompt = flags['--no-prompt']
   const ctx = await loadContext(process.cwd())
   log.info(
     once
       ? 'running one task'
-      : drain
-        ? 'draining queue'
-        : untilDone
-          ? 'running until the workstream task completes'
-          : 'watching queue (Ctrl-C to stop)'
+      : untilDone
+        ? 'running until the workstream task completes'
+        : 'watching queue (Ctrl-C to stop)'
   )
 
   // One loop per worktree, enforced: a second concurrent loop would reclaim
@@ -1418,10 +1420,10 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
   })
 
   // In the long-lived watch mode, when someone is at the terminal, prompt for
-  // needs-input answers inline. Bounded runs (--once/--drain) and non-TTY/piped
-  // runs keep the set-aside + state-aware `factory add` behavior; opt out with
+  // needs-input answers inline. Bounded runs (--once) and non-TTY/piped runs
+  // keep the set-aside + state-aware `factory add` behavior; opt out with
   // --no-prompt.
-  const interactive = !once && !drain && process.stdin.isTTY && !noPrompt
+  const interactive = !once && process.stdin.isTTY && !noPrompt
   if (interactive) {
     startPromptWorker(ctx)
   }
@@ -1468,7 +1470,7 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
       if (next !== null) {
         await setAlert(next)
       }
-      if (once || drain) {
+      if (once) {
         break
       }
       await emit(ctx.root, ctx.config.hooks, 'loop.idle', { state: remaining ?? 'idle' })
@@ -1579,7 +1581,7 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
       break
     }
   }
-  // Exiting (--once/--drain): clear the active stage so the window drops its
+  // Exiting (--once): clear the active stage so the window drops its
   // "(stage)" suffix and the shared ▶ working-marker, rather than leaving a
   // stale "an agent is working here" indicator after the process is gone. The
   // long-lived path never reaches here — it clears via loop.idle instead.

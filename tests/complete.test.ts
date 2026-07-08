@@ -61,7 +61,7 @@ describe('completeCandidates registry walk', () => {
 
   test('previously missing flags complete on their commands', async () => {
     expect(await names(['add', '--'], 1)).toEqual(
-      expect.arrayContaining(['--force-new', '--name', '--verify', '--edit'])
+      expect.arrayContaining(['--allow-dirty', '--name', '--verify', '--edit'])
     )
     expect(await names(['run', '--'], 1)).toContain('--until-done')
     expect(await names(['run', '--'], 1)).toContain('--no-prompt')
