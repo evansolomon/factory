@@ -103,13 +103,35 @@ async function saveTask(task: Task): Promise<void> {
 }
 
 describe('task state transitions', () => {
-  test('ready tasks take priority over due retries', async () => {
+  test('legacy queues run the oldest live runnable task first', async () => {
+    // There is at most one live task per worktree now; a legacy multi-task
+    // queue drains deterministically oldest-first, with no category priority.
     const ctx = await workContext()
     const retry = await addTask(ctx, 'Retry later', null)
     retry.meta.status = 'retrying'
     retry.meta.retryAt = new Date(1_000).toISOString()
+    retry.meta.createdAt = '2026-01-01T00:00:00.000Z'
     await saveTask(retry)
     const ready = await addTask(ctx, 'Ready now', null)
+    ready.meta.createdAt = '2026-01-02T00:00:00.000Z'
+    await saveTask(ready)
+
+    const next = await nextRunnable(ctx, 2_000)
+
+    expect(next?.id).toBe(retry.id)
+    expect(next?.meta.resumeKind).toBe('auto-retry')
+  })
+
+  test('a retry still on backoff does not block a newer ready task', async () => {
+    const ctx = await workContext()
+    const retry = await addTask(ctx, 'Retry later', null)
+    retry.meta.status = 'retrying'
+    retry.meta.retryAt = new Date(10_000).toISOString()
+    retry.meta.createdAt = '2026-01-01T00:00:00.000Z'
+    await saveTask(retry)
+    const ready = await addTask(ctx, 'Ready now', null)
+    ready.meta.createdAt = '2026-01-02T00:00:00.000Z'
+    await saveTask(ready)
 
     const next = await nextRunnable(ctx, 2_000)
 
