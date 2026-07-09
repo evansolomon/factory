@@ -3,6 +3,7 @@ import {
   decideComplexity,
   deliveryConfirmationQuestions,
   freshRunImplementer,
+  gateCodeFixAttemptCount,
   implementationAttemptCount,
   resolveDeliveryProposal,
   resolveImplementer,
@@ -145,6 +146,44 @@ describe('implementationAttemptCount', () => {
     ]
 
     expect(implementationAttemptCount(failures)).toBe(1)
+  })
+})
+
+describe('gateCodeFixAttemptCount', () => {
+  test('gives a newly discovered gate an independent repair budget', () => {
+    const failures: Failure[] = [
+      {
+        attempt: 0,
+        gate: 'review',
+        summary: 'first review defect',
+        detail: 'review failed',
+        remediation: 'code-fix',
+      },
+      {
+        attempt: 1,
+        gate: 'review',
+        summary: 'second review defect',
+        detail: 'review failed again',
+        remediation: 'code-fix',
+      },
+      {
+        attempt: 2,
+        gate: 'commit',
+        summary: 'lint hook failed',
+        detail: 'git commit failed',
+        remediation: 'code-fix',
+      },
+      {
+        attempt: 3,
+        gate: 'commit',
+        summary: 'temporary hook environment failure',
+        detail: 'git commit failed again',
+        remediation: 'backoff',
+      },
+    ]
+
+    expect(gateCodeFixAttemptCount(failures, 'commit')).toBe(1)
+    expect(gateCodeFixAttemptCount(failures, 'review')).toBe(2)
   })
 })
 

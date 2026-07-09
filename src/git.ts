@@ -42,9 +42,33 @@ export async function hasChanges(root: string): Promise<boolean> {
   return status.trim().length > 0
 }
 
-export async function commitAll(root: string, message: string): Promise<void> {
-  await $`git -C ${root} add -A`
-  await $`git -C ${root} commit -m ${message}`.quiet()
+export type CommitResult = { ok: true; output: string } | { ok: false; detail: string }
+
+function commandOutput(stdout: Uint8Array, stderr: Uint8Array): string {
+  return [stdout, stderr]
+    .map((bytes) => new TextDecoder().decode(bytes).trim())
+    .filter(Boolean)
+    .join('\n')
+}
+
+function commitFailure(command: string, exitCode: number, output: string): CommitResult {
+  const detail = `${command} failed (exit ${exitCode})`
+  return { ok: false, detail: output ? `${detail}:\n${output}` : detail }
+}
+
+export async function commitAll(root: string, message: string): Promise<CommitResult> {
+  const add = await $`git -C ${root} add -A`.nothrow().quiet()
+  const addOutput = commandOutput(add.stdout, add.stderr)
+  if (add.exitCode !== 0) {
+    return commitFailure('git add -A', add.exitCode, addOutput)
+  }
+
+  const commit = await $`git -C ${root} commit -m ${message}`.nothrow().quiet()
+  const output = commandOutput(commit.stdout, commit.stderr)
+  if (commit.exitCode !== 0) {
+    return commitFailure('git commit', commit.exitCode, output)
+  }
+  return { ok: true, output }
 }
 
 export async function recentCommitSubjects(root: string, count: number = 30): Promise<string[]> {

@@ -708,6 +708,11 @@ export function implementationAttemptCount(failures: Failure[]): number {
   return failures.filter((failure) => failure.remediation === 'code-fix').length
 }
 
+export function gateCodeFixAttemptCount(failures: Failure[], gate: string): number {
+  return failures.filter((failure) => failure.gate === gate && failure.remediation === 'code-fix')
+    .length
+}
+
 export function resumeUserFacing(
   uxEnabled: boolean,
   persisted: boolean | undefined,
@@ -2895,50 +2900,102 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       log.warn(`${task.id}: no verify command — skipping verification gate`)
     }
 
-    break // both gates passed
+    // Gates passed: record proof and attempt the commit. A commit hook is another
+    // repository-owned correctness gate, so surface its real output to the same
+    // convergence loop instead of turning an opaque shell exception into a block.
+    const consolidatedVerdict = await readArtifact(task, 'consolidated.md')
+    const verifyLog = await readArtifact(task, 'verify.log')
+    const diffForProof = await worktreeDiff(ctx.root)
+    const proof = [
+      `# Proof — ${task.id}`,
+      '',
+      `Recorded: ${new Date().toISOString()}`,
+      `Fix attempts: ${attempt}`,
+      '',
+      '## Review verdict',
+      consolidatedVerdict
+        ? consolidatedVerdict.split('\n').slice(0, 40).join('\n')
+        : 'VERDICT: PASS',
+      '',
+      '## Verify',
+      verify ? `\`${verify}\` passed` : 'no verify command',
+      ...(verifyLog ? ['', '```', ...verifyLog.split('\n').slice(-30), '```'] : []),
+      '',
+      '## Change shape',
+      '```',
+      ...diffForProof.split('\n').slice(0, 60),
+      '```',
+    ].join('\n')
+    await writeArtifact(task, 'proof.md', proof)
+
+    const message = await synthesizeCommitMessage(ctx, task, meter, intent, finalPlan, verify)
+    // Mark commit intent BEFORE running git commit: a crash between the commit and
+    // the meta save must be recoverable (see meta.commitStartedAt).
+    task.meta.commitStartedAt = new Date().toISOString()
+    await saveMeta(task)
+    const commit = await commitAll(ctx.root, message)
+    await writeArtifact(task, 'commit.log', commit.ok ? commit.output : commit.detail)
+    if (!commit.ok) {
+      task.meta.commitStartedAt = null
+      await saveMeta(task)
+      const detail = clipFailureOutput(commit.detail)
+      // A newly discovered commit hook failure gets its own bounded repair budget.
+      // Earlier review fixes must not consume every chance to address a gate that
+      // could only run after review and verification passed.
+      const commitAttempt = gateCodeFixAttemptCount(failures, 'commit')
+      const action = await assessFailure(
+        ctx,
+        task,
+        meter,
+        intent,
+        failures,
+        commitAttempt,
+        hardCap,
+        'commit',
+        detail
+      )
+      if (action.kind === 'continue') {
+        attempt++
+        continue
+      }
+      if (action.kind === 'retry') {
+        return retryLater(ctx, task, meter, stats, action.reason)
+      }
+      if (action.kind === 'needs-input') {
+        return needsInput(ctx, task, meter, stats, action.questions)
+      }
+      const rescued = await rescueOnce(detail)
+      if (rescued?.kind === 'continue') {
+        attempt++
+        continue
+      }
+      if (rescued?.kind === 'retry') {
+        return retryLater(ctx, task, meter, stats, rescued.reason)
+      }
+      if (rescued?.kind === 'needs-input') {
+        return needsInput(ctx, task, meter, stats, rescued.questions)
+      }
+      return blocked(
+        ctx,
+        task,
+        meter,
+        stats,
+        'commit failed and could not be repaired automatically',
+        detail,
+        stageGuidance('postmortem')
+      )
+    }
+
+    task.meta.commit = await headSha(ctx.root)
+    task.meta.commitStartedAt = null
+    if (feedbackContext) {
+      await refreshFeedbackState(task)
+      markFeedbackConsumed(task, feedbackContext.count)
+    }
+    await saveMeta(task)
+
+    return shipAndFinish(ctx, task, intent, meter, stats, stageGuidance)
   }
-
-  // Gate passed: record proof and commit on the branch. Proof is a self-contained
-  // record of WHAT passed — verdict summary, real verify output, and the shape of
-  // the change — not a stub pointing at files that later get overwritten.
-  const consolidatedVerdict = await readArtifact(task, 'consolidated.md')
-  const verifyLog = await readArtifact(task, 'verify.log')
-  const diffForProof = await worktreeDiff(ctx.root)
-  const proof = [
-    `# Proof — ${task.id}`,
-    '',
-    `Recorded: ${new Date().toISOString()}`,
-    `Fix attempts: ${attempt}`,
-    '',
-    '## Review verdict',
-    consolidatedVerdict ? consolidatedVerdict.split('\n').slice(0, 40).join('\n') : 'VERDICT: PASS',
-    '',
-    '## Verify',
-    verify ? `\`${verify}\` passed` : 'no verify command',
-    ...(verifyLog ? ['', '```', ...verifyLog.split('\n').slice(-30), '```'] : []),
-    '',
-    '## Change shape',
-    '```',
-    ...diffForProof.split('\n').slice(0, 60),
-    '```',
-  ].join('\n')
-  await writeArtifact(task, 'proof.md', proof)
-
-  const message = await synthesizeCommitMessage(ctx, task, meter, intent, finalPlan, verify)
-  // Mark commit intent BEFORE running git commit: a crash between the commit and
-  // the meta save must be recoverable (see meta.commitStartedAt).
-  task.meta.commitStartedAt = new Date().toISOString()
-  await saveMeta(task)
-  await commitAll(ctx.root, message)
-  task.meta.commit = await headSha(ctx.root)
-  task.meta.commitStartedAt = null
-  if (feedbackContext) {
-    await refreshFeedbackState(task)
-    markFeedbackConsumed(task, feedbackContext.count)
-  }
-  await saveMeta(task)
-
-  return shipAndFinish(ctx, task, intent, meter, stats, stageGuidance)
 }
 
 // 8. Delivery — outward-facing delivery via the delivery agent (run a skill or
