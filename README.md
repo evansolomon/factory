@@ -173,15 +173,17 @@ task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.m
   │                   REPAIRS the environment in place (install
   │                   deps/tools, build, start a service) then
   │                   re-runs — code defects fall through to auto-fix
-  └──── consolidated FAIL / real code defect → auto-fix; a convergence judge keeps
+  │  13. COMMIT       stage all changes and commit; capture hook output
+  └──── consolidated FAIL / real code defect / commit failure → auto-fix;
+        a convergence judge keeps
         iterating while each failure is NEW, stops when it's going in circles
         (config.retries is the hard-cap backstop); rescue gets one last
         read-only strategy pass before a terminal block.
         A flake or an environment problem it can't fix → set-aside (backoff)
         │ (pass)
-  commit (message from diff + author/repo history) → 13. SHIP (if configured)
+  commit (message from diff + author/repo history) → 14. SHIP (if configured)
         full-perms agent: MR/PR, CI, review
-        → 14. FEEDBACK read-only local handoff
+        → 15. FEEDBACK read-only local handoff
         │
         ├─ pass → write proof.md + feedback.md, status: done (shipped if ship set)
         └─ fail → status: retrying (auto-resume), then blocked if the cap is spent
@@ -382,8 +384,12 @@ services — then re-runs verify, without touching your code or spending a fix
 attempt. This is why a fresh worktree that's missing `node_modules` self-heals
 instead of burning the whole fix budget re-implementing code that was never the
 problem. It is allowed env-only changes; it never edits source or weakens a check
-to make verify pass. When the loop does give up, what happens next depends on the
-gate:
+to make verify pass. A **commit** failure is also a gate: Factory saves the full
+staging or hook diagnostic in `commit.log`, feeds it to the convergence judge and
+fixer, then re-runs review and verify before trying the commit again. Commit repairs
+have their own derived budget, so earlier review fixes cannot exhaust a newly
+discovered hook failure. When the loop does give up, what happens next depends on
+the gate:
 
 - **verify / ship** (transient — env, CI, network) → the task is set **aside**
   (status `retrying`, no attention event) and the loop **auto-resumes** it on a
@@ -395,9 +401,10 @@ gate:
   loop dying against a gate that could never pass. VERIFY commands are also
   sanitized at parse time (markdown backticks around a command became a command
   substitution under `bash -lc` and killed two real tasks).
-- **review panel** (the code or rollout safety was judged bad — re-running churns
-  code without new input) → straight to `blocked` and emits attention once no
-  runnable work is left. You look (`factory show <id> review`), then
+- **review panel / commit** (the code, rollout safety, or repository-owned commit
+  gate was judged bad — re-running churns code without new input) → straight to
+  `blocked` and emits attention once no runnable work is left. You look
+  (`factory show <id>`), then
   `factory retry ["note"]` when you're ready.
 
 Either way, resuming reuses prior work: committed already → just re-runs ship;
@@ -812,6 +819,7 @@ or jump-target behavior you want.
   failures.jsonl         # persisted gate-failure history
   verify.log             # latest verify output
   verify.history.log     # superseded verify attempts
+  commit.log             # latest git staging/commit output, including hook failures
   quickfix.log.md        # post-PASS quick-fix pass output, when it runs
   remediate[.N].md       # verify-failure doctor: diagnosis + env repair, when it runs
   proof.md               # pass proof written before commit

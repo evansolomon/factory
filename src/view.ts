@@ -139,6 +139,7 @@ export const SHOW_ARTIFACTS = [
   ['risk.md', '## Merge risk (last attempt)'],
   ['deploy.md', '## Deploy safety (last attempt)'],
   ['verify.log', '## Verify output (last attempt)'],
+  ['commit.log', '## Commit output (last attempt)'],
 ] as const
 
 async function firstQuestion(task: Task): Promise<string> {

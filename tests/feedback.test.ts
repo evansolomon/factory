@@ -154,6 +154,7 @@ describe('SHOW_ARTIFACTS', () => {
     const names = SHOW_ARTIFACTS.map(([name]) => name)
 
     expect(names.indexOf('feedback.md')).toBeLessThan(names.indexOf('plan.final.md'))
+    expect(names).toContain('commit.log')
     expect(names).not.toContain('brief.html')
   })
 })

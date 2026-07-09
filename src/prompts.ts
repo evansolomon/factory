@@ -859,7 +859,7 @@ function priorReviewBlock(priorReview: string | null): string {
     : ''
 }
 
-// Used on a retry after a gate (review or verify) failed: feed the failure and
+// Used on a retry after a gate (review, verify, or commit) failed: feed the failure and
 // current diff back so the implementer fixes it in place.
 export function fixPrompt(
   intent: string,
