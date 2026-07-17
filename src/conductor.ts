@@ -28,6 +28,7 @@ import {
   recentAuthorCommitSubjects,
   recentCommitSubjects,
   worktreeDiff,
+  worktreeDiffHasChanges,
 } from './git.ts'
 import {
   applicableGuidance,
@@ -2056,9 +2057,15 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   const stats: RunStats = { triage: null, retries: 0, verifyFirstTry: null, implementer: null }
   const stageGuidance = await stageGuidanceForRun(ctx, meter)
 
-  const baselineDiff = await worktreeDiff(ctx.root)
-  const baselineHasChanges = await hasChanges(ctx.root)
-  await writeArtifact(task, 'baseline.patch', baselineDiff)
+  const resuming = task.meta.resume
+  const savedBaseline = resuming ? await readArtifact(task, 'baseline.patch') : null
+  const baselineDiff = savedBaseline ?? (await worktreeDiff(ctx.root))
+  const baselineHasChanges = savedBaseline
+    ? worktreeDiffHasChanges(savedBaseline)
+    : await hasChanges(ctx.root)
+  if (!savedBaseline) {
+    await writeArtifact(task, 'baseline.patch', baselineDiff)
+  }
   if (baselineHasChanges) {
     log.warn(
       `${task.id}: worktree already has changes; factory will review and commit the whole worktree`
@@ -2078,7 +2085,6 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   // RESUME — reuse the saved plan + the existing worktree and pick up where the
   // task left off, skipping the (expensive) planning ensemble. The marker + any
   // human note are consumed here, so a later re-run starts fresh again.
-  const resuming = task.meta.resume
   const resumeKind = task.meta.resumeKind
   let resumeNote: string | null = null
   let finalPlan: string
@@ -2509,6 +2515,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // stays a separate objective gate after this.
     await setStatus(task, 'reviewing')
     const diff = await worktreeDiff(ctx.root)
+    const diffPath = `${task.dir}/diff.patch`
+    const baselineDiffPath = baselineHasChanges ? `${task.dir}/baseline.patch` : null
     await writeArtifact(task, 'diff.patch', diff)
     const reviewer = ctx.agents.reviewer
     const legacyReviewEntries: Array<WorkforceEntry<ReviewLens>> = [
@@ -2574,7 +2582,6 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     const panel: Array<{ key: string; label: string; agent: Agent; prompt: string }> = []
     for (const entry of reviewEntries) {
       const agent = agents.get(entry.agent) ?? reviewer
-      const baseline = baselineHasChanges ? baselineDiff : null
       if (entry.kind === 'correctness') {
         panel.push({
           key: 'review',
@@ -2584,8 +2591,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             intent,
             verify,
             finalPlan,
-            diff,
-            baseline,
+            diffPath,
+            baselineDiffPath,
             combineGuidance(
               stageGuidance('review'),
               await renderPolicies(ctx, entry.policies, 'review.correctness')
@@ -2602,8 +2609,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           prompt: securityPrompt(
             intent,
             finalPlan,
-            diff,
-            baseline,
+            diffPath,
+            baselineDiffPath,
             combineGuidance(
               stageGuidance('security'),
               await renderPolicies(ctx, entry.policies, 'review.security')
@@ -2620,8 +2627,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           prompt: riskReviewPrompt(
             intent,
             finalPlan,
-            diff,
-            baseline,
+            diffPath,
+            baselineDiffPath,
             await renderPolicies(ctx, entry.policies, 'review.risk')
           ),
         })
@@ -2633,8 +2640,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           prompt: deploySafetyPrompt(
             intent,
             finalPlan,
-            diff,
-            baseline,
+            diffPath,
+            baselineDiffPath,
             combineGuidance(
               stageGuidance('deploy-safety'),
               await renderPolicies(ctx, entry.policies, 'review.deploy')
@@ -2650,8 +2657,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           prompt: uxReviewPrompt(
             intent,
             finalPlan,
-            diff,
-            baseline,
+            diffPath,
+            baselineDiffPath,
             combineGuidance(
               stageGuidance('ux-review'),
               await renderPolicies(ctx, entry.policies, 'review.ux')
@@ -2680,6 +2687,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             prompt: e.prompt,
             access: 'read',
             outFile: `${task.dir}/${e.key}.md`,
+            additionalDirs: [task.dir],
           }),
           `${agentLabel(e.agent)} · ${e.label}`
         ).then((text): Labeled => ({ label: e.label, text })),
@@ -2715,14 +2723,15 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         prompt: consolidatePrompt(
           intent,
           finalPlan,
-          diff,
+          diffPath,
           reports,
-          baselineHasChanges ? baselineDiff : null,
+          baselineDiffPath,
           stageGuidance('consolidate'),
           answers
         ),
         access: 'read',
         outFile: `${task.dir}/consolidated.md`,
+        additionalDirs: [task.dir],
       })
     )
     const verdict = parseReviewVerdict(consolidated)
