@@ -34,10 +34,12 @@ function specialistBlock(policies: string | null): string {
   return policies ? `\n\n## Specialist policies\n${policies}` : ''
 }
 
-function baselineBlock(baselineDiff: string | null): string {
-  return baselineDiff
-    ? `\n\n## Worktree diff before this factory run\nThe worktree already had changes before this run began. Treat factory as operating on the whole current worktree, but use this baseline to distinguish preexisting context from new changes when reviewing scope.\n\n\`\`\`diff\n${baselineDiff}\n\`\`\``
+function reviewDiffBlock(diffPath: string, baselineDiffPath: string | null): string {
+  const baseline = baselineDiffPath
+    ? `\nThe worktree already had changes before this factory run. The saved pre-run baseline is at \`${baselineDiffPath}\`; use it to distinguish preexisting changes from this task's changes when reviewing scope.`
     : ''
+  return `## Diff evidence
+The complete current patch, including untracked files, is saved at \`${diffPath}\`. Inspect that artifact and the live worktree rather than asking for the entire patch in one tool response. Start with \`git status --short\`, \`git diff --stat HEAD\`, and \`git diff --numstat HEAD\`, then inspect the relevant files or bounded file-level diffs. The artifact is the durable review snapshot; the live worktree is the source of truth for adjacent code.${baseline}`
 }
 
 function riskBlock(riskAssessment: string | null): string {
@@ -1146,13 +1148,13 @@ export function reviewPrompt(
   intent: string,
   verify: string | null,
   finalPlan: string,
-  diff: string,
-  baselineDiff: string | null,
+  diffPath: string,
+  baselineDiffPath: string | null,
   guidance: string | null,
   answers: string | null = null,
   priorReview: string | null = null
 ): string {
-  return `You are a senior staff engineer pairing with the person who wrote the diff below. You didn't write it, so you bring fresh eyes — verify against the actual code rather than assuming the implementer got it right. Your job is to help make this change correct and ship-worthy, not to find fault. Read files in the repo as needed.
+  return `You are a senior staff engineer pairing with the person who wrote the current change. You didn't write it, so you bring fresh eyes — verify against the actual code rather than assuming the implementer got it right. Your job is to help make this change correct and ship-worthy, not to find fault. Read files in the repo as needed.
 
 Your most valuable contribution is catching defects that would actually cause harm: wrong behavior, unmet requirements, or tests that don't really test. Spend your attention there. A change that works and meets its requirements is good even if you'd have written it differently — flagging style, taste, or optional polish just burns time and triggers needless rework.
 
@@ -1170,10 +1172,7 @@ ${intent}${verifyBlock(verify)}
 ## Agreed plan
 ${finalPlan}${reviewerAnswersBlock(answers)}${priorReviewBlock(priorReview)}
 
-## Diff
-\`\`\`diff
-${diff}
-\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
+${reviewDiffBlock(diffPath, baselineDiffPath)}${learnedLessonsBlock(guidance)}
 
 For each finding, cite the specific code (file:line) and tag it BLOCKING (a correctness, requirements, or test-integrity defect that must be fixed before this ships) or ADVISORY (a real improvement that should not hold up the change). If there are none, say so.`
 }
@@ -1220,11 +1219,11 @@ CONFIDENCE: LOW|MEDIUM|HIGH
 export function riskReviewPrompt(
   intent: string,
   finalPlan: string,
-  diff: string,
-  baselineDiff: string | null,
+  diffPath: string,
+  baselineDiffPath: string | null,
   guidance: string | null = null
 ): string {
-  return `Assess the residual merge risk of the implemented diff below. Read the changed code and adjacent files as needed. Your job is to answer "0 to 10, how risky is this to merge?" with concrete rationale, not to re-review correctness.
+  return `Assess the residual merge risk of the implemented change. Read the changed code and adjacent files as needed. Your job is to answer "0 to 10, how risky is this to merge?" with concrete rationale, not to re-review correctness.
 
 Score risk from actual evidence:
 - Complexity and blast radius of the changed code.
@@ -1239,10 +1238,7 @@ ${intent}
 ## Agreed plan
 ${finalPlan}
 
-## Diff
-\`\`\`diff
-${diff}
-\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
+${reviewDiffBlock(diffPath, baselineDiffPath)}${learnedLessonsBlock(guidance)}
 
 Output ONLY this markdown structure:
 
@@ -1268,13 +1264,13 @@ CONFIDENCE: LOW|MEDIUM|HIGH
 export function securityPrompt(
   intent: string,
   finalPlan: string,
-  diff: string,
-  baselineDiff: string | null,
+  diffPath: string,
+  baselineDiffPath: string | null,
   guidance: string | null,
   answers: string | null = null,
   priorReview: string | null = null
 ): string {
-  return `You are a red-team security researcher auditing the diff below for the task. Assume an adversary controls every input the changed code can reach. You did not write it — trace the data flow through the repo as needed.
+  return `You are a red-team security researcher auditing the current change for the task. Assume an adversary controls every input the changed code can reach. You did not write it — trace the data flow through the repo as needed.
 
 Hunt concretely for vulnerabilities this diff introduces or fails to prevent:
 - Injection: SQL/command/template/log injection, unsafe deserialization, path traversal.
@@ -1291,10 +1287,7 @@ ${intent}
 ## Agreed plan
 ${finalPlan}${reviewerAnswersBlock(answers)}${priorReviewBlock(priorReview)}
 
-## Diff
-\`\`\`diff
-${diff}
-\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
+${reviewDiffBlock(diffPath, baselineDiffPath)}${learnedLessonsBlock(guidance)}
 
 For each exploitable finding, name the attack and cite the specific code (file:line), then tag it BLOCKING (an exploitable vulnerability that must be fixed before this ships) or ADVISORY (a real but non-exploitable security improvement). If there are none, say so.`
 }
@@ -1308,12 +1301,12 @@ For each exploitable finding, name the attack and cite the specific code (file:l
 export function deploySafetyPrompt(
   intent: string,
   finalPlan: string,
-  diff: string,
-  baselineDiff: string | null,
+  diffPath: string,
+  baselineDiffPath: string | null,
   guidance: string | null,
   answers: string | null = null
 ): string {
-  return `You are a release engineer auditing whether the diff below is safe to deploy. Judge mixed-version reality, not just whether the code works locally: old and new app versions may overlap, old queued data may meet new workers, old clients may call new APIs, rollback may happen after writes, and migrations/config may arrive before or after code depending on the deploy system.
+  return `You are a release engineer auditing whether the current change is safe to deploy. Judge mixed-version reality, not just whether the code works locally: old and new app versions may overlap, old queued data may meet new workers, old clients may call new APIs, rollback may happen after writes, and migrations/config may arrive before or after code depending on the deploy system.
 
 Look concretely for:
 - Backward and forward compatibility across API/schema/type/config changes.
@@ -1331,10 +1324,7 @@ ${intent}
 ## Agreed plan
 ${finalPlan}${reviewerAnswersBlock(answers)}
 
-## Diff
-\`\`\`diff
-${diff}
-\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
+${reviewDiffBlock(diffPath, baselineDiffPath)}${learnedLessonsBlock(guidance)}
 
 Output in this structure:
 
@@ -1354,13 +1344,13 @@ For each finding, cite the specific code or artifact (file:line when possible) a
 export function uxReviewPrompt(
   intent: string,
   finalPlan: string,
-  diff: string,
-  baselineDiff: string | null,
+  diffPath: string,
+  baselineDiffPath: string | null,
   guidance: string | null,
   answers: string | null = null,
   priorReview: string | null = null
 ): string {
-  return `You are a senior UI/UX and design-systems engineer pairing on the diff below for a USER-FACING change. Read the repo to compare against how this product's UI is already built. Your job is to help the experience and design consistency land well — NOT code correctness or security (others cover those). Judge the user experience, not taste.
+  return `You are a senior UI/UX and design-systems engineer pairing on the current USER-FACING change. Read the repo to compare against how this product's UI is already built. Your job is to help the experience and design consistency land well — NOT code correctness or security (others cover those). Judge the user experience, not taste.
 
 Look concretely:
 - Design-system adherence: reuses existing components and design tokens vs. hand-rolling or hardcoding values (colors, spacing, typography). Name the component/token it should have used.
@@ -1377,10 +1367,7 @@ ${intent}
 ## Agreed plan
 ${finalPlan}${reviewerAnswersBlock(answers)}${priorReviewBlock(priorReview)}
 
-## Diff
-\`\`\`diff
-${diff}
-\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
+${reviewDiffBlock(diffPath, baselineDiffPath)}${learnedLessonsBlock(guidance)}
 
 For each finding, cite the specific code (file:line) and tag it BLOCKING (a material design-system violation or clearly broken/inconsistent UX that must be fixed before this ships) or ADVISORY (a real improvement that should not hold up the change). If there are none, say so.`
 }
@@ -1391,13 +1378,13 @@ For each finding, cite the specific code (file:line) and tag it BLOCKING (a mate
 export function consolidatePrompt(
   intent: string,
   finalPlan: string,
-  diff: string,
+  diffPath: string,
   reports: Labeled[],
-  baselineDiff: string | null,
+  baselineDiffPath: string | null,
   guidance: string | null,
   answers: string | null = null
 ): string {
-  return `You are the lead engineer consolidating several independent expert reviews of the diff below into a single decision. Each report is one expert's findings; they overlap, sometimes conflict, and may include nits. Produce ONE verdict and ONE prioritized fix list — do not re-review from scratch.
+  return `You are the lead engineer consolidating several independent expert reviews of the current change into a single decision. Each report is one expert's findings; they overlap, sometimes conflict, and may include nits. Produce ONE verdict and ONE prioritized fix list — do not re-review from scratch.
 
 Do this:
 - Merge duplicates: the same issue raised by multiple experts becomes one item.
@@ -1413,10 +1400,7 @@ ${intent}
 ## Agreed plan
 ${finalPlan}${humanAnswersBlock(answers)}
 
-## Diff
-\`\`\`diff
-${diff}
-\`\`\`${baselineBlock(baselineDiff)}${learnedLessonsBlock(guidance)}
+${reviewDiffBlock(diffPath, baselineDiffPath)}${learnedLessonsBlock(guidance)}
 
 ${labeledBlocks('Expert report', reports)}
 

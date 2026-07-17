@@ -15,6 +15,7 @@ import {
   remediatePrompt,
   rescuePrompt,
   reviewPrompt,
+  riskReviewPrompt,
   securityPrompt,
   triagePrompt,
   uxReviewPrompt,
@@ -458,5 +459,28 @@ describe('prior review round memory', () => {
   test('consolidatePrompt carries the reversal rule', () => {
     const prompt = consolidatePrompt('Task', 'Plan', 'diff', [], null, null)
     expect(prompt).toContain('reverses guidance a prior review round gave')
+  })
+})
+
+describe('review diff evidence', () => {
+  const diffPath = '/factory/tasks/example/diff.patch'
+  const baselinePath = '/factory/tasks/example/baseline.patch'
+
+  test('review stages reference saved patches instead of embedding their contents', () => {
+    const prompts = [
+      reviewPrompt('Task', null, 'Plan', diffPath, baselinePath, null),
+      riskReviewPrompt('Task', 'Plan', diffPath, baselinePath),
+      securityPrompt('Task', 'Plan', diffPath, baselinePath, null),
+      deploySafetyPrompt('Task', 'Plan', diffPath, baselinePath, null),
+      uxReviewPrompt('Task', 'Plan', diffPath, baselinePath, null),
+      consolidatePrompt('Task', 'Plan', diffPath, [], baselinePath, null),
+    ]
+
+    for (const prompt of prompts) {
+      expect(prompt).toContain(diffPath)
+      expect(prompt).toContain(baselinePath)
+      expect(prompt).toContain('git diff --stat HEAD')
+      expect(prompt).not.toContain('```diff')
+    }
   })
 })

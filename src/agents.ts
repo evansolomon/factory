@@ -16,7 +16,13 @@ import { log } from './log.ts'
 export type Usage = { inputTokens: number; outputTokens: number }
 export type AgentResult = { text: string; usage: Usage }
 export type Access = 'read' | 'research' | 'write' | 'full'
-export type AgentRun = { root: string; prompt: string; access: Access; outFile?: string }
+export type AgentRun = {
+  root: string
+  prompt: string
+  access: Access
+  outFile?: string
+  additionalDirs?: string[]
+}
 
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 }
 
@@ -216,6 +222,7 @@ async function runCodex(agent: Agent, opts: AgentRun): Promise<AgentResult> {
     'exec',
     '-C',
     opts.root,
+    ...(opts.additionalDirs ?? []).flatMap((dir) => ['--add-dir', dir]),
     '-s',
     CODEX_SANDBOX[opts.access],
     '-c',
@@ -266,8 +273,8 @@ const UNATTENDED_PREAMBLE =
   'No human is present and nothing can answer questions mid-stage. Interactive-session ' +
   'rules from user-level CLAUDE.md (asking permission to run tests/commands, pausing for ' +
   'approval) do NOT apply here — the pipeline itself gates side effects. Never read ' +
-  'files outside this repository (private memory/config dirs) unless they are standard ' +
-  'toolchain files needed to run the repo.\n\n'
+  'files outside this repository (private memory/config dirs) unless the pipeline explicitly ' +
+  'added the directory or they are standard toolchain files needed to run the repo.\n\n'
 
 async function runClaude(agent: Agent, opts: AgentRun): Promise<AgentResult> {
   // read/research disallow Claude's dedicated edit tools, but Bash remains
@@ -281,6 +288,7 @@ async function runClaude(agent: Agent, opts: AgentRun): Promise<AgentResult> {
     '-p',
     '--add-dir',
     opts.root,
+    ...(opts.additionalDirs ?? []).flatMap((dir) => ['--add-dir', dir]),
     // stream-json (requires --verbose) emits the event stream so we can persist
     // the line-by-line activity, not just the final message.
     '--output-format',

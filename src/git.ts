@@ -37,6 +37,10 @@ export async function worktreeDiff(root: string): Promise<string> {
   return parts.join('\n')
 }
 
+export function worktreeDiffHasChanges(diff: string): boolean {
+  return diff.trim() !== '# git status\n\n# git diff HEAD'
+}
+
 export async function hasChanges(root: string): Promise<boolean> {
   const status = await $`git -C ${root} status --porcelain`.text()
   return status.trim().length > 0

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { $ } from 'bun'
-import { commitAll } from '../src/git.ts'
+import { commitAll, worktreeDiffHasChanges } from '../src/git.ts'
 
 async function tempRepo(): Promise<string> {
   const root = await mkdtemp(`${tmpdir()}/factory-git-`)
@@ -32,5 +32,13 @@ describe('commitAll', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('worktreeDiffHasChanges', () => {
+  test('recognizes clean snapshots and treats status or patch content as changes', () => {
+    expect(worktreeDiffHasChanges('# git status\n\n# git diff HEAD\n')).toBe(false)
+    expect(worktreeDiffHasChanges('# git status\n M src/a.ts\n\n# git diff HEAD\n')).toBe(true)
+    expect(worktreeDiffHasChanges('# git status\n\n# git diff HEAD\ndiff --git a/a b/a')).toBe(true)
   })
 })
