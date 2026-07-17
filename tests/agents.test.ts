@@ -1,9 +1,25 @@
 import { describe, expect, test } from 'bun:test'
-import { parseClaudeStream } from '../src/agents.ts'
+import { parseClaudeStream, unattendedAgentEnv } from '../src/agents.ts'
 
 function stream(...events: unknown[]): string {
   return events.map((e) => (typeof e === 'string' ? e : JSON.stringify(e))).join('\n')
 }
+
+describe('unattendedAgentEnv', () => {
+  test('removes only TMUX_PANE from the inherited environment', () => {
+    expect(
+      unattendedAgentEnv({
+        PATH: '/usr/bin',
+        TMUX: '/tmp/tmux/default,1,0',
+        TMUX_PANE: '%7',
+        UNSET: undefined,
+      })
+    ).toEqual({
+      PATH: '/usr/bin',
+      TMUX: '/tmp/tmux/default,1,0',
+    })
+  })
+})
 
 describe('parseClaudeStream', () => {
   test('sums modelUsage across models so native subagent spend is counted', () => {

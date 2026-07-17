@@ -20,6 +20,21 @@ export type AgentRun = { root: string; prompt: string; access: Access; outFile?:
 
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 }
 
+// Unattended CLIs still run user-level Stop hooks. Keep those hooks from treating
+// pipeline turns as interactive pane completions; Factory's own lifecycle hooks
+// run from the parent and retain TMUX_PANE.
+export function unattendedAgentEnv(
+  parentEnv: Record<string, string | undefined> = process.env
+): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(parentEnv)) {
+    if (key !== 'TMUX_PANE' && value !== undefined) {
+      env[key] = value
+    }
+  }
+  return env
+}
+
 // Human-facing label for logs/artifacts.
 export function agentLabel(agent: Agent): string {
   return agent.model ? `${agent.cli}:${agent.model}` : agent.cli
@@ -38,7 +53,7 @@ const RETRY_DELAYS_MS = [3000, 8000]
 async function runWithRetry(
   label: string,
   cmd: string[],
-  opts: { cwd: string; stdin: string; streamTo?: string }
+  opts: { cwd: string; stdin: string; streamTo?: string; env: Record<string, string> }
 ): Promise<RunResult> {
   let res = await run(cmd, opts)
   for (let attempt = 0; res.code !== 0 && attempt < RETRY_DELAYS_MS.length; attempt++) {
@@ -227,6 +242,7 @@ async function runCodex(agent: Agent, opts: AgentRun): Promise<AgentResult> {
     cwd: opts.root,
     stdin: opts.prompt,
     streamTo: opts.outFile ? activityPath(opts.outFile) : undefined,
+    env: unattendedAgentEnv(),
   })
   if (res.code !== 0) {
     throw new Error(`codex exec failed (exit ${res.code}): ${res.stderr || res.stdout}`.trim())
@@ -279,6 +295,7 @@ async function runClaude(agent: Agent, opts: AgentRun): Promise<AgentResult> {
     cwd: opts.root,
     stdin: `${UNATTENDED_PREAMBLE}${opts.prompt}`,
     streamTo: opts.outFile ? activityPath(opts.outFile) : undefined,
+    env: unattendedAgentEnv(),
   })
   if (res.code !== 0) {
     throw new Error(`claude failed (exit ${res.code}): ${res.stderr || res.stdout}`.trim())
