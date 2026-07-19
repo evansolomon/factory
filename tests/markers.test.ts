@@ -4,6 +4,7 @@ import {
   parseReconcileDecision,
   parseRemedy,
   parseReviewVerdict,
+  parseRiskScore,
   parseShip,
   parseTriage,
 } from '../src/markers.ts'
@@ -21,6 +22,8 @@ describe('marker parsing', () => {
       userFacing: true,
       complexityMarker: true,
       userFacingMarker: true,
+      profile: null,
+      profileMarkers: false,
       implementer: null,
     })
     // Trailing prose or reordered markers no longer break parsing.
@@ -38,8 +41,30 @@ describe('marker parsing', () => {
       userFacing: false,
       complexityMarker: false,
       userFacingMarker: false,
+      profile: null,
+      profileMarkers: false,
       implementer: null,
     })
+  })
+
+  test('parses the task-demand profile as one complete signal', () => {
+    expect(
+      parseTriage(
+        'AMBIGUITY: LOW\nCOUPLING: MEDIUM\nCONSEQUENCE: HIGH\n' +
+          'COMPLEXITY: COMPLEX\nUSER-FACING: NO'
+      )
+    ).toMatchObject({
+      profile: { ambiguity: 'low', coupling: 'medium', consequence: 'high' },
+      profileMarkers: true,
+    })
+    expect(parseTriage('AMBIGUITY: LOW\nCOUPLING: MEDIUM\nCOMPLEXITY: COMPLEX').profile).toBeNull()
+  })
+
+  test('parses bounded plan risk scores, last match wins', () => {
+    expect(parseRiskScore('RISK: 4')).toBe(4)
+    expect(parseRiskScore('RISK: 4\nRISK: 10')).toBe(10)
+    expect(parseRiskScore('RISK: 11')).toBeNull()
+    expect(parseRiskScore('no score')).toBeNull()
   })
 
   test('extracts the raw IMPLEMENTER marker without validating it', () => {

@@ -584,11 +584,9 @@ ${finalPlan}${riskBlock(riskAssessment)}${learnedLessonsBlock(guidance)}`
 // pool name, agent label (cli:model), and the human's routing description.
 export type ImplementerOption = { name: string; label: string; description: string | null }
 
-// First pass: decide whether a task is trivial enough to skip the planning
-// ensemble, AND whether it is user-facing (gates the UI/UX lenses). Biased toward
-// COMPLEX so only clearly-small work takes the fast path. When an implementer
-// pool is configured, triage also picks which implementer writes the code —
-// with an empty pool the prompt is byte-identical to the two-axis version.
+// First pass: profile the task demand, derive whether it is trivial enough to
+// skip the planning ensemble, and flag user-facing work for the UI/UX lenses.
+// When an implementer pool is configured, triage also picks the code writer.
 export function triagePrompt(
   intent: string,
   verify: string | null,
@@ -598,7 +596,7 @@ export function triagePrompt(
   // entirely in the config-authored descriptions, not in this template.
   defaultImplementer: { label: string; description: string | null } | null = null
 ): string {
-  const axes = implementers.length > 0 ? 'three' : 'two'
+  const axes = implementers.length > 0 ? 'six' : 'five'
   const defaultLine = defaultImplementer
     ? `- DEFAULT — ${defaultImplementer.label}${defaultImplementer.description ? `: ${defaultImplementer.description}` : ''}`
     : '- DEFAULT — the default implementer'
@@ -620,10 +618,16 @@ Calibration: the review panel, verify gate, and default-implementer fix passes a
       : ''
   return `Classify the task below on ${axes} axes. Look at the repo briefly if it helps.
 
+TASK PROFILE — three independent kinds of demand. Use LOW, MEDIUM, or HIGH:
+- AMBIGUITY: uncertainty, novelty, missing information, or genuinely competing designs. This primarily calibrates research and planning.
+- COUPLING: interacting components, boundaries, or invariants that must change together. A large mechanical edit can still be LOW or MEDIUM; count semantic interactions, not lines changed. This primarily calibrates implementation.
+- CONSEQUENCE: blast radius and cost of being wrong, including security, durable data, compatibility, production impact, and rollback difficulty. This primarily calibrates review and verification.
+
 COMPLEXITY — decides whether the full planning ensemble (research, two competing plans, cross-critique, reconcile, revise, select) runs before implementation. That ensemble costs real money and ~20+ minutes; it earns its cost ONLY when there are genuine design choices to compare. TRIVIAL tasks skip straight to implementation and are STILL fully reviewed by the expert panel and verified — trivial is a routing decision, not a safety decision.
 
-TRIVIAL — a competent engineer would just start typing: the change is mechanical or obvious once stated, however many lines it touches. One-to-few-line edits, renames, deletions, flag/config/dependency changes, adding an option that mirrors an existing one, an obvious localized fix, updating text or docs.
-COMPLEX — a competent engineer would sketch a design first: real alternatives exist and choosing wrong is costly; or the task is ambiguous, spans multiple components with coupling decisions, changes a data model or API contract, or is security/data-sensitive.
+Derive COMPLEXITY from the profile:
+- TRIVIAL when AMBIGUITY is LOW, COUPLING is not HIGH, and CONSEQUENCE is not HIGH. A competent engineer would just start typing because the change is mechanical or obvious once stated.
+- COMPLEX when AMBIGUITY is MEDIUM/HIGH, COUPLING is HIGH, or CONSEQUENCE is HIGH. A competent engineer should sketch a design, map interacting invariants, or explicitly derisk the work first.
 
 Calibration: over-classifying as COMPLEX has been this system's dominant failure (dozens of real tasks, zero classified TRIVIAL — including adding a single build flag). Do not use COMPLEX as a hedge; the review panel and verify gate are the safety net either way. Genuinely torn AFTER thinking it through → COMPLEX.
 
@@ -646,6 +650,9 @@ ${implementerSection}
 ${intent}${verifyBlock(verify)}
 
 Output ONLY these ${axes} final lines:
+AMBIGUITY: LOW|MEDIUM|HIGH
+COUPLING: LOW|MEDIUM|HIGH
+CONSEQUENCE: LOW|MEDIUM|HIGH
 COMPLEXITY: TRIVIAL|COMPLEX
 USER-FACING: YES|NO${implementerLine}`
 }

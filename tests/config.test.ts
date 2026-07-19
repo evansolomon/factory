@@ -121,7 +121,7 @@ describe('config cascade', () => {
       expect((await loadConfig(root)).agents.namer).toEqual({
         cli: 'codex',
         model: 'gpt-5.4-mini',
-        reasoningEffort: 'low',
+        effort: 'low',
       })
 
       await writeJson(`${root}/.factory.json`, {
@@ -134,6 +134,38 @@ describe('config cascade', () => {
       expect(config.agents.reviewer).toBe('codex')
       expect(config.agents.namer).toEqual({ cli: 'codex', model: 'gpt-5.4-mini' })
       expect(config.ask.agent).toEqual({ cli: 'codex', model: 'gpt-5.4' })
+    })
+  })
+
+  test('supports shared effort overrides on both agent CLIs', async () => {
+    await withFactoryHome(async () => {
+      const root = await tempDir('agent-effort')
+      await writeJson(`${root}/.factory.json`, {
+        agents: {
+          planners: [
+            { cli: 'codex', effort: 'high' },
+            { cli: 'claude', effort: 'low' },
+          ],
+        },
+      })
+
+      expect((await loadConfig(root)).agents.planners).toEqual([
+        { cli: 'codex', effort: 'high' },
+        { cli: 'claude', effort: 'low' },
+      ])
+    })
+  })
+
+  test('rejects conflicting shared and legacy effort overrides', async () => {
+    await withFactoryHome(async () => {
+      const root = await tempDir('conflicting-effort')
+      await writeJson(`${root}/.factory.json`, {
+        agents: { reviewer: { cli: 'codex', effort: 'high', reasoningEffort: 'low' } },
+      })
+
+      await expect(loadConfig(root)).rejects.toThrow(
+        'effort and reasoningEffort cannot both be set'
+      )
     })
   })
 

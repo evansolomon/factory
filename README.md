@@ -518,8 +518,11 @@ Fields:
 - **`triage`** — classify each task first; trivial ones skip the whole plan
   ensemble (research/plan/critique/reconcile/revise/select) and go straight to
   implement, still reviewed + verified (default `true`; `false` always runs the
-  full flow). A per-task declared complexity from `factory add --trivial` or
-  `--complexity trivial|complex` wins over this setting and skips model triage.
+  full flow). Triage also records LOW/MEDIUM/HIGH ambiguity, coupling, and
+  consequence facets. Complexity stays a binary route derived from those facets;
+  the facets calibrate stage effort. A per-task declared complexity from
+  `factory add --trivial` or `--complexity trivial|complex` wins over this setting
+  and skips model triage, using a conservative low/balanced effort profile.
 - **`security`** — run a dedicated red-team security gate on the implemented diff
   (every task, both paths), feeding the same auto-fix retry loop as the review
   gate (default `true`; `false` skips it).
@@ -678,13 +681,18 @@ pre-implementation artifacts, not completion briefs; they are visible through
     prompt-prefix slug.
 
   Each value is `"codex"` / `"claude"` or
-  `{ "cli": "codex"|"claude", "model"?: "…", "reasoningEffort"?: "low", "provider"?: "…", "description"?: "…" }`.
+  `{ "cli": "codex"|"claude", "model"?: "…", "effort"?: "low"|"medium"|"high"|"xhigh", "provider"?: "…", "description"?: "…" }`.
   Default: `{"planners": ["codex","claude"], "implementers": {},
   "reviewer": "claude", "delivery": "claude", "workforce": "claude", "rescue": "claude",
-  "namer": {"cli": "codex", "model": "gpt-5.4-mini", "reasoningEffort": "low"}}`,
+  "namer": {"cli": "codex", "model": "gpt-5.4-mini", "effort": "low"}}`,
   with the lead implementer falling back to `"codex"` when no
   `implementers.default` entry is set.
-  `reasoningEffort` is codex-only and maps to Codex's `model_reasoning_effort`.
+  Without an override, factory chooses effort from the task profile, stage,
+  plan-risk score, and fix-attempt history. `effort` maps to Codex's
+  `model_reasoning_effort` or Claude's `--effort`; the old Codex-only
+  `reasoningEffort` spelling remains accepted for compatibility. Custom Codex
+  providers inherit their backend default unless `effort` is explicit because
+  factory cannot know whether a generic backend accepts reasoning controls.
   Only `codex` and `claude` are built in (each needs an adapter — see below).
 
   **Other models via `provider` (codex only).** codex is an OpenAI-API harness,
@@ -838,7 +846,8 @@ or jump-target behavior you want.
 status without rewriting your prose, except when the run-loop sharpen stage
 finishes: then `task.md` is replaced with the refined spec. A complexity override
 from `factory add --trivial` or `--complexity trivial|complex` lives in
-`meta.json`; feedback bookkeeping lives there too as `feedbackCount`,
+`meta.json`; model triage also persists its `taskProfile` facets there so resumed
+work keeps the same effort basis. Feedback bookkeeping lives there too as `feedbackCount`,
 `feedbackConsumed`, and `feedbackSourceTaskId` for linked follow-ups. `triage.md`
 exists only for model triage output. Repo-level state lives under the repo state
 dir, shared across linked worktrees and keyed by repo identity unless `dir` is
@@ -1030,7 +1039,8 @@ the most likely thing to need tuning:
   because Codex's read-only sandbox blocks network lookup; implementation/fix use
   `workspace-write` or `danger-full-access` depending on `implementerAccess`; ship
   uses `danger-full-access`. `approval_policy="never"` prevents an interactive
-  hang in an unattended run. An agent with a `provider` set (see Configuration)
+  hang in an unattended run. Factory adds `-c model_reasoning_effort="<level>"`
+  when effort is resolved. An agent with a `provider` set (see Configuration)
   adds `-c model_provider="<name>"`, routing to a non-default OpenAI-compatible
   backend. Heads-up: codex's `turn.completed` usage may be empty for some
   non-OpenAI providers — usage parsing degrades to zero (the loop never breaks), so
@@ -1039,7 +1049,10 @@ the most likely thing to need tuning:
   `claude -p --add-dir <root> --output-format stream-json --verbose --permission-mode bypassPermissions --disallowedTools Edit Write NotebookEdit`
   (bypass prompts so it can't hang; disallow Claude's dedicated edit tools and
   keep Bash available for `git log`, `rg`, and other high-value read-only shell
-  work; `stream-json` emits the event stream). Unlike codex's filesystem sandbox,
+  work; `stream-json` emits the event stream). Factory adds `--effort <level>`
+  when effort is resolved and removes the inherited `CLAUDE_CODE_EFFORT_LEVEL`
+  because that environment variable would otherwise silently outrank the recorded
+  factory decision. Unlike codex's filesystem sandbox,
   this is not an OS-level read-only boundary: a shell command can still mutate if
   the model ignores the prompt.
 
@@ -1076,6 +1089,9 @@ dollar figure, so there's no consistent number across both models.)
   `needs-input` escalation. Proven end-to-end on real tasks.
 - ✅ **Configurable agents:** planners / implementer / reviewer / delivery roles,
   each `codex`/`claude` (+ optional model).
+- ✅ **Ambient effort policy:** task ambiguity/coupling/consequence, stage,
+  plan risk, and failure history choose explicit Codex/Claude effort levels;
+  per-agent overrides remain available and telemetry records the resolved level.
 - ✅ **Dynamic workforce routing:** a read-only router chooses research scouts,
   optional review lenses, lens agents, and specialist policies for complex tasks.
 - ✅ **Rescue strategist:** terminal blocks get one read-only last-chance pass
@@ -1094,6 +1110,7 @@ dollar figure, so there's no consistent number across both models.)
 - `cli.ts` — arg parsing + the long-lived run loop
 - `conductor.ts` — the per-task pipeline + live stage updates
 - `agents.ts` — headless codex/claude wrappers
+- `effort.ts` — task-profile and stage-aware effort policy
 - `prompts.ts` — stage prompts (incl. the high-bar reconcile/critique prompts)
 - `sharpen.ts` — intent sharpening parser and prompts for add/backlog/run flows
 - `task.ts` — task dir format, status, answers

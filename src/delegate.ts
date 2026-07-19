@@ -1,10 +1,11 @@
 import { appendFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { z } from 'zod'
-import { agentLabel, runAgent } from './agents.ts'
+import { agentLabel, resolveAgentEffort, runAgent } from './agents.ts'
 import type { ScanResult } from './args.ts'
 import type { DELEGATE_OPTIONS } from './commands.ts'
 import { type Agent, ReasoningEffortSchema } from './config.ts'
+import { EffortSchema, ModelEffortSchema } from './effort.ts'
 import { log } from './log.ts'
 
 // In-flight delegation: implement/fix stages may hand a clearly-mechanical
@@ -22,6 +23,7 @@ const DelegatedUsageSchema = z.object({
   inputTokens: z.number().default(0),
   outputTokens: z.number().default(0),
   ms: z.number().default(0),
+  effort: ModelEffortSchema.nullable().optional(),
 })
 export type DelegatedUsage = z.infer<typeof DelegatedUsageSchema>
 
@@ -41,6 +43,9 @@ export function delegateCommand(agent: Agent, usageFile: string): string {
   }
   if (agent.reasoningEffort) {
     parts.push('--reasoning-effort', agent.reasoningEffort)
+  }
+  if (agent.effort) {
+    parts.push('--effort', agent.effort)
   }
   if (agent.provider) {
     parts.push('--provider', agent.provider)
@@ -81,7 +86,8 @@ export async function collectDelegatedUsage(file: string): Promise<DelegatedUsag
 
 const USAGE =
   'usage: <subtask prompt on stdin> | factory delegate --cli codex|claude ' +
-  '[--model <m>] [--reasoning-effort <e>] [--provider <p>] [--usage-file <path>]'
+  '[--model <m>] [--effort <e>] [--reasoning-effort <e>] [--provider <p>] ' +
+  '[--usage-file <path>]'
 
 export async function delegateCli(scan: ScanResult<typeof DELEGATE_OPTIONS>): Promise<number> {
   if (!scan.ok) {
@@ -93,10 +99,24 @@ export async function delegateCli(scan: ScanResult<typeof DELEGATE_OPTIONS>): Pr
     log.fail(USAGE)
     return 1
   }
-  const effortRaw = scan.flags['--reasoning-effort'][0]
-  const effort = effortRaw === undefined ? null : ReasoningEffortSchema.safeParse(effortRaw)
-  if (effort && !effort.success) {
+  const legacyRaw = scan.flags['--reasoning-effort'][0]
+  const legacy = legacyRaw === undefined ? null : ReasoningEffortSchema.safeParse(legacyRaw)
+  if (legacy && !legacy.success) {
     log.fail(`--reasoning-effort must be one of ${ReasoningEffortSchema.options.join(', ')}`)
+    return 1
+  }
+  const effortRaw = scan.flags['--effort'][0]
+  const effort = effortRaw === undefined ? null : EffortSchema.safeParse(effortRaw)
+  if (effort && !effort.success) {
+    log.fail(`--effort must be one of ${EffortSchema.options.join(', ')}`)
+    return 1
+  }
+  if (effort?.success && legacy?.success) {
+    log.fail('--effort and --reasoning-effort cannot both be set')
+    return 1
+  }
+  if (legacy?.success && cli === 'claude') {
+    log.fail('--reasoning-effort is only supported for the codex cli')
     return 1
   }
   const model = scan.flags['--model'][0]
@@ -108,7 +128,8 @@ export async function delegateCli(scan: ScanResult<typeof DELEGATE_OPTIONS>): Pr
   const agent: Agent = {
     cli,
     ...(model !== undefined && { model }),
-    ...(effort?.success && { reasoningEffort: effort.data }),
+    ...(effort?.success && { effort: effort.data }),
+    ...(legacy?.success && { reasoningEffort: legacy.data }),
     ...(provider !== undefined && { provider }),
   }
   const prompt = (await new Response(Bun.stdin.stream()).text()).trim()
@@ -128,6 +149,7 @@ export async function delegateCli(scan: ScanResult<typeof DELEGATE_OPTIONS>): Pr
           inputTokens: result.usage.inputTokens,
           outputTokens: result.usage.outputTokens,
           ms: Date.now() - start,
+          effort: resolveAgentEffort(agent).effort,
         }
         await appendFile(usageFile, `${JSON.stringify(record)}\n`)
       } catch (err) {

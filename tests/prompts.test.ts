@@ -27,29 +27,33 @@ const guidance = [
 ].join('\n')
 
 describe('triage prompt implementer routing', () => {
-  test('an empty pool keeps the two-marker contract with no IMPLEMENTER anywhere', () => {
+  test('an empty pool keeps the five-marker contract with no IMPLEMENTER anywhere', () => {
     const prompt = triagePrompt('Fix the typo', null, [])
 
     expect(prompt).toContain(
-      'Output ONLY these two final lines:\nCOMPLEXITY: TRIVIAL|COMPLEX\nUSER-FACING: YES|NO'
+      'Output ONLY these five final lines:\nAMBIGUITY: LOW|MEDIUM|HIGH\nCOUPLING: LOW|MEDIUM|HIGH\nCONSEQUENCE: LOW|MEDIUM|HIGH\nCOMPLEXITY: TRIVIAL|COMPLEX\nUSER-FACING: YES|NO'
     )
-    expect(prompt).toContain('Classify the task below on two axes.')
+    expect(prompt).toContain('Classify the task below on five axes.')
     expect(prompt).not.toContain('IMPLEMENTER')
   })
 
-  // Frozen copy of the pre-pool triage prompt: the empty-pool contract is
-  // byte-identity with the two-axis prompt that shipped before routing existed,
-  // not just substring presence. An intentional edit to the shared template
-  // text must update this literal in the same change.
-  test('an empty pool renders the pre-pool two-axis prompt byte-for-byte', () => {
+  // Freeze the no-pool prompt: task-profile tuning is loop policy, so an
+  // intentional edit must update this literal and run the replay gate.
+  test('an empty pool renders the task-profile prompt byte-for-byte', () => {
     expect(
       triagePrompt('Fix the typo', null, [])
-    ).toBe(`Classify the task below on two axes. Look at the repo briefly if it helps.
+    ).toBe(`Classify the task below on five axes. Look at the repo briefly if it helps.
+
+TASK PROFILE — three independent kinds of demand. Use LOW, MEDIUM, or HIGH:
+- AMBIGUITY: uncertainty, novelty, missing information, or genuinely competing designs. This primarily calibrates research and planning.
+- COUPLING: interacting components, boundaries, or invariants that must change together. A large mechanical edit can still be LOW or MEDIUM; count semantic interactions, not lines changed. This primarily calibrates implementation.
+- CONSEQUENCE: blast radius and cost of being wrong, including security, durable data, compatibility, production impact, and rollback difficulty. This primarily calibrates review and verification.
 
 COMPLEXITY — decides whether the full planning ensemble (research, two competing plans, cross-critique, reconcile, revise, select) runs before implementation. That ensemble costs real money and ~20+ minutes; it earns its cost ONLY when there are genuine design choices to compare. TRIVIAL tasks skip straight to implementation and are STILL fully reviewed by the expert panel and verified — trivial is a routing decision, not a safety decision.
 
-TRIVIAL — a competent engineer would just start typing: the change is mechanical or obvious once stated, however many lines it touches. One-to-few-line edits, renames, deletions, flag/config/dependency changes, adding an option that mirrors an existing one, an obvious localized fix, updating text or docs.
-COMPLEX — a competent engineer would sketch a design first: real alternatives exist and choosing wrong is costly; or the task is ambiguous, spans multiple components with coupling decisions, changes a data model or API contract, or is security/data-sensitive.
+Derive COMPLEXITY from the profile:
+- TRIVIAL when AMBIGUITY is LOW, COUPLING is not HIGH, and CONSEQUENCE is not HIGH. A competent engineer would just start typing because the change is mechanical or obvious once stated.
+- COMPLEX when AMBIGUITY is MEDIUM/HIGH, COUPLING is HIGH, or CONSEQUENCE is HIGH. A competent engineer should sketch a design, map interacting invariants, or explicitly derisk the work first.
 
 Calibration: over-classifying as COMPLEX has been this system's dominant failure (dozens of real tasks, zero classified TRIVIAL — including adding a single build flag). Do not use COMPLEX as a hedge; the review panel and verify gate are the safety net either way. Genuinely torn AFTER thinking it through → COMPLEX.
 
@@ -71,12 +75,15 @@ Examples:
 ## Task
 Fix the typo
 
-Output ONLY these two final lines:
+Output ONLY these five final lines:
+AMBIGUITY: LOW|MEDIUM|HIGH
+COUPLING: LOW|MEDIUM|HIGH
+CONSEQUENCE: LOW|MEDIUM|HIGH
 COMPLEXITY: TRIVIAL|COMPLEX
 USER-FACING: YES|NO`)
   })
 
-  test('a non-empty pool lists entries and requests the third marker line', () => {
+  test('a non-empty pool lists entries and requests the sixth marker line', () => {
     const prompt = triagePrompt(
       'Fix the typo',
       null,
@@ -87,16 +94,16 @@ USER-FACING: YES|NO`)
       { label: 'codex:gpt-5.5', description: 'highly capable workhorse' }
     )
 
-    expect(prompt).toContain('Classify the task below on three axes.')
+    expect(prompt).toContain('Classify the task below on six axes.')
     expect(prompt).toContain('- DEFAULT — codex:gpt-5.5: highly capable workhorse')
     expect(prompt).toContain('- quick — codex:gpt-5.4-mini: Small mechanical edits')
     expect(prompt).toContain('- local — claude')
     // Policy lives in the config-authored descriptions, not the template.
     expect(prompt).toContain("Each entry's description is its routing policy")
     expect(prompt).toContain('Do not hedge to DEFAULT')
-    // The original two markers are still requested, plus the third line.
+    // The profile and route markers are still requested, plus the pool choice.
     expect(prompt).toContain(
-      'Output ONLY these three final lines:\nCOMPLEXITY: TRIVIAL|COMPLEX\nUSER-FACING: YES|NO\nIMPLEMENTER: quick|local|DEFAULT'
+      'Output ONLY these six final lines:\nAMBIGUITY: LOW|MEDIUM|HIGH\nCOUPLING: LOW|MEDIUM|HIGH\nCONSEQUENCE: LOW|MEDIUM|HIGH\nCOMPLEXITY: TRIVIAL|COMPLEX\nUSER-FACING: YES|NO\nIMPLEMENTER: quick|local|DEFAULT'
     )
   })
 

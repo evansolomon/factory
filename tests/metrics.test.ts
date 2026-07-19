@@ -220,9 +220,42 @@ describe('metrics report aggregation', () => {
     }
   })
 
+  test('persists resolved effort on stage rows', async () => {
+    const path = await metricsPath()
+    recordRun(
+      path,
+      run({
+        task: 'task-a',
+        outcome: 'done',
+        triage: 'complex',
+        retries: 0,
+        inTokens: 10,
+        outTokens: 10,
+        stages: [
+          {
+            stage: 'plan',
+            agent: 'claude',
+            effort: 'medium',
+            inTok: 10,
+            outTok: 10,
+            ms: 100,
+          },
+        ],
+      })
+    )
+
+    const db = new Database(path, { readonly: true })
+    try {
+      const row = db.query<{ effort: string | null }, []>('SELECT effort FROM stages').get()
+      expect(row?.effort).toBe('medium')
+    } finally {
+      db.close()
+    }
+  })
+
   test('rebuilds an old-schema db on version mismatch', async () => {
     const path = await metricsPath()
-    // A v1 db without the implementer column.
+    // An older db without current run/stage columns.
     const old = new Database(path, { create: true })
     old.run('CREATE TABLE runs (id INTEGER PRIMARY KEY, task TEXT)')
     old.run('PRAGMA user_version = 1')

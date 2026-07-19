@@ -1,3 +1,5 @@
+import type { DemandLevel, TaskProfile } from './effort.ts'
+
 function nonemptyLines(text: string): string[] {
   return text
     .split('\n')
@@ -28,6 +30,8 @@ export type TriageResult = {
   userFacing: boolean
   complexityMarker: boolean
   userFacingMarker: boolean
+  profile: TaskProfile | null
+  profileMarkers: boolean
   // Raw IMPLEMENTER marker value (only requested when an implementer pool is
   // configured). Pure extraction — DEFAULT and unknown names pass through;
   // the conductor resolves against the pool.
@@ -81,6 +85,17 @@ export function parseTriage(text: string): TriageResult {
     /^COMPLEXITY:\s*(TRIVIAL|COMPLEX)\s*$/i
   )?.[1]?.toUpperCase()
   const userFacing = lastMarkerMatch(text, /^USER-FACING:\s*(YES|NO)\s*$/i)?.[1]?.toUpperCase()
+  const demand = (name: string): DemandLevel | null => {
+    const value = lastMarkerMatch(text, new RegExp(`^${name}:\\s*(LOW|MEDIUM|HIGH)\\s*$`, 'i'))?.[1]
+    const normalized = value?.toLowerCase()
+    return normalized === 'low' || normalized === 'medium' || normalized === 'high'
+      ? normalized
+      : null
+  }
+  const ambiguity = demand('AMBIGUITY')
+  const coupling = demand('COUPLING')
+  const consequence = demand('CONSEQUENCE')
+  const profile = ambiguity && coupling && consequence ? { ambiguity, coupling, consequence } : null
   const implementer = lastMarkerMatch(text, /^IMPLEMENTER:\s*(.+)$/i)?.[1]?.trim() ?? null
 
   return {
@@ -91,8 +106,15 @@ export function parseTriage(text: string): TriageResult {
     // USER-FACING silently disabled the UX review gate before this.
     complexityMarker: complexity !== undefined,
     userFacingMarker: userFacing !== undefined,
+    profile,
+    profileMarkers: profile !== null,
     implementer,
   }
+}
+
+export function parseRiskScore(text: string): number | null {
+  const raw = lastMarkerMatch(text, /^RISK:\s*(10|[0-9])\s*$/i)?.[1]
+  return raw === undefined ? null : Number(raw)
 }
 
 export function parseReviewVerdict(text: string): 'PASS' | 'FAIL' | null {
