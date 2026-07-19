@@ -2,6 +2,7 @@ import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { z } from 'zod'
 import type { Agent } from './config.ts'
+import type { Effort, ModelEffort } from './effort.ts'
 import { type RunResult, run } from './exec.ts'
 import { log } from './log.ts'
 
@@ -22,6 +23,40 @@ export type AgentRun = {
   access: Access
   outFile?: string
   additionalDirs?: string[]
+  // Factory's stage-aware recommendation. A configured per-agent override wins.
+  effort?: Effort
+}
+
+export type AgentEffortDecision = {
+  effort: ModelEffort | null
+  source: 'agent' | 'legacy' | 'policy' | 'default' | 'provider-default'
+}
+
+export function resolveAgentEffort(agent: Agent, requested?: Effort): AgentEffortDecision {
+  if (agent.effort) {
+    return { effort: agent.effort, source: 'agent' }
+  }
+  if (agent.reasoningEffort) {
+    return { effort: agent.reasoningEffort, source: 'legacy' }
+  }
+  // Provider capabilities are not knowable from factory's generic codex adapter.
+  // Automatic reasoning controls could break a chat-completions or OSS backend;
+  // an explicit agent override remains available when the backend supports them.
+  if (agent.provider) {
+    return { effort: null, source: 'provider-default' }
+  }
+  if (requested) {
+    return { effort: requested, source: 'policy' }
+  }
+  return { effort: 'medium', source: 'default' }
+}
+
+export function agentEffortArgs(agent: Agent, requested?: Effort): string[] {
+  const effort = resolveAgentEffort(agent, requested).effort
+  if (!effort) {
+    return []
+  }
+  return agent.cli === 'codex' ? ['-c', `model_reasoning_effort="${effort}"`] : ['--effort', effort]
 }
 
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 }
@@ -30,11 +65,13 @@ const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 }
 // pipeline turns as interactive pane completions; Factory's own lifecycle hooks
 // run from the parent and retain TMUX_PANE.
 export function unattendedAgentEnv(
-  parentEnv: Record<string, string | undefined> = process.env
+  parentEnv: Record<string, string | undefined> = process.env,
+  extraExcluded: string[] = []
 ): Record<string, string> {
   const env: Record<string, string> = {}
+  const excluded = new Set(['TMUX_PANE', ...extraExcluded])
   for (const [key, value] of Object.entries(parentEnv)) {
-    if (key !== 'TMUX_PANE' && value !== undefined) {
+    if (!excluded.has(key) && value !== undefined) {
       env[key] = value
     }
   }
@@ -236,7 +273,7 @@ async function runCodex(agent: Agent, opts: AgentRun): Promise<AgentResult> {
     // Route to a non-default OpenAI-compatible backend (xAI, local/hosted OSS)
     // defined in ~/.codex/config.toml; absent → codex's default provider.
     ...(agent.provider ? ['-c', `model_provider="${agent.provider}"`] : []),
-    ...(agent.reasoningEffort ? ['-c', `model_reasoning_effort="${agent.reasoningEffort}"`] : []),
+    ...agentEffortArgs(agent, opts.effort),
     '--json',
     ...(agent.model ? ['-m', agent.model] : []),
     '-o',
@@ -297,13 +334,16 @@ async function runClaude(agent: Agent, opts: AgentRun): Promise<AgentResult> {
     '--permission-mode',
     'bypassPermissions',
     ...(agent.model ? ['--model', agent.model] : []),
+    ...agentEffortArgs(agent, opts.effort),
     ...tools,
   ]
   const res = await runWithRetry(agentLabel(agent), cmd, {
     cwd: opts.root,
     stdin: `${UNATTENDED_PREAMBLE}${opts.prompt}`,
     streamTo: opts.outFile ? activityPath(opts.outFile) : undefined,
-    env: unattendedAgentEnv(),
+    // Claude's environment variable outranks --effort. Remove the ambient
+    // value so factory's recorded policy decision is the value Claude receives.
+    env: unattendedAgentEnv(process.env, ['CLAUDE_CODE_EFFORT_LEVEL']),
   })
   if (res.code !== 0) {
     throw new Error(`claude failed (exit ${res.code}): ${res.stderr || res.stdout}`.trim())

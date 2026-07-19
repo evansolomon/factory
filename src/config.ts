@@ -1,13 +1,15 @@
 import { hostname } from 'node:os'
 import { dirname } from 'node:path'
 import { z } from 'zod'
+import { type Effort, EffortSchema, type ModelEffort, ModelEffortSchema } from './effort.ts'
 import { mainWorktreeRoot, originUrl, repoRoot } from './git.ts'
 import { log } from './log.ts'
 
-export const ReasoningEffortSchema = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh'])
-type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>
+// Deprecated Codex-only spelling. Keep accepting it so existing configs retain
+// their behavior while the shared `effort` field becomes the source of truth.
+export const ReasoningEffortSchema = ModelEffortSchema
 
-// An agent is a CLI, optionally pinned to a model and Codex reasoning effort.
+// An agent is a CLI, optionally pinned to a model and effort override.
 // Accepts a bare "codex"/"claude" or an object in config; normalized to Agent
 // everywhere else.
 const AgentSpecSchema = z
@@ -17,6 +19,7 @@ const AgentSpecSchema = z
       z.object({
         cli: z.enum(['codex', 'claude']),
         model: z.string().optional(),
+        effort: EffortSchema.optional(),
         reasoningEffort: ReasoningEffortSchema.optional(),
         // Selects a non-default codex backend — an OpenAI-compatible provider
         // configured in ~/.codex/config.toml (base_url/env_key/wire_api) —
@@ -31,14 +34,18 @@ const AgentSpecSchema = z
     ],
     {
       error:
-        'expected "codex" or "claude", or { "cli": "codex"|"claude", "model"?: string, "reasoningEffort"?: string, "provider"?: string, "description"?: string }',
+        'expected "codex" or "claude", or { "cli": "codex"|"claude", "model"?: string, "effort"?: string, "reasoningEffort"?: string, "provider"?: string, "description"?: string }',
     }
   )
-  // reasoningEffort maps to codex's `model_reasoning_effort`; claude has a
-  // separate model-selection surface, so reject it here instead of ignoring it.
+  // `reasoningEffort` is the legacy codex-specific spelling. Claude supports
+  // the shared `effort` field; reject the old spelling instead of reinterpreting it.
   .refine((spec) => typeof spec === 'string' || !spec.reasoningEffort || spec.cli === 'codex', {
     error: 'reasoningEffort is only supported for the codex cli',
     path: ['reasoningEffort'],
+  })
+  .refine((spec) => typeof spec === 'string' || !spec.effort || !spec.reasoningEffort, {
+    error: 'effort and reasoningEffort cannot both be set',
+    path: ['effort'],
   })
   // provider routes through codex's `-c model_provider=`; claude has no
   // equivalent CLI flag (it selects backends via env/Bedrock/Vertex), so reject
@@ -57,7 +64,8 @@ export type AgentSpec = z.infer<typeof AgentSpecSchema>
 export type Agent = {
   cli: 'codex' | 'claude'
   model?: string
-  reasoningEffort?: ReasoningEffort
+  effort?: Effort
+  reasoningEffort?: ModelEffort
   provider?: string
   description?: string
 }
@@ -66,7 +74,7 @@ function defaultNamerAgent(): AgentSpec {
   return {
     cli: 'codex',
     model: 'gpt-5.4-mini',
-    reasoningEffort: 'low',
+    effort: 'low',
   }
 }
 

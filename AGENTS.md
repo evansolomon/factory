@@ -46,7 +46,10 @@ its own agents must follow when the repo is the target.
   new that writes state or shells out for non-essential reasons.
 - **Marker-line contract.** Read-only stages output *only* markdown (saved verbatim
   as the artifact). Stages the conductor parses must keep their exact marker lines:
-  `DECISION: PROCEED|ASK`, `COMPLEXITY: TRIVIAL|COMPLEX`, `USER-FACING: YES|NO`,
+  `DECISION: PROCEED|ASK`, `AMBIGUITY: LOW|MEDIUM|HIGH`,
+  `COUPLING: LOW|MEDIUM|HIGH`, `CONSEQUENCE: LOW|MEDIUM|HIGH`,
+  `COMPLEXITY: TRIVIAL|COMPLEX`, `USER-FACING: YES|NO`,
+  `RISK: <0-10>`,
   `IMPLEMENTER: <name|DEFAULT>` (optional; only requested when
   `agents.implementers` has entries besides the reserved `default`, the lead),
   `DELIVERY: NONE|SKILL|POLICY`,
@@ -110,8 +113,8 @@ its own agents must follow when the repo is the target.
   review panel + consolidator → verify → commit → ship, with the auto-fix loop.
 - `prompts.ts` — every stage prompt (the marker contracts live here).
 - `agents.ts` — the codex/claude headless adapters.
-- `config.ts` · `task.ts` · `git.ts` · `exec.ts` · `log.ts` — config cascade, task
-  state, git, subprocess, output.
+- `config.ts` · `effort.ts` · `task.ts` · `git.ts` · `exec.ts` · `log.ts` — config
+  cascade, ambient effort policy, task state, git, subprocess, output.
 - `lessons.ts` · `metrics.ts` · `evals.ts` · `hooks.ts` · `sharpen.ts` · `view.ts` ·
   `backlog.ts` · `editor.ts` — meta loop, telemetry, eval capture, lifecycle hooks,
   intent sharpening, rendering, backlog, editor compose.

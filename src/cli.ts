@@ -322,7 +322,7 @@ CONFIG (.factory.json — cascades up the dir tree, closest wins)
             state, not a review pipeline role.
   agents    which agent fills each role: planners (list — ≥2 cross-critique),
             implementer (also triage/reconcile/select), reviewer, delivery. Each
-            is "codex"/"claude" or {"cli","model"}. default codex+claude.
+            is "codex"/"claude" or {"cli","model","effort"}. default codex+claude.
   hooks     event → shell commands run at lifecycle points (stage.change,
             attention, task.done/blocked/needs_input/retrying, loop.idle). The
             payload arrives as JSON on stdin + FACTORY_* env vars; best-effort.

@@ -3,6 +3,7 @@ import { mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { z } from 'zod'
 import { type WorkContext, writeWorktreeMarker } from './config.ts'
 import { type TaskDelivery, TaskDeliverySchema } from './delivery.ts'
+import { ModelEffortSchema, TaskProfileSchema } from './effort.ts'
 import { DUPLICATE_SIMILARITY, guidanceSimilarity } from './guidance.ts'
 import { classifyAnswer, recordAnswerVerdict } from './question-stats.ts'
 
@@ -112,6 +113,9 @@ const MetaSchema = z.object({
   autoRetries: z.number().int().default(0),
   // Explicit complexity declared by `factory add`; null means runtime triage decides.
   complexity: TaskComplexitySchema.nullable().default(null),
+  // Triage's durable task-demand profile. Complexity chooses the route; these
+  // facets calibrate effort inside it and survive resumes. Legacy tasks have none.
+  taskProfile: TaskProfileSchema.nullable().default(null),
   // Pool name of the implementer the most recent fresh run chose
   // (agents.implementers key), or null for the default. Written by triage,
   // cleared by triage-skipped fresh runs, re-resolved against the current pool
@@ -158,6 +162,7 @@ const LiveMeterSchema = z.object({
     z.object({
       stage: z.string(),
       agent: z.string(),
+      effort: ModelEffortSchema.nullable().default(null),
       inTok: z.number().int().nonnegative(),
       outTok: z.number().int().nonnegative(),
       ms: z.number().int().nonnegative(),
@@ -256,6 +261,7 @@ export async function addTask(
     retryAt: null,
     autoRetries: 0,
     complexity: options.complexity ?? null,
+    taskProfile: null,
     implementer: null,
     delivery: options.delivery ?? { mode: 'pending' },
     deliveryProposal: undefined,

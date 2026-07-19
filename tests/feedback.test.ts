@@ -180,6 +180,7 @@ function task(id: string, updatedAt: string, overrides: Partial<Task['meta']> = 
       retryAt: null,
       autoRetries: 0,
       complexity: null,
+      taskProfile: null,
       implementer: null,
       delivery: { mode: 'pending' },
       deliveryProposalAt: null,

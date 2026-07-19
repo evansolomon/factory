@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { parseClaudeStream, unattendedAgentEnv } from '../src/agents.ts'
+import {
+  agentEffortArgs,
+  parseClaudeStream,
+  resolveAgentEffort,
+  unattendedAgentEnv,
+} from '../src/agents.ts'
 
 function stream(...events: unknown[]): string {
   return events.map((e) => (typeof e === 'string' ? e : JSON.stringify(e))).join('\n')
@@ -18,6 +23,49 @@ describe('unattendedAgentEnv', () => {
       PATH: '/usr/bin',
       TMUX: '/tmp/tmux/default,1,0',
     })
+  })
+
+  test('can remove a CLI setting that would override factory policy', () => {
+    expect(
+      unattendedAgentEnv({ PATH: '/usr/bin', CLAUDE_CODE_EFFORT_LEVEL: 'max' }, [
+        'CLAUDE_CODE_EFFORT_LEVEL',
+      ])
+    ).toEqual({ PATH: '/usr/bin' })
+  })
+})
+
+describe('agent effort', () => {
+  test('maps the shared effort policy to each CLI', () => {
+    expect(agentEffortArgs({ cli: 'codex' }, 'high')).toEqual([
+      '-c',
+      'model_reasoning_effort="high"',
+    ])
+    expect(agentEffortArgs({ cli: 'claude' }, 'high')).toEqual(['--effort', 'high'])
+  })
+
+  test('lets agent overrides win over the stage policy', () => {
+    expect(resolveAgentEffort({ cli: 'claude', effort: 'low' }, 'high')).toEqual({
+      effort: 'low',
+      source: 'agent',
+    })
+    expect(resolveAgentEffort({ cli: 'codex', reasoningEffort: 'minimal' }, 'high')).toEqual({
+      effort: 'minimal',
+      source: 'legacy',
+    })
+  })
+
+  test('does not guess automatic effort support for custom providers', () => {
+    const agent = { cli: 'codex', model: 'grok-4', provider: 'xai' } as const
+    expect(resolveAgentEffort(agent, 'high')).toEqual({ effort: null, source: 'provider-default' })
+    expect(agentEffortArgs(agent, 'high')).toEqual([])
+    expect(resolveAgentEffort({ ...agent, effort: 'high' }, 'low')).toEqual({
+      effort: 'high',
+      source: 'agent',
+    })
+  })
+
+  test('uses a stable medium default outside the task pipeline', () => {
+    expect(resolveAgentEffort({ cli: 'claude' })).toEqual({ effort: 'medium', source: 'default' })
   })
 })
 

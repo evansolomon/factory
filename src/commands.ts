@@ -212,6 +212,7 @@ export const DELEGATE_OPTIONS = [
     equals: true,
   },
   { name: '--model', description: 'Model override', value: NONE, equals: true },
+  { name: '--effort', description: 'Agent effort override', value: NONE, equals: true },
   { name: '--reasoning-effort', description: 'Codex reasoning effort', value: NONE, equals: true },
   { name: '--provider', description: 'Codex model provider', value: NONE, equals: true },
   {

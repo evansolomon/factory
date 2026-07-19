@@ -22,6 +22,14 @@ describe('delegateCommand', () => {
     )
   })
 
+  test('renders the shared effort override for claude', () => {
+    expect(
+      delegateCommand({ cli: 'claude', model: 'sonnet', effort: 'high' }, '/tmp/ledger.jsonl')
+    ).toBe(
+      'factory delegate --cli claude --model sonnet --effort high --usage-file /tmp/ledger.jsonl'
+    )
+  })
+
   test('description never leaks into the command', () => {
     const agent = { cli: 'claude', model: 'haiku', description: 'trivial edits only' } as const
     expect(delegateCommand(agent, '/tmp/ledger.jsonl')).not.toContain('trivial edits')

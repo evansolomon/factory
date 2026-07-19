@@ -1,5 +1,5 @@
 import { mkdir, rm } from 'node:fs/promises'
-import { type AgentResult, agentLabel, runAgent } from './agents.ts'
+import { type AgentRun, agentLabel, resolveAgentEffort, runAgent } from './agents.ts'
 import { cleanCommitMessage, fallbackCommitMessage } from './commit-message.ts'
 import { type Agent, type AgentSpec, normAgent, type WorkContext } from './config.ts'
 import { buildDeckHtml } from './deck.ts'
@@ -17,6 +17,12 @@ import {
   readDeliveryHistory,
   type TaskDelivery,
 } from './delivery.ts'
+import {
+  defaultTaskProfile,
+  profileIsTrivial,
+  resolveStageEffort,
+  type TaskProfile,
+} from './effort.ts'
 import { run } from './exec.ts'
 import {
   type AuthorCommitSubjects,
@@ -48,6 +54,7 @@ import {
   parseReconcileDecision,
   parseRemedy,
   parseReviewVerdict,
+  parseRiskScore,
   parseShip,
   parseShipUrl,
   parseTriage,
@@ -187,6 +194,9 @@ type Meter = {
   // Guidance records actually injected into this pass's prompts, so the outcome
   // can be attributed back to them (lessons must earn their context window).
   guidanceIds: Set<string>
+  profile: TaskProfile
+  planRisk: number | null
+  attempt: number
 }
 function newMeter(task: Task): Meter {
   return {
@@ -197,6 +207,9 @@ function newMeter(task: Task): Meter {
     stages: [],
     writeSeq: Promise.resolve(),
     guidanceIds: new Set(),
+    profile: task.meta.taskProfile ?? defaultTaskProfile(task.meta.complexity),
+    planRisk: null,
+    attempt: 0,
   }
 }
 
@@ -206,7 +219,7 @@ function meterSnapshot(meter: Meter): LiveMeter {
     updatedAt: new Date().toISOString(),
     inputTokens: meter.inTok,
     outputTokens: meter.outTok,
-    stages: meter.stages.map((s) => ({ ...s })),
+    stages: meter.stages.map((s) => ({ ...s, effort: s.effort ?? null })),
   }
 }
 
@@ -286,7 +299,7 @@ async function agentStep(
   meter: Meter,
   stage: string,
   label: string,
-  work: Promise<AgentResult>,
+  work: PreparedAgentRun,
   // Live-display name only (heartbeat + done line). Defaults to the agent label;
   // override to disambiguate concurrent same-agent steps (e.g. the review panel,
   // where every expert is the same reviewer agent). The stored `agent` metric
@@ -294,13 +307,29 @@ async function agentStep(
   display: string = label
 ): Promise<string> {
   const start = Date.now()
-  const { text, usage } = await withHeartbeat(display, start, work)
+  const policy = resolveStageEffort({
+    stage,
+    profile: meter.profile,
+    planRisk: meter.planRisk,
+    attempt: meter.attempt,
+  })
+  const effective = resolveAgentEffort(work.agent, policy.effort)
+  const effortReason =
+    effective.source === 'policy'
+      ? policy.reason
+      : effective.source === 'provider-default'
+        ? 'custom provider capability unknown; using provider default'
+        : `${effective.source} override`
+  log.info(`${meter.task.id}: ${stage} effort ${effective.effort ?? 'default'} — ${effortReason}`)
+  const result = runAgent(work.agent, { ...work.opts, effort: policy.effort })
+  const { text, usage } = await withHeartbeat(display, start, result)
   const ms = Date.now() - start
   meter.inTok += usage.inputTokens
   meter.outTok += usage.outputTokens
   meter.stages.push({
     stage,
     agent: label,
+    effort: effective.effort,
     inTok: usage.inputTokens,
     outTok: usage.outputTokens,
     ms,
@@ -310,6 +339,12 @@ async function agentStep(
     `${display} ${fmtSecs(ms)} · ${fmtTok(usage.inputTokens)}→${fmtTok(usage.outputTokens)} tok`
   )
   return text
+}
+
+type PreparedAgentRun = { agent: Agent; opts: AgentRun }
+
+function stageAgent(agent: Agent, opts: AgentRun): PreparedAgentRun {
+  return { agent, opts }
 }
 
 // Run independent agent steps concurrently, tolerating individual crashes: one
@@ -395,7 +430,7 @@ async function analyzeFeedbackIfPending(
     meter,
     'feedback',
     agentLabel(ctx.agents.implementer),
-    runAgent(ctx.agents.implementer, {
+    stageAgent(ctx.agents.implementer, {
       root: ctx.root,
       prompt: feedbackAnalysisPrompt(intent, raw, await worktreeDiff(ctx.root), finalPlan),
       access: 'read',
@@ -603,7 +638,7 @@ async function runWorkforcePlanner(
     meter,
     'workforce',
     agentLabel(normAgent(ctx.config.agents.workforce)),
-    runAgent(normAgent(ctx.config.agents.workforce), {
+    stageAgent(normAgent(ctx.config.agents.workforce), {
       root: ctx.root,
       prompt: workforcePlanPrompt({
         intent,
@@ -807,7 +842,7 @@ async function postmortem(
       meter,
       'postmortem',
       agentLabel(ctx.agents.reviewer),
-      runAgent(ctx.agents.reviewer, {
+      stageAgent(ctx.agents.reviewer, {
         root: ctx.root,
         prompt: postmortemPrompt(intent, history, diff, reason, guidance),
         access: 'read',
@@ -919,7 +954,7 @@ async function judgeFailure(
     meter,
     'converge',
     agentLabel(ctx.agents.reviewer),
-    runAgent(ctx.agents.reviewer, {
+    stageAgent(ctx.agents.reviewer, {
       root: ctx.root,
       prompt: convergePrompt(intent, priorSummaries, failureForJudge, await readAnswers(task)),
       access: 'read',
@@ -1233,7 +1268,7 @@ async function rescueTerminalFailure(input: {
     input.meter,
     'rescue',
     agentLabel(agent),
-    runAgent(agent, {
+    stageAgent(agent, {
       root: input.ctx.root,
       prompt: rescuePrompt({
         intent: input.intent,
@@ -1347,7 +1382,14 @@ async function verifyGate(
       run(['bash', '-lc', command], { cwd: ctx.root })
     )
     const vms = Date.now() - vstart
-    meter.stages.push({ stage: 'verify', agent: '-', inTok: 0, outTok: 0, ms: vms })
+    meter.stages.push({
+      stage: 'verify',
+      agent: '-',
+      effort: null,
+      inTok: 0,
+      outTok: 0,
+      ms: vms,
+    })
     await persistLiveMeter(meter)
     log.done(`verify ${fmtSecs(vms)}`)
     await rollArtifactHistory(task, 'verify.log')
@@ -1374,7 +1416,7 @@ async function verifyGate(
       meter,
       'remediate',
       agentLabel(ctx.agents.implementer),
-      runAgent(ctx.agents.implementer, {
+      stageAgent(ctx.agents.implementer, {
         root: ctx.root,
         prompt: remediatePrompt(
           intent,
@@ -1481,7 +1523,7 @@ async function planEnsemble(
             meter,
             `research.${entry.kind}`,
             agentLabel(agent),
-            runAgent(agent, {
+            stageAgent(agent, {
               root: ctx.root,
               prompt: researchScoutPrompt(
                 entry.kind,
@@ -1506,7 +1548,7 @@ async function planEnsemble(
       meter,
       'research',
       agentLabel(normAgent(ctx.config.agents.workforce)),
-      runAgent(normAgent(ctx.config.agents.workforce), {
+      stageAgent(normAgent(ctx.config.agents.workforce), {
         root: ctx.root,
         prompt: researchSynthesisPrompt(intent, reports),
         access: 'read',
@@ -1519,7 +1561,7 @@ async function planEnsemble(
       meter,
       'research',
       agentLabel(lead),
-      runAgent(lead, {
+      stageAgent(lead, {
         root: ctx.root,
         prompt: researchPrompt(intent, verify, ctx.plansDir, userFacing),
         access: 'research',
@@ -1545,7 +1587,7 @@ async function planEnsemble(
         meter,
         'plan',
         member.label,
-        runAgent(member.agent, {
+        stageAgent(member.agent, {
           root: ctx.root,
           prompt: planPrompt(
             intent,
@@ -1581,7 +1623,7 @@ async function planEnsemble(
           meter,
           'critique',
           member.label,
-          runAgent(member.agent, {
+          stageAgent(member.agent, {
             root: ctx.root,
             prompt: critiquePrompt(
               intent,
@@ -1615,7 +1657,7 @@ async function planEnsemble(
       meter,
       'ux',
       agentLabel(ctx.agents.reviewer),
-      runAgent(ctx.agents.reviewer, {
+      stageAgent(ctx.agents.reviewer, {
         root: ctx.root,
         prompt: uxPlanCritiquePrompt(intent, labeled(plans), research),
         access: 'read',
@@ -1633,7 +1675,7 @@ async function planEnsemble(
     meter,
     'reconcile',
     agentLabel(lead),
-    runAgent(lead, {
+    stageAgent(lead, {
       root: ctx.root,
       prompt: reconcilePrompt(
         intent,
@@ -1679,7 +1721,7 @@ async function planEnsemble(
           meter,
           'revise',
           member.label,
-          runAgent(member.agent, {
+          stageAgent(member.agent, {
             root: ctx.root,
             prompt: revisePrompt(intent, plans[i] ?? '', allCritiques),
             access: 'read',
@@ -1700,7 +1742,7 @@ async function planEnsemble(
     meter,
     'select',
     agentLabel(lead),
-    runAgent(lead, {
+    stageAgent(lead, {
       root: ctx.root,
       prompt: selectPrompt(intent, labeled(revised), uxCritique),
       access: 'read',
@@ -1732,7 +1774,7 @@ async function finalizeSharpen(
     meter,
     'sharpen',
     agentLabel(ctx.agents.implementer),
-    runAgent(ctx.agents.implementer, {
+    stageAgent(ctx.agents.implementer, {
       root: ctx.root,
       prompt: sharpenPrompt(transcript(turns), true, await conductorAskCalibration(ctx)),
       access: 'read',
@@ -1759,7 +1801,7 @@ async function reviewSharpenSpec(
     meter,
     'sharpen-review',
     agentLabel(ctx.agents.reviewer),
-    runAgent(ctx.agents.reviewer, {
+    stageAgent(ctx.agents.reviewer, {
       root: ctx.root,
       prompt: sharpenReviewPrompt(transcript(turns), spec.intent, spec.verify),
       access: 'read',
@@ -1801,7 +1843,7 @@ async function runSharpenStage(
     meter,
     'sharpen',
     agentLabel(ctx.agents.implementer),
-    runAgent(ctx.agents.implementer, {
+    stageAgent(ctx.agents.implementer, {
       root: ctx.root,
       prompt: sharpenPrompt(transcript(turns), false, await conductorAskCalibration(ctx)),
       access: 'read',
@@ -1939,7 +1981,7 @@ async function selectTaskDelivery(
     meter,
     'delivery-select',
     agentLabel(ctx.agents.reviewer),
-    runAgent(ctx.agents.reviewer, {
+    stageAgent(ctx.agents.reviewer, {
       root: ctx.root,
       prompt: deliverySelectPrompt({
         intent,
@@ -2009,7 +2051,7 @@ async function runPrototypeStage(
       meter,
       'prototype',
       agentLabel(ctx.agents.implementer),
-      runAgent(ctx.agents.implementer, {
+      stageAgent(ctx.agents.implementer, {
         root: ctx.root,
         prompt: prototypePrompt(intent, finalPlan, riskAssessment, guidance),
         access: 'read',
@@ -2094,6 +2136,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   if (resuming) {
     finalPlan = (await readPlan(task)) ?? intent
     riskAssessment = await readArtifact(task, 'risk.plan.md')
+    meter.planRisk = riskAssessment ? parseRiskScore(riskAssessment) : null
     workforcePlan = await readWorkforcePlan(task)
     resumeNote = task.meta.resumeNote
     task.meta.resume = false
@@ -2118,8 +2161,11 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     const complexityDecision = decideComplexity(task.meta.complexity, ctx.config.triage)
     if (complexityDecision.source === 'declared') {
       trivial = complexityDecision.trivial
+      meter.profile = defaultTaskProfile(complexityDecision.complexity)
+      task.meta.taskProfile = meter.profile
       const label = complexityDecision.complexity
       log.info(`${task.id}: ${label} — using declared complexity (skipping triage)`)
+      await saveMeta(task)
     } else if (complexityDecision.source === 'triage') {
       await progress(ctx, task, 'triage', 'triage — trivial or complex?')
       const implementerOptions = Object.entries(routable).map(([name, spec]) => {
@@ -2130,7 +2176,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         meter,
         'triage',
         agentLabel(lead),
-        runAgent(lead, {
+        stageAgent(lead, {
           root: ctx.root,
           prompt: triagePrompt(intent, verify, implementerOptions, {
             label: agentLabel(lead),
@@ -2141,7 +2187,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         })
       )
       const triage = parseTriage(verdict)
-      if (!triage.complexityMarker || !triage.userFacingMarker) {
+      if (!triage.complexityMarker || !triage.userFacingMarker || !triage.profileMarkers) {
         // Defaults still apply (complex / not-user-facing) but a missing marker is
         // a prompt-contract violation worth surfacing — a silent USER-FACING miss
         // disables the UX review gate for the whole task.
@@ -2149,12 +2195,27 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           `${task.id}: triage output missing ${[
             !triage.complexityMarker && 'COMPLEXITY',
             !triage.userFacingMarker && 'USER-FACING',
+            !triage.profileMarkers && 'task-profile',
           ]
             .filter(Boolean)
             .join(' and ')} marker(s); using defaults`
         )
       }
-      trivial = triage.trivial
+      if (triage.profile) {
+        meter.profile = triage.profile
+        task.meta.taskProfile = triage.profile
+        trivial = profileIsTrivial(triage.profile)
+        if (triage.complexityMarker && trivial !== triage.trivial) {
+          log.warn(
+            `${task.id}: triage COMPLEXITY contradicts its task profile; using the derived ` +
+              `${trivial ? 'TRIVIAL' : 'COMPLEX'} route`
+          )
+        }
+      } else {
+        trivial = triage.trivial
+        meter.profile = defaultTaskProfile(trivial ? 'trivial' : 'complex')
+        task.meta.taskProfile = meter.profile
+      }
       stats.triage = trivial ? 'trivial' : 'complex'
       classifiedUserFacing = triage.userFacing
       userFacing = ctx.config.ux && classifiedUserFacing
@@ -2162,6 +2223,12 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       task.meta.userFacing = classifiedUserFacing
       triageImplementer = triage.implementer
       task.meta.updatedAt = new Date().toISOString()
+      await saveMeta(task)
+    } else {
+      // Triage disabled: the full route remains unchanged, while a balanced
+      // profile gives its stages a deterministic effort baseline.
+      meter.profile = defaultTaskProfile('complex')
+      task.meta.taskProfile = meter.profile
       await saveMeta(task)
     }
 
@@ -2244,13 +2311,17 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         meter,
         'risk',
         agentLabel(ctx.agents.reviewer),
-        runAgent(ctx.agents.reviewer, {
+        stageAgent(ctx.agents.reviewer, {
           root: ctx.root,
           prompt: planRiskPrompt(intent, finalPlan),
           access: 'read',
           outFile: `${task.dir}/risk.plan.md`,
         })
       )
+      meter.planRisk = parseRiskScore(riskAssessment)
+      if (meter.planRisk === null) {
+        log.warn(`${task.id}: risk output missing RISK marker; keeping profile-based effort`)
+      }
       shouldPrototype = true
     }
 
@@ -2262,7 +2333,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         meter,
         'name',
         agentLabel(lead),
-        runAgent(lead, {
+        stageAgent(lead, {
           root: ctx.root,
           prompt: namePrompt(intent, finalPlan),
           access: 'read',
@@ -2404,6 +2475,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   })
   await rm(delegateLedger, { force: true })
   while (true) {
+    meter.attempt = attempt
     stats.retries = attempt
     if (skipImplement) {
       skipImplement = false
@@ -2465,7 +2537,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         meter,
         'implement',
         agentLabel(implementAgent),
-        runAgent(implementAgent, {
+        stageAgent(implementAgent, {
           root: ctx.root,
           prompt: stagePrompt,
           access: ctx.config.implementerAccess === 'full' ? 'full' : 'write',
@@ -2483,6 +2555,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         meter.stages.push({
           stage: 'delegate',
           agent: d.label,
+          effort: d.effort ?? null,
           inTok: d.inputTokens,
           outTok: d.outputTokens,
           ms: d.ms,
@@ -2682,7 +2755,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           meter,
           e.key,
           agentLabel(e.agent),
-          runAgent(e.agent, {
+          stageAgent(e.agent, {
             root: ctx.root,
             prompt: e.prompt,
             access: 'read',
@@ -2718,7 +2791,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       meter,
       'consolidate',
       agentLabel(reviewer),
-      runAgent(reviewer, {
+      stageAgent(reviewer, {
         root: ctx.root,
         prompt: consolidatePrompt(
           intent,
@@ -2748,7 +2821,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           meter,
           'quickfix',
           agentLabel(lead),
-          runAgent(lead, {
+          stageAgent(lead, {
             root: ctx.root,
             prompt: quickFixPrompt(intent, quickFixes, diff),
             access: ctx.config.implementerAccess === 'full' ? 'full' : 'write',
@@ -3031,7 +3104,7 @@ async function writeCompletionFeedback(ctx: WorkContext, task: Task, intent: str
       meter,
       'feedback',
       agentLabel(ctx.agents.delivery),
-      runAgent(ctx.agents.delivery, {
+      stageAgent(ctx.agents.delivery, {
         root: ctx.root,
         prompt: feedbackPrompt({
           taskId: task.id,
@@ -3063,7 +3136,7 @@ async function writeCompletionDeck(ctx: WorkContext, task: Task, intent: string,
         meter,
         'deck',
         agentLabel(ctx.agents.delivery),
-        runAgent(ctx.agents.delivery, {
+        stageAgent(ctx.agents.delivery, {
           root: ctx.root,
           prompt: deckPrompt({
             taskId: task.id,
@@ -3132,7 +3205,7 @@ async function shipAndFinish(
       meter,
       'ship',
       agentLabel(ctx.agents.delivery),
-      runAgent(ctx.agents.delivery, {
+      stageAgent(ctx.agents.delivery, {
         root: ctx.root,
         prompt: shipPrompt(intent, branch, action),
         access: 'full',
@@ -3220,7 +3293,7 @@ async function synthesizeCommitMessage(
       meter,
       'commit-message',
       agentLabel(ctx.agents.implementer),
-      runAgent(ctx.agents.implementer, {
+      stageAgent(ctx.agents.implementer, {
         root: ctx.root,
         prompt: commitMessagePrompt({
           intent,

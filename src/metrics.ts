@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite'
 import { mkdirSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
+import type { ModelEffort } from './effort.ts'
 import { log } from './log.ts'
 
 // Telemetry store. One repo-level metrics.db; one row per task PASS (a task that
@@ -48,6 +49,7 @@ export function recentFirstPassYield(
 export type StageStat = {
   stage: string
   agent: string
+  effort?: ModelEffort | null
   inTok: number
   outTok: number
   ms: number
@@ -74,7 +76,7 @@ export type RunRecord = {
   stages: StageStat[]
 }
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -118,6 +120,7 @@ function ensureSchema(db: Database): void {
     run_id INTEGER NOT NULL,
     stage TEXT NOT NULL,
     agent TEXT NOT NULL,
+    effort TEXT,
     in_tokens INTEGER NOT NULL,
     out_tokens INTEGER NOT NULL,
     ms INTEGER NOT NULL
@@ -148,10 +151,10 @@ function insertRun(db: Database, r: RunRecord): void {
       )
     const runId = Number(res.lastInsertRowid)
     const stage = db.query(
-      `INSERT INTO stages (run_id, stage, agent, in_tokens, out_tokens, ms) VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO stages (run_id, stage, agent, effort, in_tokens, out_tokens, ms) VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     for (const s of r.stages) {
-      stage.run(runId, s.stage, s.agent, s.inTok, s.outTok, s.ms)
+      stage.run(runId, s.stage, s.agent, s.effort ?? null, s.inTok, s.outTok, s.ms)
     }
   })
   insert()
