@@ -183,6 +183,7 @@ function task(id: string, updatedAt: string, overrides: Partial<Task['meta']> = 
       strategyEpoch: 0,
       strategyBudget: null,
       executionOverride: null,
+      dispatchChainId: null,
       complexity: null,
       taskProfile: null,
       implementer: null,

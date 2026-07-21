@@ -1297,6 +1297,48 @@ Output concise markdown ending with exactly one marker line:
 EXECUTION: ATOMIC|STAGED`
 }
 
+export function decompositionPrompt(input: {
+  intent: string
+  finalPlan: string
+  assessment: string
+  sourceWorktree: string
+  diffPath: string | null
+  repair: boolean
+}): string {
+  const evidence = input.diffPath
+    ? `The aggregate worktree already contains changes. Its complete patch is at \`${input.diffPath}\`; inspect it selectively when assigning existing work to units.`
+    : 'Implementation has not started, so define each unit from the plan and repository state.'
+  const repair = input.repair
+    ? '\nA previous response failed schema validation. Return only valid JSON matching the schema; do not add markdown fences or commentary.\n'
+    : ''
+  return `Convert this confirmed staged plan into an executable serial delivery chain. Each unit must be independently reviewable, verifiable, and deliverable from a clean worktree. Order units so every dependency is completed before its consumer. Prefer the fewest coherent units that preserve migration, mixed-version, rollout, and rollback safety.
+
+Factory will dispatch these units one at a time. Each child can inspect the aggregate reference worktree at \`${input.sourceWorktree}\`, but its intent must be self-contained and must state the exact outcome and boundaries. Do not ask the human to copy steps or coordinate dependencies.
+
+${evidence}${repair}
+
+## Task
+${input.intent}
+
+## Final plan
+${input.finalPlan}
+
+## Confirmed staged assessment
+${input.assessment}
+
+Return ONLY one JSON object matching this exact shape:
+{
+  "summary": "why this ordering completes the parent safely",
+  "units": [
+    {
+      "name": "short stable unit name",
+      "intent": "self-contained implementation and delivery outcome, including explicit scope exclusions",
+      "verify": "narrow deterministic verification command or null"
+    }
+  ]
+}`
+}
+
 // Post-diff risk lens. It is deliberately advisory: concrete defects belong to
 // the correctness/security/deploy-safety lenses, while this report preserves the
 // scalar "how risky is this?" judgment humans often ask for before merging.

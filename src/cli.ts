@@ -10,7 +10,13 @@ import { type FlagValues, type Scanned, type ScanResult, scanArgs, scanFlags } f
 import { askFactory } from './ask.ts'
 import { type AlertState, createAttentionTracker } from './attention.ts'
 import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
-import { addBacklog, type BacklogEntry, loadBacklog, removeBacklog } from './backlog.ts'
+import {
+  addBacklog,
+  type BacklogEntry,
+  loadBacklog,
+  orderedChainEntries,
+  removeBacklog,
+} from './backlog.ts'
 import {
   BACKLOG_ADD_OPTIONS,
   CONFIG_EDIT_OPTIONS,
@@ -48,6 +54,7 @@ import {
   worktreeMarkerPath,
 } from './config.ts'
 import { openDeck } from './deck.ts'
+import { stagedUnitIntent } from './decomposition.ts'
 import { delegateCli } from './delegate.ts'
 import {
   deliveryAction,
@@ -56,6 +63,7 @@ import {
   listDeliverySkills,
   parseManualDelivery,
   type TaskDelivery,
+  TaskDeliverySchema,
 } from './delivery.ts'
 import { composeInEditor, openEditor } from './editor.ts'
 import {
@@ -176,8 +184,9 @@ COMMANDS
       be resumed later.
       One run loop per worktree is enforced with a lock; a second loop fails fast.
         --once        do one ready task, then exit (good for trying it out)
-        --until-done  exit 0 when the workstream's task completes, 2 when it
-                      blocks — the spawner-teardown contract
+        --until-done  exit 0 when the workstream completes, 2 when it blocks,
+                      3 when staged children own completion but a dirty aggregate
+                      source worktree must be retained
         --no-prompt   don't prompt inline; needs-input waits for factory add
 
   factory retry [task-id] [-m <note> | --edit]
@@ -881,6 +890,14 @@ async function taskDelivery(
             commit: task.meta.commit,
           })
           log.ok(`${task.id}: delivered`)
+        } else if (outcome.kind === 'decomposed') {
+          if (!(await delegateDecomposition(ctx, task, outcome))) {
+            const reason =
+              'staged delivery units were saved, but the first workstream did not spawn'
+            await setStatus(task, 'blocked', reason)
+            log.fail(`${task.id}: blocked — ${reason}`)
+            return 1
+          }
         } else if (outcome.kind === 'needs-input') {
           await setStatus(task, 'needs-input', 'awaiting answer — see questions.md')
           await emit(ctx.root, ctx.config.hooks, 'task.needs_input', { task: task.id })
@@ -1003,6 +1020,18 @@ async function suggestTaskSlug(ctx: WorkContext, intent: string): Promise<string
   }
 }
 
+function dispatchedDelivery(): TaskDelivery | null {
+  const raw = process.env['FACTORY_DISPATCH_DELIVERY']
+  if (!raw) {
+    return null
+  }
+  try {
+    return TaskDeliverySchema.parse(JSON.parse(raw))
+  } catch {
+    throw new Error('FACTORY_DISPATCH_DELIVERY is not a valid task delivery value')
+  }
+}
+
 async function queueNewTask(
   ctx: WorkContext,
   base: { intent: string; verify: string | null },
@@ -1023,8 +1052,9 @@ async function queueNewTask(
   const task = await addTask(ctx, directed.intent, base.verify, {
     sharpen: skipSharpen ? 'skipped' : 'pending',
     complexity: options.complexity,
-    delivery: directed.delivery ?? { mode: 'pending' },
+    delivery: directed.delivery ?? dispatchedDelivery() ?? { mode: 'pending' },
     suggestedSlug,
+    dispatchChainId: process.env['FACTORY_DISPATCH_CHAIN_ID'] ?? null,
   })
   const suffix = queuedSuffix({
     verify: base.verify,
@@ -1125,11 +1155,7 @@ async function tendParkedTasks(
   }
 }
 
-async function spawnViaCommand(
-  ctx: RepoContext,
-  entry: BacklogEntry,
-  spawn: string
-): Promise<boolean> {
+function dispatchEnv(entry: BacklogEntry): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined) {
@@ -1139,6 +1165,24 @@ async function spawnViaCommand(
   env['FACTORY_INTENT'] = entry.intent
   env['FACTORY_NAME'] = entry.id
   env['FACTORY_VERIFY'] = entry.verify ?? ''
+  if (entry.chainId) {
+    env['FACTORY_DISPATCH_CHAIN_ID'] = entry.chainId
+  }
+  if (entry.previousId) {
+    env['FACTORY_DISPATCH_PREVIOUS_NAME'] = entry.previousId
+  }
+  if (entry.delivery) {
+    env['FACTORY_DISPATCH_DELIVERY'] = JSON.stringify(entry.delivery)
+  }
+  return env
+}
+
+async function spawnViaCommand(
+  ctx: RepoContext,
+  entry: BacklogEntry,
+  spawn: string
+): Promise<boolean> {
+  const env = dispatchEnv(entry)
   const res = await run(['bash', '-lc', spawn], { cwd: ctx.mainRoot, stdin: '', env })
   if (res.code !== 0) {
     log.fail(
@@ -1157,7 +1201,37 @@ async function spawnViaCommand(
 async function spawnBuiltin(ctx: RepoContext, entry: BacklogEntry): Promise<boolean> {
   const dir = `${ctx.mainRoot}-${entry.id}`
   const branch = `factory/${entry.id}`
-  const wt = await run(['git', '-C', ctx.mainRoot, 'worktree', 'add', '-b', branch, dir], {
+  let base = 'HEAD'
+  if (entry.chainId) {
+    if (entry.previousId) {
+      base = `factory/${entry.previousId}`
+      const previous = await run(['git', '-C', ctx.mainRoot, 'rev-parse', '--verify', base], {
+        cwd: ctx.mainRoot,
+        stdin: '',
+      })
+      if (previous.code !== 0) {
+        log.fail(`cannot dispatch ordered unit ${entry.id}: previous branch ${base} is missing`)
+        return false
+      }
+    } else {
+      const fetched = await run(['git', '-C', ctx.mainRoot, 'fetch', 'origin'], {
+        cwd: ctx.mainRoot,
+        stdin: '',
+      })
+      const remoteHead = await run(
+        ['git', '-C', ctx.mainRoot, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+        { cwd: ctx.mainRoot, stdin: '' }
+      )
+      if (fetched.code !== 0 || remoteHead.code !== 0 || !remoteHead.stdout.trim()) {
+        log.fail(
+          `cannot dispatch ordered unit ${entry.id}: fetch origin and resolve its default branch first`
+        )
+        return false
+      }
+      base = remoteHead.stdout.trim()
+    }
+  }
+  const wt = await run(['git', '-C', ctx.mainRoot, 'worktree', 'add', '-b', branch, dir, base], {
     cwd: ctx.mainRoot,
     stdin: '',
   })
@@ -1166,11 +1240,12 @@ async function spawnBuiltin(ctx: RepoContext, entry: BacklogEntry): Promise<bool
     return false
   }
   const invoke = factoryInvocation()
+  const env = dispatchEnv(entry)
   const addArgs = ['add', '--name', entry.id, entry.intent]
   if (entry.verify) {
     addArgs.push('--verify', entry.verify)
   }
-  const added = await run([...invoke, ...addArgs], { cwd: dir, stdin: '' })
+  const added = await run([...invoke, ...addArgs], { cwd: dir, stdin: '', env })
   if (added.code !== 0) {
     log.fail(`factory add failed for ${entry.id}: ${(added.stderr || added.stdout).slice(0, 300)}`)
     return false
@@ -1180,7 +1255,7 @@ async function spawnBuiltin(ctx: RepoContext, entry: BacklogEntry): Promise<bool
   const quoted = invoke.map((part) => `'${part.replaceAll("'", `'\\''`)}'`).join(' ')
   const detach = await run(
     ['bash', '-lc', `nohup ${quoted} run --until-done --no-prompt >> '${logFile}' 2>&1 & disown`],
-    { cwd: dir, stdin: '' }
+    { cwd: dir, stdin: '', env }
   )
   if (detach.code !== 0) {
     log.fail(`could not start the run loop for ${entry.id}`)
@@ -1531,11 +1606,52 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
       if (await readArtifact(task, 'brief.html')) {
         log.log(`brief: factory deck ${task.id}`)
       }
+      if (task.meta.dispatchChainId) {
+        const next = await dispatchBacklog(await loadRepoContext(ctx.root), {
+          limit: 1,
+          dryRun: false,
+          chainId: task.meta.dispatchChainId,
+        })
+        if (next !== 0) {
+          await setStatus(
+            task,
+            'done',
+            `completed, but could not dispatch the next ${task.meta.dispatchChainId} unit`
+          )
+          log.fail(`${task.id}: completed, but the next staged unit could not be dispatched`)
+          await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+          await release()
+          return 2
+        }
+      }
       if (untilDone) {
         // Spawner contract: the workstream's task completed — exit 0 so the
         // surrounding tooling (tmux window, worktree teardown) can proceed.
         await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
         await release()
+        return 0
+      }
+    } else if (outcome.kind === 'decomposed') {
+      const delegated = await delegateDecomposition(ctx, task, outcome)
+      if (!delegated) {
+        const reason = 'staged delivery units were saved, but the first workstream did not spawn'
+        await setStatus(task, 'blocked', reason)
+        await emit(ctx.root, ctx.config.hooks, 'task.blocked', { task: task.id, reason })
+        log.fail(`${task.id}: blocked — ${reason}`)
+        if (untilDone) {
+          await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+          await release()
+          return 2
+        }
+      } else if (untilDone) {
+        await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+        await release()
+        if (await hasChanges(ctx.root)) {
+          log.info(
+            `${task.id}: retaining the aggregate source worktree while its staged chain runs`
+          )
+          return 3
+        }
         return 0
       }
     } else if (outcome.kind === 'needs-input') {
@@ -1851,36 +1967,24 @@ async function evalsCommand(rest: string[]): Promise<number> {
   return await sub()
 }
 
-async function dispatchCommand(scan: ScanResult<typeof DISPATCH_OPTIONS>): Promise<number> {
-  // Drain the repo backlog by spawning one workstream per item through the
-  // configured spawn command (one task = one worktree = one lifecycle, owned
-  // by the spawner tool). Factory hands the item over; it does not queue
-  // tasks internally or manage lanes.
-  const ctx = await loadRepoContext(process.cwd())
+async function dispatchBacklog(
+  ctx: RepoContext,
+  options: { limit: number; dryRun: boolean; chainId?: string }
+): Promise<number> {
   const spawn = ctx.config.dispatch?.spawn ?? null
-  if (!scan.ok) {
-    // Only --limit takes a value; a missing one is the same misuse as a bad one.
-    log.fail('--limit needs a positive number')
-    return 1
-  }
-  const dryRun = scan.flags['--dry-run']
-  const limitValue = scan.flags['--limit'][0]
-  const limit = limitValue !== undefined ? Number(limitValue) : Number.POSITIVE_INFINITY
-  if (Number.isNaN(limit) || limit <= 0) {
-    log.fail('--limit needs a positive number')
-    return 1
-  }
-  const entries = await loadBacklog(ctx)
+  const entries = orderedChainEntries(await loadBacklog(ctx), options.chainId)
   if (entries.length === 0) {
-    log.info('backlog is empty')
+    if (!options.chainId) {
+      log.info('backlog is empty')
+    }
     return 0
   }
   let spawned = 0
   for (const entry of entries) {
-    if (spawned >= limit) {
+    if (spawned >= options.limit) {
       break
     }
-    if (dryRun) {
+    if (options.dryRun) {
       log.info(`would dispatch ${entry.id}: ${entry.intent.split('\n')[0]}`)
       spawned++
       continue
@@ -1895,8 +1999,99 @@ async function dispatchCommand(scan: ScanResult<typeof DISPATCH_OPTIONS>): Promi
     log.ok(`dispatched ${entry.id}`)
     spawned++
   }
-  log.info(`${dryRun ? 'would dispatch' : 'dispatched'} ${spawned} item${spawned === 1 ? '' : 's'}`)
+  log.info(
+    `${options.dryRun ? 'would dispatch' : 'dispatched'} ${spawned} ` +
+      `item${spawned === 1 ? '' : 's'}`
+  )
   return 0
+}
+
+async function delegateDecomposition(
+  ctx: WorkContext,
+  task: Task,
+  outcome: Extract<TaskOutcome, { kind: 'decomposed' }>
+): Promise<boolean> {
+  const repoCtx = await loadRepoContext(ctx.root)
+  const delivery: TaskDelivery =
+    task.meta.delivery.mode === 'skill'
+      ? {
+          ...task.meta.delivery,
+          source: 'manual',
+          reason: `Inherited from staged parent ${task.id}.`,
+        }
+      : task.meta.delivery.mode === 'policy'
+        ? {
+            ...task.meta.delivery,
+            source: 'manual',
+            reason: `Inherited from staged parent ${task.id}.`,
+          }
+        : task.meta.delivery
+  let previousId: string | undefined
+  for (const [index, unit] of outcome.decomposition.units.entries()) {
+    const entry = await addBacklog(
+      repoCtx,
+      stagedUnitIntent({
+        parentTaskId: task.id,
+        sourceWorktree: outcome.sourceWorktree,
+        chainId: outcome.chainId,
+        unit,
+        index,
+        count: outcome.decomposition.units.length,
+      }),
+      unit.verify,
+      {
+        suggestedId: `${task.id}-${unit.name}`,
+        chainId: outcome.chainId,
+        chainOrder: index,
+        previousId,
+        delivery,
+      }
+    )
+    previousId = entry.id
+  }
+  const dispatched = await dispatchBacklog(repoCtx, {
+    limit: 1,
+    dryRun: false,
+    chainId: outcome.chainId,
+  })
+  if (dispatched !== 0) {
+    return false
+  }
+  await setStatus(
+    task,
+    'closed',
+    `delegated to ${outcome.decomposition.units.length} serial workstreams (${outcome.chainId})`
+  )
+  await emit(ctx.root, ctx.config.hooks, 'task.decomposed', {
+    task: task.id,
+    chain: outcome.chainId,
+    units: outcome.decomposition.units.length,
+  })
+  log.ok(
+    `${task.id}: delegated ${outcome.decomposition.units.length} staged units; ` +
+      'the next unit starts only after its predecessor finishes'
+  )
+  return true
+}
+
+async function dispatchCommand(scan: ScanResult<typeof DISPATCH_OPTIONS>): Promise<number> {
+  // Drain the repo backlog by spawning one workstream per item through the
+  // configured spawn command (one task = one worktree = one lifecycle, owned
+  // by the spawner tool). Factory hands the item over; it does not queue
+  // tasks internally or manage lanes.
+  const ctx = await loadRepoContext(process.cwd())
+  if (!scan.ok) {
+    // Only --limit takes a value; a missing one is the same misuse as a bad one.
+    log.fail('--limit needs a positive number')
+    return 1
+  }
+  const limitValue = scan.flags['--limit'][0]
+  const limit = limitValue !== undefined ? Number(limitValue) : Number.POSITIVE_INFINITY
+  if (Number.isNaN(limit) || limit <= 0) {
+    log.fail('--limit needs a positive number')
+    return 1
+  }
+  return dispatchBacklog(ctx, { limit, dryRun: scan.flags['--dry-run'] })
 }
 
 async function harvestCommand(scan: Scanned<typeof HARVEST_OPTIONS>): Promise<number> {

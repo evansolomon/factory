@@ -59,7 +59,7 @@ export type RunRecord = {
   task: string
   ts: string
   createdAt: string | null
-  outcome: 'done' | 'blocked' | 'needs-input' | 'retrying'
+  outcome: 'done' | 'blocked' | 'needs-input' | 'retrying' | 'decomposed'
   triage: 'trivial' | 'complex' | null
   retries: number
   verifyFirstTry: boolean | null

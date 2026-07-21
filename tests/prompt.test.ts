@@ -25,6 +25,7 @@ function taskWithProposal(): Task {
       strategyEpoch: 0,
       strategyBudget: null,
       executionOverride: null,
+      dispatchChainId: null,
       complexity: null,
       taskProfile: null,
       implementer: null,

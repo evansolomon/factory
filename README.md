@@ -157,7 +157,7 @@ task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.m
   8.5 RISK       [complex path] score plan risk and          (read-only)
                  verification focus; classify ATOMIC vs
                  STAGED execution before code is edited
-        ├─ STAGED → save decomposition.md and pause
+        ├─ STAGED → validate ordered child units, then dispatch serial worktrees
   8.6 PROTOTYPE  [complex path] best-effort autonomous       (read-only)
                  decision: create a standalone pre-impl
                  artifact only when it materially derisks
@@ -269,11 +269,17 @@ Complex plans also pass an execution-shape valve. `EXECUTION: ATOMIC` proceeds
 in the current worktree. A non-atomic or malformed first assessment gets an
 independent confirmation so one noisy classifier cannot park otherwise runnable
 work. Confirmed `EXECUTION: STAGED` means correctness, rollout order, or an
-explicit requirement needs independently delivered units; Factory writes
-`decomposition.md` and pauses before editing. This preserves the one-task/
-one-worktree model instead of implementing a prose multi-MR manifest as one mega
-diff. Dispatch the units through the backlog/fleet, or reply exactly `atomic` to
-make the consequential one-worktree override explicit.
+explicit requirement needs independently delivered units. Factory asks two
+agents (with one schema-repair attempt) for a zod-validated ordered
+decomposition, writes `decomposition.md`, and queues the units as one serial
+dispatch chain. It spawns only the first worktree; a child releases the next
+unit only after its own review, verification, commit, and configured delivery
+complete. Each child inherits the parent's delivery decision and can inspect an
+aggregate source worktree as read-only evidence. This preserves one task per
+worktree and dependency order without turning correct staging into a human
+copy/paste chore. Malformed decompositions fail closed rather than dispatching
+unsafe work. Replying exactly `atomic` remains an escape hatch for a task parked
+by an older Factory version.
 
 ## Usage
 
@@ -321,8 +327,9 @@ recursive replay fleets; the outer replay remains the source-of-truth gate.
   restarting after a Ctrl-C just resumes the interrupted task. Its lifetime = the
   tmux window's lifetime.
   - `--once` — process one ready task, then exit (for proving things out).
-  - `--until-done` — exit 0 when the task completes, 2 when it blocks (the
-    spawner-teardown contract used by dispatch).
+  - `--until-done` — exit 0 when the task completes, 2 when it blocks, or 3 when
+    staged children own completion but a dirty aggregate source worktree must be
+    retained (the spawner-teardown contract used by dispatch).
 - **`factory add --trivial`** is shorthand for `--complexity trivial`: it skips
   sharpening, persists the declared complexity in `meta.json`, and the later run
   uses the existing trivial fast path without model triage. `--complexity complex`
@@ -600,13 +607,18 @@ Fields:
   confirmation pause when the repo's rolling telemetry clears the bar — and
   reverts to confirming the moment the numbers dip. Default `null` (always
   confirm).
-- **`dispatch`** — optional override for `factory dispatch`. The zero-config
-  default spawns each backlog item as a sibling worktree on a `factory/<name>`
+- **`dispatch`** — optional override for `factory dispatch` and autonomous staged
+  delivery. The zero-config default spawns each backlog item as a sibling worktree on a `factory/<name>`
   branch running a detached `factory run --until-done` (logs under
   `$FACTORY_HOME/logs/`). Set `{ "spawn": "<command>" }` to route through your
   own tooling instead (tmux windows, custom worktree layout): one backlog item
   per spawn, `FACTORY_INTENT`/`FACTORY_NAME`/`FACTORY_VERIFY` in its env, exit 0
-  removes the item. Factory never queues tasks internally or manages lanes.
+  removes the item. Staged chains additionally pass
+  `FACTORY_DISPATCH_CHAIN_ID`, `FACTORY_DISPATCH_DELIVERY`, and (after the first
+  unit) `FACTORY_DISPATCH_PREVIOUS_NAME`; custom spawners preserve them in the
+  child Factory process and base each unit on its predecessor so successful
+  completion releases a dependency-complete successor. Ordinary backlog
+  dispatch remains parallel; confirmed staged plans use a serial chain.
 - **Config cascade note:** `agents` and `specialists` **merge per key** across the
   cascade (a worktree override of one role no longer silently resets its
   siblings), including the nested `researchers`/`reviewers`/`implementers` pools;
@@ -858,7 +870,9 @@ or jump-target behavior you want.
   ux.md                  # UX/design report, when applicable
   consolidated.md        # consolidated verdict + durable issue ledger
   consolidated.history.md # superseded verdict/ledger rounds
-  decomposition.md       # staged-plan units or rescue decomposition guidance
+  decomposition.md       # validated ordered units + autonomous dispatch chain id
+  decomposition.raw.json # first structured decomposition attempt
+  decomposition.repair.json # independent schema repair, when needed
   plan.recovery.N.md     # raw structurally revised plan from rescue
   converge.md            # latest convergence-judge output
   failures.jsonl         # persisted gate-failure history

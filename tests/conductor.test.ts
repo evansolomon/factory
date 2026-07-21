@@ -3,7 +3,6 @@ import {
   decideComplexity,
   deliveryConfirmationQuestions,
   executionShapeConsensus,
-  executionShapeQuestions,
   freshRunImplementer,
   gateCodeFixAttemptCount,
   grantsAtomicExecution,
@@ -227,14 +226,6 @@ describe('execution shape guard', () => {
     expect(grantsAtomicExecution(' ATOMIC ')).toBe(true)
     expect(grantsAtomicExecution('continue')).toBe(false)
     expect(grantsAtomicExecution(null)).toBe(false)
-  })
-
-  test('surfaces staged delivery units and the safe next actions', () => {
-    const questions = executionShapeQuestions('EXECUTION: STAGED\n1. schema\n2. producer')
-    expect(questions).toContain('multiple independently delivered units')
-    expect(questions).toContain('1. schema')
-    expect(questions).toContain('separate backlog tasks/worktrees')
-    expect(questions).toContain('`atomic`')
   })
 
   test('requires independent confirmation before parking staged or unclear plans', () => {

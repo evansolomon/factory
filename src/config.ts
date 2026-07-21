@@ -226,7 +226,9 @@ const ConfigSchema = z.object({
   // custom spawn command to route through your own tooling instead (tmux
   // windows, custom worktree layout): it runs once per item via `bash -lc` with
   // FACTORY_INTENT / FACTORY_NAME / FACTORY_VERIFY in its environment; exit 0
-  // removes the item from the backlog.
+  // removes the item from the backlog. Autonomous staged chains also pass the
+  // chain id, inherited delivery, and previous unit name so the spawner can
+  // preserve serial dependency order.
   dispatch: z
     .object({
       spawn: z.string().min(1),

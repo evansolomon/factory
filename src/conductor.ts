@@ -3,6 +3,12 @@ import { type AgentRun, agentLabel, resolveAgentEffort, runAgent } from './agent
 import { cleanCommitMessage, fallbackCommitMessage } from './commit-message.ts'
 import { type Agent, type AgentSpec, normAgent, type WorkContext } from './config.ts'
 import { buildDeckHtml } from './deck.ts'
+import {
+  type Decomposition,
+  decompositionChainId,
+  parseDecomposition,
+  renderDecomposition,
+} from './decomposition.ts'
 import { collectDelegatedUsage, delegateCommand, delegateUsageFile } from './delegate.ts'
 import {
   appendDeliveryHistory,
@@ -70,6 +76,7 @@ import {
   critiquePrompt,
   type DelegateOption,
   deckPrompt,
+  decompositionPrompt,
   deliverySelectPrompt,
   deploySafetyPrompt,
   executionShapeConfirmationPrompt,
@@ -164,6 +171,13 @@ export type TaskOutcome =
   | { ok: true }
   | { ok: false; kind: 'blocked'; reason: string; detail?: string }
   | { ok: false; kind: 'needs-input'; questions: string }
+  | {
+      ok: false
+      kind: 'decomposed'
+      chainId: string
+      decomposition: Decomposition
+      sourceWorktree: string
+    }
   | { ok: false; kind: 'retrying'; reason: string; retryAt: string; autoRetries: number }
 
 // Print a descriptive stage header and emit the `stage.change` hook, so the pane
@@ -790,7 +804,7 @@ function recordTask(
   ctx: WorkContext,
   task: Task,
   meter: Meter,
-  outcome: 'done' | 'blocked' | 'needs-input' | 'retrying',
+  outcome: 'done' | 'blocked' | 'needs-input' | 'retrying' | 'decomposed',
   stats: RunStats
 ): void {
   recordRun(ctx.metricsPath, {
@@ -1171,16 +1185,6 @@ function stuckQuestions(gate: string, reason: string, detail: string, history: s
     '',
     'Reply via `factory add`: a concrete hint for the next fix attempt,',
     '"continue" to authorize more attempts, or "stop" to abandon the task.',
-  ].join('\n')
-}
-
-export function executionShapeQuestions(assessment: string): string {
-  return [
-    'Factory stopped before implementation because the selected plan requires multiple independently delivered units.',
-    '',
-    assessment,
-    '',
-    'Dispatch the listed units as separate backlog tasks/worktrees, or reply exactly `atomic` to explicitly authorize implementing the aggregate plan in this worktree.',
   ].join('\n')
 }
 
@@ -2228,6 +2232,91 @@ async function confirmedExecutionShape(input: {
   }
 }
 
+async function runDecompositionStage(input: {
+  ctx: WorkContext
+  task: Task
+  meter: Meter
+  intent: string
+  finalPlan: string
+  assessment: string
+}): Promise<Decomposition | null> {
+  await progress(
+    input.ctx,
+    input.task,
+    'decompose',
+    'decompose — building an executable delivery chain'
+  )
+  const diffPath = (await hasChanges(input.ctx.root)) ? `${input.task.dir}/diff.patch` : null
+  if (diffPath) {
+    await writeArtifact(input.task, 'diff.patch', await worktreeDiff(input.ctx.root))
+  }
+  const agents = [input.ctx.agents.implementer, input.ctx.agents.reviewer]
+  for (const [index, agent] of agents.entries()) {
+    const output = await agentStep(
+      input.meter,
+      'decompose',
+      agentLabel(agent),
+      stageAgent(agent, {
+        root: input.ctx.root,
+        prompt: decompositionPrompt({
+          intent: input.intent,
+          finalPlan: input.finalPlan,
+          assessment: input.assessment,
+          sourceWorktree: input.ctx.root,
+          diffPath,
+          repair: index > 0,
+        }),
+        access: 'read',
+        outFile: `${input.task.dir}/${index === 0 ? 'decomposition.raw.json' : 'decomposition.repair.json'}`,
+        additionalDirs: [input.task.dir],
+      })
+    )
+    const parsed = parseDecomposition(output)
+    if (parsed) {
+      return parsed
+    }
+    log.warn(
+      `${input.task.id}: ${agentLabel(agent)} returned an invalid decomposition; ` +
+        `${index === 0 ? 'asking an independent repair agent' : 'no repair attempts remain'}`
+    )
+  }
+  return null
+}
+
+async function autonomousDecomposition(input: {
+  ctx: WorkContext
+  task: Task
+  meter: Meter
+  intent: string
+  finalPlan: string
+  assessment: string
+  stats: RunStats
+}): Promise<TaskOutcome> {
+  const decomposition = await runDecompositionStage(input)
+  if (!decomposition) {
+    logTotal(input.meter)
+    recordTask(input.ctx, input.task, input.meter, 'blocked', input.stats)
+    return {
+      ok: false,
+      kind: 'blocked',
+      reason: 'two agents could not produce a valid staged delivery chain',
+      detail:
+        'Inspect decomposition.raw.json and decomposition.repair.json. Factory did not dispatch malformed or ambiguous work units.',
+    }
+  }
+  const chainId = decompositionChainId(input.task.id, input.finalPlan)
+  await writeArtifact(input.task, 'decomposition.md', renderDecomposition(decomposition, chainId))
+  logTotal(input.meter)
+  recordTask(input.ctx, input.task, input.meter, 'decomposed', input.stats)
+  return {
+    ok: false,
+    kind: 'decomposed',
+    chainId,
+    decomposition,
+    sourceWorktree: input.ctx.root,
+  }
+}
+
 // Run a single task. A trivial task (per triage or declared metadata) takes the fast
 // path — straight to implement — while a complex one goes through the full planning ensemble.
 // Both are then reviewed, verified, committed, and delivered according to task state.
@@ -2529,7 +2618,15 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   }
   const priorDecomposition = resuming ? await readArtifact(task, 'decomposition.md') : null
   if (priorDecomposition && task.meta.executionOverride !== 'atomic') {
-    return needsInput(ctx, task, meter, stats, executionShapeQuestions(priorDecomposition))
+    return autonomousDecomposition({
+      ctx,
+      task,
+      meter,
+      intent,
+      finalPlan,
+      assessment: riskAssessment ?? priorDecomposition,
+      stats,
+    })
   }
   const executionDecision =
     task.meta.executionOverride === 'atomic'
@@ -2561,8 +2658,15 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     )
   }
   if (executionShape === 'STAGED' && task.meta.executionOverride !== 'atomic') {
-    await writeArtifact(task, 'decomposition.md', riskAssessment ?? 'EXECUTION: STAGED')
-    return needsInput(ctx, task, meter, stats, executionShapeQuestions(riskAssessment ?? ''))
+    return autonomousDecomposition({
+      ctx,
+      task,
+      meter,
+      intent,
+      finalPlan,
+      assessment: riskAssessment ?? 'EXECUTION: STAGED',
+      stats,
+    })
   }
 
   if (resuming && riskAssessment && !(await readArtifact(task, 'prototype.md'))) {
@@ -2676,8 +2780,15 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     }
     if (action.kind === 'decompose') {
       const detail = `# Structural decomposition\n\n${action.direction}\n\n## Latest failure\n\n${latestFailure}\n`
-      await writeArtifact(task, 'decomposition.md', detail)
-      return needsInput(ctx, task, meter, stats, executionShapeQuestions(detail))
+      return autonomousDecomposition({
+        ctx,
+        task,
+        meter,
+        intent,
+        finalPlan,
+        assessment: detail,
+        stats,
+      })
     }
 
     const replanned = await runReplanStage({
@@ -2723,8 +2834,15 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     riskAssessment = recoveredDecision.assessment
     if (recoveredDecision.shape !== 'ATOMIC') {
       const detail = riskAssessment || `EXECUTION: ${recoveredDecision.shape ?? 'UNKNOWN'}`
-      await writeArtifact(task, 'decomposition.md', detail)
-      return needsInput(ctx, task, meter, stats, executionShapeQuestions(detail))
+      return autonomousDecomposition({
+        ctx,
+        task,
+        meter,
+        intent,
+        finalPlan,
+        assessment: detail,
+        stats,
+      })
     }
     task.meta.strategyEpoch += 1
     task.meta.strategyBudget = null

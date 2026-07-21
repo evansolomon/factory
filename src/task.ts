@@ -120,6 +120,10 @@ const MetaSchema = z.object({
   // A staged plan is an intentional stop in the one-worktree execution model.
   // The only in-place bypass is the human's explicit `atomic` answer.
   executionOverride: z.enum(['atomic']).nullable().default(null),
+  // Set on child tasks spawned from a confirmed staged plan. A successful
+  // `run --until-done` uses it to release exactly the next unit in the serial
+  // delivery chain, so dependency ordering survives process restarts.
+  dispatchChainId: z.string().nullable().default(null),
   // Explicit complexity declared by `factory add`; null means runtime triage decides.
   complexity: TaskComplexitySchema.nullable().default(null),
   // Triage's durable task-demand profile. Complexity chooses the route; these
@@ -210,6 +214,7 @@ export type AddTaskOptions = {
   delivery?: TaskDelivery
   feedbackSourceTaskId?: string | null
   suggestedSlug?: string | null
+  dispatchChainId?: string | null
 }
 
 async function listTaskDirs(tasksDir: string): Promise<string[]> {
@@ -272,6 +277,7 @@ export async function addTask(
     strategyEpoch: 0,
     strategyBudget: null,
     executionOverride: null,
+    dispatchChainId: options.dispatchChainId ?? null,
     complexity: options.complexity ?? null,
     taskProfile: null,
     implementer: null,

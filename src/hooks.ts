@@ -20,6 +20,7 @@ export type HookEvent =
   | 'task.needs_input' // paused for the human
   | 'task.blocked' // escalated to blocked
   | 'task.retrying' // set aside for an auto-retry
+  | 'task.decomposed' // delegated into an ordered child-workstream chain
   | 'task.done' // completed (committed / shipped)
   | 'task.stale' // parked (needs-input/blocked) past the staleness window
   | 'loop.idle' // queue drained, loop waiting

@@ -4,6 +4,7 @@ import {
   convergePrompt,
   correctionPrompt,
   critiquePrompt,
+  decompositionPrompt,
   deploySafetyPrompt,
   executionShapeConfirmationPrompt,
   feedbackAnalysisPrompt,
@@ -245,6 +246,21 @@ describe('structural recovery prompts', () => {
     expect(prompt).toContain('Do not defer to the first assessment')
     expect(prompt).toContain('Multiple files or implementation steps do not make it staged')
     expect(prompt).toContain('EXECUTION: ATOMIC|STAGED')
+  })
+
+  test('decomposition produces a serial, self-contained JSON delivery chain', () => {
+    const prompt = decompositionPrompt({
+      intent: 'Task',
+      finalPlan: 'Plan',
+      assessment: 'EXECUTION: STAGED',
+      sourceWorktree: '/repo/source',
+      diffPath: '/factory/task/diff.patch',
+      repair: false,
+    })
+    expect(prompt).toContain('Factory will dispatch these units one at a time')
+    expect(prompt).toContain('/repo/source')
+    expect(prompt).toContain('/factory/task/diff.patch')
+    expect(prompt).toContain('Return ONLY one JSON object')
   })
 
   test('rescue can select plan repair or decomposition', () => {
