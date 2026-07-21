@@ -7,6 +7,8 @@ import {
   addTask,
   answeredQuestionRounds,
   appendFeedback,
+  isDelegatedTask,
+  isTerminal,
   latestAnswerValue,
   latestAnswerValueAfter,
   loadTasks,
@@ -279,6 +281,17 @@ describe('task state transitions', () => {
     expect(task?.meta.feedbackCount).toBe(0)
     expect(task?.meta.feedbackConsumed).toBe(0)
     expect(task?.meta.feedbackSourceTaskId).toBeNull()
+  })
+
+  test('delegated tasks are terminal and legacy delegation notes remain recognizable', async () => {
+    const ctx = await workContext()
+    const delegated = await addTask(ctx, 'Parent', null, { status: 'delegated' })
+    const legacy = await addTask(ctx, 'Legacy parent', null, { status: 'closed' })
+    legacy.meta.note = 'delegated to 7 serial workstreams (parent-abcd1234)'
+
+    expect(isTerminal(delegated.meta.status)).toBe(true)
+    expect(isDelegatedTask(delegated)).toBe(true)
+    expect(isDelegatedTask(legacy)).toBe(true)
   })
 
   test('legacy failure records count as code-fix failures', async () => {

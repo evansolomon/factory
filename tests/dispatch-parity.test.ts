@@ -32,7 +32,8 @@ function envWith(values: Record<string, string>): Record<string, string> {
 async function runCommand(
   cmd: string[],
   cwd: string,
-  env: Record<string, string>
+  env: Record<string, string>,
+  timeout?: number
 ): Promise<CliResult> {
   const proc = Bun.spawn(cmd, {
     cwd,
@@ -40,6 +41,7 @@ async function runCommand(
     stdout: 'pipe',
     stderr: 'pipe',
     stdin: 'ignore',
+    ...(timeout ? { timeout } : {}),
   })
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -71,7 +73,8 @@ async function sessionTasksDir(root: string, home: string): Promise<string> {
 async function writeTask(
   tasksDir: string,
   id: string,
-  status: string
+  status: string,
+  note: string | null = null
 ): Promise<{ dir: string; metaPath: string }> {
   const dir = `${tasksDir}/${id}`
   await mkdir(dir, { recursive: true })
@@ -84,19 +87,55 @@ async function writeTask(
       status,
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
+      note,
     })
   )
   await Bun.write(`${dir}/task.md`, `Fix ${id}\n`)
   return { dir, metaPath }
 }
 
-async function runFactory(args: string[], cwd: string, home: string): Promise<CliResult> {
+async function runFactory(
+  args: string[],
+  cwd: string,
+  home: string,
+  timeout?: number
+): Promise<CliResult> {
   return await runCommand(
     ['bun', cliPath, ...args],
     cwd,
-    envWith({ FACTORY_HOME: home, AGENT_WORK_EDITOR: 'true' })
+    envWith({ FACTORY_HOME: home, AGENT_WORK_EDITOR: 'true' }),
+    timeout
   )
 }
+
+describe('delegated run ownership', () => {
+  test('a restarted v0.2.11 parent exits instead of competing with its child hooks', async () => {
+    const cwd = await gitRepo()
+    const home = await tempDir('home')
+    const hookLog = `${cwd}/parent-hooks.log`
+    await Bun.write(
+      `${cwd}/.factory.json`,
+      JSON.stringify({
+        hooks: {
+          attention: [`echo attention >> ${hookLog}`],
+          'loop.idle': [`echo idle >> ${hookLog}`],
+        },
+      })
+    )
+    await writeTask(
+      await sessionTasksDir(cwd, home),
+      'parent',
+      'closed',
+      'delegated to 7 serial workstreams (parent-abcd1234)'
+    )
+
+    const result = await runFactory(['run'], cwd, home, 2_000)
+
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain('delegated chain owns completion; parent loop exiting')
+    expect(await Bun.file(hookLog).exists()).toBe(false)
+  })
+})
 
 describe('add parsing parity', () => {
   test('dispatched children persist chain and inherited delivery state', async () => {

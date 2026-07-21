@@ -1,4 +1,32 @@
+import { open } from 'node:fs/promises'
+
 export type RunResult = { stdout: string; stderr: string; code: number }
+
+// Start a long-lived background process in its own session/process group. Direct
+// spawning matters here: `nohup ... &` inside a non-interactive shell can leave
+// the child in the caller's foreground process group, so Ctrl-C reaches work the
+// caller was told had been detached. The append-only fd also lets the child
+// outlive this process without keeping any Bun pipe handles referenced.
+export async function spawnDetached(
+  cmd: string[],
+  opts: { cwd: string; logFile: string; env: Record<string, string> }
+): Promise<number> {
+  const logFile = await open(opts.logFile, 'a')
+  try {
+    const proc = Bun.spawn(cmd, {
+      cwd: opts.cwd,
+      env: opts.env,
+      detached: true,
+      stdin: 'ignore',
+      stdout: logFile.fd,
+      stderr: logFile.fd,
+    })
+    proc.unref()
+    return proc.pid
+  } finally {
+    await logFile.close()
+  }
+}
 
 // Run a command, feeding `stdin` and capturing stdout/stderr. We pass agent
 // prompts on stdin rather than argv to avoid shell escaping and length limits.
