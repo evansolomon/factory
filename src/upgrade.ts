@@ -4,12 +4,14 @@ import { type RunResult, run } from './exec.ts'
 import { log } from './log.ts'
 import { FACTORY_VERSION } from './version.ts'
 
-const LATEST_RELEASE_URL = 'https://api.github.com/repos/evansolomon/factory/releases/latest'
+const LATEST_RELEASE_URL = 'https://github.com/evansolomon/factory/releases/latest'
 const INSTALLER_URL = 'https://raw.githubusercontent.com/evansolomon/factory/master/install.sh'
 
-const LatestReleaseSchema = z.object({
-  tag_name: z.string().min(1),
+const LatestReleaseUrlSchema = z.object({
+  origin: z.literal('https://github.com'),
+  pathname: z.string().regex(/^\/evansolomon\/factory\/releases\/tag\/[^/]+$/),
 })
+const ReleaseTagSchema = z.string().min(1)
 
 export type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -45,10 +47,9 @@ export async function fetchLatestRelease(
   let response: Response
   try {
     response = await fetchImpl(LATEST_RELEASE_URL, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'factory',
-      },
+      method: 'HEAD',
+      redirect: 'follow',
+      headers: { 'User-Agent': 'factory' },
       signal: opts?.signal,
     })
   } catch (err) {
@@ -61,21 +62,31 @@ export async function fetchLatestRelease(
     )
   }
 
-  let body: unknown
+  let finalUrl: URL
   try {
-    body = await response.json()
+    finalUrl = new URL(response.url)
   } catch {
-    throw new UpgradeError('malformed GitHub release response: invalid JSON')
+    throw new UpgradeError('malformed GitHub latest-release redirect: invalid URL')
   }
 
-  const parsed = LatestReleaseSchema.safeParse(body)
+  const parsed = LatestReleaseUrlSchema.safeParse(finalUrl)
   if (!parsed.success) {
-    throw new UpgradeError('malformed GitHub release response: invalid or missing tag_name')
+    throw new UpgradeError('malformed GitHub latest-release redirect: invalid or missing tag')
+  }
+  let decodedTag: string
+  try {
+    decodedTag = decodeURIComponent(parsed.data.pathname.split('/').pop() ?? '')
+  } catch {
+    throw new UpgradeError('malformed GitHub latest-release redirect: invalid tag encoding')
+  }
+  const tag = ReleaseTagSchema.safeParse(decodedTag)
+  if (!tag.success) {
+    throw new UpgradeError('malformed GitHub latest-release redirect: invalid or missing tag')
   }
 
   return {
-    tagName: parsed.data.tag_name,
-    version: normalizeGitHubReleaseVersion(parsed.data.tag_name),
+    tagName: tag.data,
+    version: normalizeGitHubReleaseVersion(tag.data),
   }
 }
 

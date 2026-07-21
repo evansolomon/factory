@@ -25,8 +25,16 @@ async function tempDir(prefix: string): Promise<string> {
   return await mkdtemp(`${tmpdir()}/factory-${prefix}-`)
 }
 
+function releaseResponse(version: string): Response {
+  const response = new Response(null)
+  Object.defineProperty(response, 'url', {
+    value: `https://github.com/evansolomon/factory/releases/tag/${encodeURIComponent(`v${version}`)}`,
+  })
+  return response
+}
+
 function responseFetch(version: string): FetchImpl {
-  return async () => Response.json({ tag_name: `v${version}` })
+  return async () => releaseResponse(version)
 }
 
 function baseOpts(stateFile: string): MaybeAutoUpgradeOpts {
@@ -231,21 +239,21 @@ describe('auto-upgrade release check and prompt', () => {
       now,
       fetchImpl: async () => {
         missingFetches += 1
-        return Response.json({ tag_name: 'v0.1.0' })
+        return releaseResponse('0.1.0')
       },
     })
     await runAuto(old, {
       now,
       fetchImpl: async () => {
         oldFetches += 1
-        return Response.json({ tag_name: 'v0.1.0' })
+        return releaseResponse('0.1.0')
       },
     })
     await runAuto(recent, {
       now,
       fetchImpl: async () => {
         recentFetches += 1
-        return Response.json({ tag_name: 'v0.1.0' })
+        return releaseResponse('0.1.0')
       },
     })
 
