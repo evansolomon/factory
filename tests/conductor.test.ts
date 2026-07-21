@@ -2,8 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import {
   decideComplexity,
   deliveryConfirmationQuestions,
+  executionShapeConsensus,
+  executionShapeQuestions,
   freshRunImplementer,
   gateCodeFixAttemptCount,
+  grantsAtomicExecution,
   implementationAttemptCount,
   resolveDeliveryProposal,
   resolveImplementer,
@@ -124,6 +127,7 @@ describe('implementationAttemptCount', () => {
     const failures: Failure[] = [
       {
         attempt: 0,
+        strategyEpoch: 0,
         gate: 'review',
         summary: 'missing resume parameter',
         detail: 'review failed',
@@ -131,6 +135,7 @@ describe('implementationAttemptCount', () => {
       },
       {
         attempt: 1,
+        strategyEpoch: 0,
         gate: 'verify',
         summary: 'test database restarting',
         detail: 'verify failed',
@@ -138,6 +143,7 @@ describe('implementationAttemptCount', () => {
       },
       {
         attempt: 1,
+        strategyEpoch: 0,
         gate: 'verify',
         summary: 'test database oom',
         detail: 'verify failed again',
@@ -147,6 +153,30 @@ describe('implementationAttemptCount', () => {
 
     expect(implementationAttemptCount(failures)).toBe(1)
   })
+
+  test('counts only the current strategy epoch', () => {
+    const failures: Failure[] = [
+      {
+        attempt: 0,
+        strategyEpoch: 0,
+        gate: 'review',
+        summary: 'old strategy',
+        detail: 'failed',
+        remediation: 'code-fix',
+      },
+      {
+        attempt: 0,
+        strategyEpoch: 1,
+        gate: 'review',
+        summary: 'new strategy',
+        detail: 'failed differently',
+        remediation: 'code-fix',
+      },
+    ]
+
+    expect(implementationAttemptCount(failures, 0)).toBe(1)
+    expect(implementationAttemptCount(failures, 1)).toBe(1)
+  })
 })
 
 describe('gateCodeFixAttemptCount', () => {
@@ -154,6 +184,7 @@ describe('gateCodeFixAttemptCount', () => {
     const failures: Failure[] = [
       {
         attempt: 0,
+        strategyEpoch: 0,
         gate: 'review',
         summary: 'first review defect',
         detail: 'review failed',
@@ -161,6 +192,7 @@ describe('gateCodeFixAttemptCount', () => {
       },
       {
         attempt: 1,
+        strategyEpoch: 0,
         gate: 'review',
         summary: 'second review defect',
         detail: 'review failed again',
@@ -168,6 +200,7 @@ describe('gateCodeFixAttemptCount', () => {
       },
       {
         attempt: 2,
+        strategyEpoch: 0,
         gate: 'commit',
         summary: 'lint hook failed',
         detail: 'git commit failed',
@@ -175,6 +208,7 @@ describe('gateCodeFixAttemptCount', () => {
       },
       {
         attempt: 3,
+        strategyEpoch: 0,
         gate: 'commit',
         summary: 'temporary hook environment failure',
         detail: 'git commit failed again',
@@ -184,6 +218,31 @@ describe('gateCodeFixAttemptCount', () => {
 
     expect(gateCodeFixAttemptCount(failures, 'commit')).toBe(1)
     expect(gateCodeFixAttemptCount(failures, 'review')).toBe(2)
+  })
+})
+
+describe('execution shape guard', () => {
+  test('requires an exact explicit atomic override', () => {
+    expect(grantsAtomicExecution('atomic')).toBe(true)
+    expect(grantsAtomicExecution(' ATOMIC ')).toBe(true)
+    expect(grantsAtomicExecution('continue')).toBe(false)
+    expect(grantsAtomicExecution(null)).toBe(false)
+  })
+
+  test('surfaces staged delivery units and the safe next actions', () => {
+    const questions = executionShapeQuestions('EXECUTION: STAGED\n1. schema\n2. producer')
+    expect(questions).toContain('multiple independently delivered units')
+    expect(questions).toContain('1. schema')
+    expect(questions).toContain('separate backlog tasks/worktrees')
+    expect(questions).toContain('`atomic`')
+  })
+
+  test('requires independent confirmation before parking staged or unclear plans', () => {
+    expect(executionShapeConsensus('ATOMIC', null)).toBe('ATOMIC')
+    expect(executionShapeConsensus('STAGED', 'ATOMIC')).toBe('ATOMIC')
+    expect(executionShapeConsensus('STAGED', 'STAGED')).toBe('STAGED')
+    expect(executionShapeConsensus(null, 'ATOMIC')).toBe('ATOMIC')
+    expect(executionShapeConsensus(null, null)).toBeNull()
   })
 })
 

@@ -1,10 +1,26 @@
 import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
 import { $ } from 'bun'
 import { z } from 'zod'
 import { run } from './exec.ts'
 import { type GuidanceRecord, GuidanceRecordSchema } from './guidance.ts'
 import { log } from './log.ts'
+
+export const EVAL_REPLAY_ENV = 'FACTORY_EVAL_REPLAY'
+
+export function evalReplayActive(env: Record<string, string | undefined> = process.env): boolean {
+  return env[EVAL_REPLAY_ENV] === '1'
+}
+
+export function evalReplayGuidance(
+  env: Record<string, string | undefined> = process.env
+): string | null {
+  if (!evalReplayActive(env)) {
+    return null
+  }
+  return 'Active replay invariant: this task is already running inside the outer `factory evals run`. Do not invoke any eval replay command, copy or seed eval candidates, or change `FACTORY_HOME` to expose candidates. The outer harness is the only replay gate. Run the normal deterministic repository checks and report replay verification as owned by the outer harness.'
+}
 
 // The eval replay runner — the missing consumer of the harvested eval corpus.
 // Every terminal task was captured as {spec, verify, baseCommit, reference diff}
@@ -101,6 +117,7 @@ export type EvalResult = {
   id: string
   expectedOutcome: string
   replayStatus: string
+  replayReason: string | null
   outcomeMatch: boolean
   fileJaccard: number
   replayFiles: string[]
@@ -111,19 +128,22 @@ export type EvalResult = {
 
 // How factory re-invokes itself: the compiled binary IS the entrypoint; a
 // source run needs `bun <cli.ts>`.
-export function factoryInvocation(): string[] {
-  const script = process.argv[1]
-  return script && /\.(ts|js|mjs)$/.test(script) ? [process.execPath, script] : [process.execPath]
+export function factoryInvocation(
+  script: string | undefined = process.argv[1],
+  executable: string = process.execPath
+): string[] {
+  return script && /\.(ts|js|mjs)$/.test(script) ? [executable, resolve(script)] : [executable]
 }
 
 const ReplayMetaSchema = z.object({
   status: z.string(),
   commit: z.string().nullable().default(null),
+  note: z.string().nullable().default(null),
 })
 
 async function replayTaskState(
   home: string
-): Promise<{ status: string; commit: string | null } | null> {
+): Promise<{ status: string; commit: string | null; note: string | null } | null> {
   const sessions = `${home}/sessions`
   try {
     for (const session of await readdir(sessions)) {
@@ -135,7 +155,11 @@ async function replayTaskState(
             .catch(() => null)
         )
         if (parsed.success) {
-          return { status: parsed.data.status, commit: parsed.data.commit }
+          return {
+            status: parsed.data.status,
+            commit: parsed.data.commit,
+            note: parsed.data.note,
+          }
         }
       }
     }
@@ -156,6 +180,7 @@ export async function runEvalCase(
     id: c.id,
     expectedOutcome: c.outcome,
     replayStatus: 'error',
+    replayReason: null,
     outcomeMatch: false,
     fileJaccard: 0,
     replayFiles: [],
@@ -163,6 +188,9 @@ export async function runEvalCase(
     durationMs: Date.now() - started,
     error,
   })
+  if (evalReplayActive()) {
+    return fail('nested eval replay disabled inside an active replay')
+  }
   if (c.outcome === 'corrected' || !c.diff) {
     return fail('corrected/paired cases are not replayable yet — skipped')
   }
@@ -197,6 +225,7 @@ export async function runEvalCase(
       }
     }
     env['FACTORY_HOME'] = home
+    env[EVAL_REPLAY_ENV] = '1'
     await seedGuidance(home, opts.guidance ?? [])
     const invoke = factoryInvocation()
     const addArgs = c.verify
@@ -227,6 +256,7 @@ export async function runEvalCase(
       id: c.id,
       expectedOutcome: c.outcome,
       replayStatus: status,
+      replayReason: state?.note ?? null,
       outcomeMatch: c.outcome === 'done' ? status === 'done' : status !== 'done',
       fileJaccard: fileJaccard(replayFiles, referenceFiles),
       replayFiles: [...replayFiles].sort(),

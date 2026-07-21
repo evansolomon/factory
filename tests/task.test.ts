@@ -269,6 +269,9 @@ describe('task state transitions', () => {
     expect(task?.meta.resume).toBe(false)
     expect(task?.meta.resumeKind).toBeNull()
     expect(task?.meta.autoRetries).toBe(0)
+    expect(task?.meta.strategyEpoch).toBe(0)
+    expect(task?.meta.strategyBudget).toBeNull()
+    expect(task?.meta.executionOverride).toBeNull()
     expect(task?.meta.complexity).toBeNull()
     expect(task?.meta.implementer).toBeNull()
     expect(task?.meta.delivery).toEqual({ mode: 'pending' })
@@ -644,6 +647,7 @@ describe('phase-0 measurement contracts', () => {
     )
     await appendFailure(task, {
       attempt: 1,
+      strategyEpoch: 0,
       gate: 'review',
       summary: 'new',
       detail: 'new',
@@ -653,6 +657,7 @@ describe('phase-0 measurement contracts', () => {
     const failures = await readFailures(task)
     expect(failures).toHaveLength(2)
     expect(failures[0]?.at).toBeUndefined()
+    expect(failures[0]?.strategyEpoch).toBe(0)
     expect(typeof failures[1]?.at).toBe('string')
   })
 

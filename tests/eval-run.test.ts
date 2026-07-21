@@ -1,7 +1,34 @@
 import { describe, expect, test } from 'bun:test'
-import { diffFileSet, EvalCaseSchema, fileJaccard } from '../src/eval-run.ts'
+import { resolve } from 'node:path'
+import {
+  diffFileSet,
+  EvalCaseSchema,
+  evalReplayActive,
+  evalReplayGuidance,
+  factoryInvocation,
+  fileJaccard,
+} from '../src/eval-run.ts'
 
 describe('eval replay scoring', () => {
+  test('recognizes only an explicit active replay environment', () => {
+    expect(evalReplayActive({ FACTORY_EVAL_REPLAY: '1' })).toBe(true)
+    expect(evalReplayActive({ FACTORY_EVAL_REPLAY: '0' })).toBe(false)
+    expect(evalReplayActive({})).toBe(false)
+    expect(evalReplayGuidance({})).toBeNull()
+    expect(evalReplayGuidance({ FACTORY_EVAL_REPLAY: '1' })).toContain(
+      'Do not invoke any eval replay command'
+    )
+    expect(evalReplayGuidance({ FACTORY_EVAL_REPLAY: '1' })).toContain('change `FACTORY_HOME`')
+  })
+
+  test('source replays keep the current factory entrypoint when cwd changes', () => {
+    expect(factoryInvocation('src/cli.ts', '/usr/bin/bun')).toEqual([
+      '/usr/bin/bun',
+      resolve('src/cli.ts'),
+    ])
+    expect(factoryInvocation('/opt/factory', '/opt/factory')).toEqual(['/opt/factory'])
+  })
+
   test('diffFileSet extracts touched files from unified and no-index diffs', () => {
     const diff = [
       'diff --git a/src/a.ts b/src/a.ts',

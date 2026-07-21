@@ -5,14 +5,17 @@ import {
   correctionPrompt,
   critiquePrompt,
   deploySafetyPrompt,
+  executionShapeConfirmationPrompt,
   feedbackAnalysisPrompt,
   fixPrompt,
   implementPrompt,
   planPrompt,
+  planRiskPrompt,
   postmortemPrompt,
   prototypePrompt,
   reconcilePrompt,
   remediatePrompt,
+  replanPrompt,
   rescuePrompt,
   reviewPrompt,
   riskReviewPrompt,
@@ -159,6 +162,8 @@ describe('feedback prompts', () => {
     expect(prompt).toContain(guidance)
     expect(prompt).toContain('## Human feedback analysis')
     expect(prompt).toContain('The root cause is narrow buttons.')
+    expect(prompt).toContain('`diff --git`')
+    expect(prompt).not.toContain('```diff')
   })
 
   test('implementPrompt keeps feedback analysis distinct from learned guidance', () => {
@@ -222,6 +227,54 @@ describe('feedback prompts', () => {
 
     expect(prompt).toContain('## Prototype artifact (advisory)')
     expect(prompt).toContain('Decision: created')
+  })
+})
+
+describe('structural recovery prompts', () => {
+  test('plan risk classifies executable delivery shape', () => {
+    const prompt = planRiskPrompt('Task', 'Plan')
+    expect(prompt).toContain('EXECUTION: ATOMIC|STAGED')
+    expect(prompt).toContain(
+      'A prose cutting manifest does not make an aggregate implementation atomic'
+    )
+    expect(prompt).toContain('## Delivery units')
+  })
+
+  test('execution shape confirmation is independent and requires a concrete boundary', () => {
+    const prompt = executionShapeConfirmationPrompt('Task', 'Plan', 'EXECUTION: STAGED')
+    expect(prompt).toContain('Do not defer to the first assessment')
+    expect(prompt).toContain('Multiple files or implementation steps do not make it staged')
+    expect(prompt).toContain('EXECUTION: ATOMIC|STAGED')
+  })
+
+  test('rescue can select plan repair or decomposition', () => {
+    const prompt = rescuePrompt({
+      intent: 'Task',
+      finalPlan: 'Plan',
+      verify: null,
+      diffPath: '/factory/task/diff.patch',
+      failures: ['review: mutation boundary incomplete'],
+      latestFailure: 'another mutation path bypasses invalidation',
+      guidance: null,
+    })
+    expect(prompt).toContain('REPLAN')
+    expect(prompt).toContain('DECOMPOSE')
+    expect(prompt).toContain('/factory/task/diff.patch')
+    expect(prompt).not.toContain('```diff')
+  })
+
+  test('replan preserves the goal and classifies the replacement plan', () => {
+    const prompt = replanPrompt({
+      intent: 'Improve affinity',
+      finalPlan: 'Patch callbacks',
+      diffPath: '/factory/task/diff.patch',
+      failures: ['review: mutation boundary incomplete'],
+      direction: 'Model the complete mutation boundary first.',
+      answers: null,
+    })
+    expect(prompt).toContain("Preserve the task's settled goal")
+    expect(prompt).toContain('what to keep, change, or remove')
+    expect(prompt).toContain('EXECUTION: ATOMIC|STAGED')
   })
 })
 
@@ -418,7 +471,7 @@ describe('settled human answers', () => {
       intent: 'Task',
       finalPlan: 'Plan',
       verify: null,
-      currentDiff: 'diff',
+      diffPath: '/factory/task/diff.patch',
       failures: [],
       latestFailure: 'review failed',
       guidance: null,
@@ -489,5 +542,28 @@ describe('review diff evidence', () => {
       expect(prompt).toContain('git diff --stat HEAD')
       expect(prompt).not.toContain('```diff')
     }
+  })
+
+  test('fix rounds compare the current and previously reviewed snapshots', () => {
+    const prompt = reviewPrompt(
+      'Task',
+      null,
+      'Plan',
+      diffPath,
+      baselinePath,
+      null,
+      null,
+      'prior verdict',
+      '/factory/tasks/example/diff.previous.patch'
+    )
+    expect(prompt).toContain('diff.previous.patch')
+    expect(prompt).toContain('Do not treat every fix round as an unrelated fresh audit')
+  })
+
+  test('consolidation requires a durable issue ledger and coverage record', () => {
+    const prompt = consolidatePrompt('Task', 'Plan', diffPath, [], baselinePath, null)
+    expect(prompt).toContain('## Issue ledger')
+    expect(prompt).toContain('OPEN|RESOLVED|SUPERSEDED')
+    expect(prompt).toContain('## Coverage')
   })
 })

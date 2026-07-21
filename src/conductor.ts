@@ -23,6 +23,7 @@ import {
   resolveStageEffort,
   type TaskProfile,
 } from './effort.ts'
+import { evalReplayGuidance } from './eval-run.ts'
 import { run } from './exec.ts'
 import {
   type AuthorCommitSubjects,
@@ -50,6 +51,7 @@ import { log } from './log.ts'
 import {
   parseConvergenceVerdict,
   parseDeliverySelection,
+  parseExecutionShape,
   parseGateFix,
   parseReconcileDecision,
   parseRemedy,
@@ -70,6 +72,7 @@ import {
   deckPrompt,
   deliverySelectPrompt,
   deploySafetyPrompt,
+  executionShapeConfirmationPrompt,
   feedbackAnalysisPrompt,
   feedbackPrompt,
   fixPrompt,
@@ -83,6 +86,7 @@ import {
   quickFixPrompt,
   reconcilePrompt,
   remediatePrompt,
+  replanPrompt,
   rescuePrompt,
   researchPrompt,
   researchScoutPrompt,
@@ -740,13 +744,23 @@ export function freshRunImplementer(
   return decision.source === 'triage' ? resolveImplementer(triageMarker, pool) : null
 }
 
-export function implementationAttemptCount(failures: Failure[]): number {
-  return failures.filter((failure) => failure.remediation === 'code-fix').length
+export function implementationAttemptCount(failures: Failure[], strategyEpoch: number = 0): number {
+  return failures.filter(
+    (failure) => failure.remediation === 'code-fix' && failure.strategyEpoch === strategyEpoch
+  ).length
 }
 
-export function gateCodeFixAttemptCount(failures: Failure[], gate: string): number {
-  return failures.filter((failure) => failure.gate === gate && failure.remediation === 'code-fix')
-    .length
+export function gateCodeFixAttemptCount(
+  failures: Failure[],
+  gate: string,
+  strategyEpoch: number = 0
+): number {
+  return failures.filter(
+    (failure) =>
+      failure.gate === gate &&
+      failure.remediation === 'code-fix' &&
+      failure.strategyEpoch === strategyEpoch
+  ).length
 }
 
 export function resumeUserFacing(
@@ -762,7 +776,12 @@ async function stageGuidanceForRun(ctx: WorkContext, meter: Meter): Promise<Stag
     log.warn(`guidance load failed: ${err instanceof Error ? err.message : err}`)
     return []
   })
-  return (stage) => renderGuidanceBlock(applicableGuidance(guidance, ctx, stage), meter.guidanceIds)
+  const replayGuidance = evalReplayGuidance()
+  return (stage) =>
+    combineGuidance(
+      renderGuidanceBlock(applicableGuidance(guidance, ctx, stage), meter.guidanceIds),
+      replayGuidance
+    )
 }
 
 // Persist one telemetry record for this pass. Best-effort: recordRun never throws,
@@ -933,6 +952,8 @@ async function needsInput(
 
 type FailureAction =
   | { kind: 'continue' }
+  | { kind: 'replan'; direction: string }
+  | { kind: 'decompose'; direction: string }
   | { kind: 'retry'; reason: string }
   | { kind: 'needs-input'; questions: string }
   | { kind: 'terminal' }
@@ -967,6 +988,18 @@ async function judgeFailure(
   switch (verdict) {
     case 'CONTINUE_CODE_FIX':
       return { action: { kind: 'continue' }, summary }
+    case 'REPLAN':
+    case 'DECOMPOSE':
+      // Structural actions are reserved for the rescue strategist, which sees
+      // the selected plan and current diff. A normal convergence judge lacks
+      // enough context to safely reshape the task.
+      return {
+        action: {
+          kind: 'needs-input',
+          questions: `${NEEDS_INPUT_PREAMBLE}\n\nFactory requested structural recovery without running rescue. Review the latest failure and reply with guidance.`,
+        },
+        summary,
+      }
     case 'RETRY_LATER':
       return { action: { kind: 'retry', reason: summary }, summary }
     case 'ASK_HUMAN': {
@@ -1068,6 +1101,9 @@ async function setAside(
         )
       case 'needs-input':
         return needsInput(ctx, task, meter, stats, judged.action.questions)
+      case 'replan':
+      case 'decompose':
+        return needsInput(ctx, task, meter, stats, judged.action.direction)
       case 'terminal':
         return await blocked(
           ctx,
@@ -1138,6 +1174,27 @@ function stuckQuestions(gate: string, reason: string, detail: string, history: s
   ].join('\n')
 }
 
+export function executionShapeQuestions(assessment: string): string {
+  return [
+    'Factory stopped before implementation because the selected plan requires multiple independently delivered units.',
+    '',
+    assessment,
+    '',
+    'Dispatch the listed units as separate backlog tasks/worktrees, or reply exactly `atomic` to explicitly authorize implementing the aggregate plan in this worktree.',
+  ].join('\n')
+}
+
+export function grantsAtomicExecution(note: string | null): boolean {
+  return note?.trim().toLowerCase() === 'atomic'
+}
+
+export function executionShapeConsensus(
+  first: 'ATOMIC' | 'STAGED' | null,
+  confirmation: 'ATOMIC' | 'STAGED' | null
+): 'ATOMIC' | 'STAGED' | null {
+  return first === 'ATOMIC' ? first : confirmation
+}
+
 // After a gate failure, decide what to do next. The convergence judge reads the
 // whole failure history and chooses code-fix, retry-later, ask-human, or
 // terminal — but two bounds are enforced mechanically, not delegated to the
@@ -1145,11 +1202,11 @@ function stuckQuestions(gate: string, reason: string, detail: string, history: s
 //   1. STUCK: the failure is byte-identical to the previous one AND the fix
 //      attempt didn't change the worktree → re-running is forbidden; ask the
 //      human instead of guessing again.
-//   2. `hardCap` is a REAL cap on fix attempts: at the cap, continue is not an
-//      available action (the judge historically kept voting CONTINUE past every
-//      "hard" cap — one real task burned 84 identical attempts / 611M tokens).
-// Both bounds fail toward the human (a question is recoverable; silent churn
-// and wrongly-terminal blocks are not). The failure is logged either way.
+//   2. `hardCap` is a REAL cap on one strategy: the normal judge cannot extend
+//      it. Structural rescue gets one bounded chance to replan, decompose, or
+//      authorize one materially different fix before human attention.
+// The unchanged-failure bound fails toward the human; the cap fails toward
+// structural rescue. Neither permits silent churn. The failure is logged either way.
 async function assessFailure(
   ctx: WorkContext,
   task: Task,
@@ -1164,7 +1221,16 @@ async function assessFailure(
   const fingerprint = failureFingerprint(gate, detail)
   const diffHash = await worktreeDiffHash(ctx.root)
   const record = async (summary: string, remediation: 'code-fix' | 'backoff'): Promise<void> => {
-    const entry: Failure = { attempt, gate, summary, detail, remediation, fingerprint, diffHash }
+    const entry: Failure = {
+      attempt,
+      strategyEpoch: task.meta.strategyEpoch,
+      gate,
+      summary,
+      detail,
+      remediation,
+      fingerprint,
+      diffHash,
+    }
     failures.push(entry)
     await appendFailure(task, entry)
   }
@@ -1207,18 +1273,10 @@ async function assessFailure(
   await record(judged.summary, judged.action.kind === 'retry' ? 'backoff' : 'code-fix')
   if (atCap && judged.action.kind === 'continue') {
     log.warn(
-      `${task.id}: fix-attempt cap ${hardCap} reached; overriding the judge's CONTINUE and ` +
-        'asking the human'
+      `${task.id}: fix-attempt cap ${hardCap} reached; routing the judge's CONTINUE ` +
+        'through structural rescue'
     )
-    return {
-      kind: 'needs-input',
-      questions: stuckQuestions(
-        gate,
-        `the fix-attempt cap (retries: ${hardCap}) is spent`,
-        detail,
-        failures.map((f) => `${f.gate}: ${f.summary}`)
-      ),
-    }
+    return { kind: 'terminal' }
   }
   return judged.action
 }
@@ -1274,7 +1332,7 @@ async function rescueTerminalFailure(input: {
         intent: input.intent,
         finalPlan: input.finalPlan,
         verify: input.verify,
-        currentDiff: await worktreeDiff(input.ctx.root),
+        diffPath: `${input.task.dir}/diff.patch`,
         failures: input.failures.map((f) => `${f.gate}: ${f.summary}`),
         latestFailure: input.latestFailure,
         guidance: input.guidance,
@@ -1282,6 +1340,7 @@ async function rescueTerminalFailure(input: {
       }),
       access: 'read',
       outFile: `${input.task.dir}/rescue.md`,
+      additionalDirs: [input.task.dir],
     })
   )
   const summary = markerText(out, 'SUMMARY') ?? firstLine(out).slice(0, 200)
@@ -1291,6 +1350,7 @@ async function rescueTerminalFailure(input: {
       const detail = `Rescue direction:\n${next}\n\nOriginal terminal failure:\n${input.latestFailure}`
       const entry: Failure = {
         attempt: input.attempt,
+        strategyEpoch: input.task.meta.strategyEpoch,
         gate: 'rescue',
         summary: next.slice(0, 200),
         detail,
@@ -1300,6 +1360,10 @@ async function rescueTerminalFailure(input: {
       await appendFailure(input.task, entry)
       return { kind: 'continue' }
     }
+    case 'REPLAN':
+      return { kind: 'replan', direction: next }
+    case 'DECOMPOSE':
+      return { kind: 'decompose', direction: next }
     case 'RETRY_LATER':
       return { kind: 'retry', reason: next }
     case 'ASK_HUMAN': {
@@ -1313,6 +1377,7 @@ async function rescueTerminalFailure(input: {
         )
         const entry: Failure = {
           attempt: input.attempt,
+          strategyEpoch: input.task.meta.strategyEpoch,
           gate: 'rescue',
           summary: `re-derived an already-answered question; the standing answer applies`,
           detail: `The human already answered this question (${answered.answeredAt}):\n${answered.answer}\n\nOriginal terminal failure:\n${input.latestFailure}`,
@@ -2086,6 +2151,83 @@ async function runPrototypeStage(
   }
 }
 
+function withoutExecutionMarker(plan: string): string {
+  return plan.replace(/^EXECUTION:\s*(?:ATOMIC|STAGED)\s*$/gim, '').trim()
+}
+
+async function runReplanStage(input: {
+  ctx: WorkContext
+  task: Task
+  meter: Meter
+  intent: string
+  finalPlan: string
+  failures: Failure[]
+  direction: string
+  answers: string | null
+}): Promise<{ plan: string; shape: 'ATOMIC' | 'STAGED' | null }> {
+  await progress(input.ctx, input.task, 'replan', 'replan — replacing the failing strategy')
+  const nextEpoch = input.task.meta.strategyEpoch + 1
+  const output = await agentStep(
+    input.meter,
+    'replan',
+    agentLabel(input.ctx.agents.implementer),
+    stageAgent(input.ctx.agents.implementer, {
+      root: input.ctx.root,
+      prompt: replanPrompt({
+        intent: input.intent,
+        finalPlan: input.finalPlan,
+        diffPath: `${input.task.dir}/diff.patch`,
+        failures: input.failures.map((failure) => `${failure.gate}: ${failure.summary}`),
+        direction: input.direction,
+        answers: input.answers,
+      }),
+      access: 'read',
+      outFile: `${input.task.dir}/plan.recovery.${nextEpoch}.md`,
+      additionalDirs: [input.task.dir],
+    })
+  )
+  return { plan: withoutExecutionMarker(output), shape: parseExecutionShape(output) }
+}
+
+async function confirmedExecutionShape(input: {
+  ctx: WorkContext
+  task: Task
+  meter: Meter
+  intent: string
+  finalPlan: string
+  assessment: string
+}): Promise<{ shape: 'ATOMIC' | 'STAGED' | null; assessment: string }> {
+  const first = parseExecutionShape(input.assessment)
+  if (first === 'ATOMIC') {
+    return { shape: first, assessment: input.assessment }
+  }
+  await progress(
+    input.ctx,
+    input.task,
+    'shape',
+    `shape — independently confirming ${first === 'STAGED' ? 'staged delivery' : 'execution shape'}`
+  )
+  const output = await agentStep(
+    input.meter,
+    'shape',
+    agentLabel(input.ctx.agents.implementer),
+    stageAgent(input.ctx.agents.implementer, {
+      root: input.ctx.root,
+      prompt: executionShapeConfirmationPrompt(input.intent, input.finalPlan, input.assessment),
+      access: 'read',
+      outFile: `${input.task.dir}/risk.shape.md`,
+    })
+  )
+  const confirmed = executionShapeConsensus(first, parseExecutionShape(output))
+  if (first === 'STAGED' && confirmed === 'ATOMIC') {
+    log.warn(`${input.task.id}: execution-shape assessors disagreed; proceeding as atomic`)
+  }
+  return {
+    shape: confirmed,
+    assessment: `${input.assessment}\n\n## Independent execution-shape confirmation\n${output}`,
+  }
+}
+
 // Run a single task. A trivial task (per triage or declared metadata) takes the fast
 // path — straight to implement — while a complex one goes through the full planning ensemble.
 // Both are then reviewed, verified, committed, and delivered according to task state.
@@ -2361,6 +2503,72 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     }
   }
 
+  // Plans produced before execution-shape classification existed get assessed
+  // lazily on resume. This keeps old tasks resumable without silently treating
+  // a potentially staged plan as one aggregate change.
+  if (resuming && riskAssessment && parseExecutionShape(riskAssessment) === null) {
+    await progress(ctx, task, 'risk', 'risk — refreshing execution shape')
+    riskAssessment = await agentStep(
+      meter,
+      'risk',
+      agentLabel(ctx.agents.reviewer),
+      stageAgent(ctx.agents.reviewer, {
+        root: ctx.root,
+        prompt: planRiskPrompt(intent, finalPlan),
+        access: 'read',
+        outFile: `${task.dir}/risk.plan.md`,
+      })
+    )
+    meter.planRisk = parseRiskScore(riskAssessment)
+  }
+
+  if (grantsAtomicExecution(resumeNote)) {
+    task.meta.executionOverride = 'atomic'
+    await saveMeta(task)
+    log.warn(`${task.id}: human explicitly authorized atomic execution of a staged plan`)
+  }
+  const priorDecomposition = resuming ? await readArtifact(task, 'decomposition.md') : null
+  if (priorDecomposition && task.meta.executionOverride !== 'atomic') {
+    return needsInput(ctx, task, meter, stats, executionShapeQuestions(priorDecomposition))
+  }
+  const executionDecision =
+    task.meta.executionOverride === 'atomic'
+      ? {
+          shape: 'ATOMIC' as const,
+          assessment: riskAssessment
+            ? `${riskAssessment}\n\nHuman explicitly authorized atomic execution.`
+            : null,
+        }
+      : riskAssessment
+        ? await confirmedExecutionShape({
+            ctx,
+            task,
+            meter,
+            intent,
+            finalPlan,
+            assessment: riskAssessment,
+          })
+        : { shape: 'ATOMIC' as const, assessment: null }
+  const executionShape = executionDecision.shape
+  riskAssessment = executionDecision.assessment
+  if (executionShape === null) {
+    return needsInput(
+      ctx,
+      task,
+      meter,
+      stats,
+      'Factory could not classify whether this plan is one coherent delivery unit. Reply `atomic` to authorize one-worktree execution, or split the plan into independently deliverable backlog tasks.'
+    )
+  }
+  if (executionShape === 'STAGED' && task.meta.executionOverride !== 'atomic') {
+    await writeArtifact(task, 'decomposition.md', riskAssessment ?? 'EXECUTION: STAGED')
+    return needsInput(ctx, task, meter, stats, executionShapeQuestions(riskAssessment ?? ''))
+  }
+
+  if (resuming && riskAssessment && !(await readArtifact(task, 'prototype.md'))) {
+    shouldPrototype = true
+  }
+
   if (shouldPrototype) {
     await runPrototypeStage(
       ctx,
@@ -2413,8 +2621,22 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   // with config.retries as the hard-cap backstop. Failures accumulate across the
   // whole task (loaded here so the history survives resumes) and feed the fixer.
   let attempt = 0
-  const hardCap = ctx.config.retries
   const failures = await readFailures(task)
+  let hardCap = task.meta.strategyBudget ?? ctx.config.retries
+  const currentStrategyAttempts = implementationAttemptCount(failures, task.meta.strategyEpoch)
+  let manualContinuationEpoch = false
+  if (
+    resumeNote?.trim().toLowerCase() === 'continue' &&
+    currentStrategyAttempts >= hardCap &&
+    ctx.config.retries > 0
+  ) {
+    task.meta.strategyEpoch += 1
+    task.meta.strategyBudget = Math.min(3, ctx.config.retries)
+    hardCap = task.meta.strategyBudget
+    manualContinuationEpoch = true
+    await saveMeta(task)
+    log.info(`${task.id}: human authorized a new ${hardCap}-attempt strategy epoch`)
+  }
   let rescueUsed = false
   let quickFixUsed = false
   const rescueOnce = async (latestFailure: string): Promise<FailureAction | null> => {
@@ -2435,6 +2657,97 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       guidance: stageGuidance('postmortem'),
     })
   }
+  const handleRescue = async (
+    action: FailureAction | null,
+    latestFailure: string
+  ): Promise<'continue' | TaskOutcome | null> => {
+    if (!action || action.kind === 'terminal') {
+      return null
+    }
+    if (action.kind === 'continue') {
+      attempt++
+      return 'continue'
+    }
+    if (action.kind === 'retry') {
+      return retryLater(ctx, task, meter, stats, action.reason)
+    }
+    if (action.kind === 'needs-input') {
+      return needsInput(ctx, task, meter, stats, action.questions)
+    }
+    if (action.kind === 'decompose') {
+      const detail = `# Structural decomposition\n\n${action.direction}\n\n## Latest failure\n\n${latestFailure}\n`
+      await writeArtifact(task, 'decomposition.md', detail)
+      return needsInput(ctx, task, meter, stats, executionShapeQuestions(detail))
+    }
+
+    const replanned = await runReplanStage({
+      ctx,
+      task,
+      meter,
+      intent,
+      finalPlan,
+      failures,
+      direction: action.direction,
+      answers,
+    })
+    if (!replanned.plan || replanned.shape === null) {
+      return needsInput(
+        ctx,
+        task,
+        meter,
+        stats,
+        'Factory attempted structural replanning but could not produce a valid executable plan. Review `plan.recovery.*.md` and provide a concrete strategy.'
+      )
+    }
+    finalPlan = replanned.plan
+    riskAssessment = await agentStep(
+      meter,
+      'risk',
+      agentLabel(ctx.agents.reviewer),
+      stageAgent(ctx.agents.reviewer, {
+        root: ctx.root,
+        prompt: planRiskPrompt(intent, finalPlan),
+        access: 'read',
+        outFile: `${task.dir}/risk.plan.md`,
+      })
+    )
+    meter.planRisk = parseRiskScore(riskAssessment)
+    const recoveredDecision = await confirmedExecutionShape({
+      ctx,
+      task,
+      meter,
+      intent,
+      finalPlan,
+      assessment: riskAssessment,
+    })
+    riskAssessment = recoveredDecision.assessment
+    if (recoveredDecision.shape !== 'ATOMIC') {
+      const detail = riskAssessment || `EXECUTION: ${recoveredDecision.shape ?? 'UNKNOWN'}`
+      await writeArtifact(task, 'decomposition.md', detail)
+      return needsInput(ctx, task, meter, stats, executionShapeQuestions(detail))
+    }
+    task.meta.strategyEpoch += 1
+    task.meta.strategyBudget = null
+    task.meta.executionOverride = null
+    await rm(`${task.dir}/decomposition.md`, { force: true })
+    hardCap = ctx.config.retries
+    attempt = 0
+    manualContinuationEpoch = false
+    await writeArtifact(task, 'plan.md', finalPlan)
+    await writeArtifact(task, 'plan.final.md', finalPlan)
+    if (ctx.plansDir) {
+      await mkdir(ctx.plansDir, { recursive: true })
+      await Bun.write(
+        `${ctx.plansDir}/${task.id}-recovery-${task.meta.strategyEpoch}.md`,
+        `${finalPlan.trim()}\n`
+      )
+    }
+    await saveMeta(task)
+    log.info(
+      `${task.id}: rescue replaced the plan; starting strategy epoch ${task.meta.strategyEpoch}`
+    )
+    return 'continue'
+  }
   // On resume with an existing diff, re-enter at the gates: run them against the
   // work already in the worktree, and only implement (a fix pass) if one fails.
   let skipImplement = resuming && (await hasChanges(ctx.root))
@@ -2444,11 +2757,13 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   // judge decide whether it is fixable instead of treating the backoff as spent
   // implementation budget.
   if (skipImplement && resumeKind === 'auto-retry' && !resumeNote && !feedbackContext) {
-    attempt = implementationAttemptCount(failures)
+    attempt = implementationAttemptCount(failures, task.meta.strategyEpoch)
   }
   if (skipImplement && (resumeNote || feedbackContext)) {
     skipImplement = false
-    attempt = Math.max(1, implementationAttemptCount(failures))
+    attempt = manualContinuationEpoch
+      ? 0
+      : Math.max(1, implementationAttemptCount(failures, task.meta.strategyEpoch))
   }
   // Routed implementer for attempt 0. task.meta.implementer covers both the
   // fresh path (just written or cleared by triage above) and a resume that
@@ -2481,12 +2796,16 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       skipImplement = false
     } else {
       await setStatus(task, 'implementing')
-      const fixing = attempt > 0
+      const fixing = attempt > 0 || failures.length > 0
       await progress(
         ctx,
         task,
         'impl',
-        fixing ? `implement — fix attempt ${attempt}` : 'implement — writing code'
+        fixing
+          ? attempt > 0
+            ? `implement — fix attempt ${attempt}`
+            : 'implement — starting a revised strategy'
+          : 'implement — writing code'
       )
       // Fix context: the most recent failure in full + the human's note (if any),
       // plus a summary of every earlier attempt so the fixer doesn't re-tread them.
@@ -2503,13 +2822,16 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       }
       const failureCtx = parts.join('\n\n')
       const priorSummaries = failures.slice(0, -1).map((f) => `${f.gate}: ${f.summary}`)
+      if (fixing) {
+        await writeArtifact(task, 'diff.patch', await worktreeDiff(ctx.root))
+      }
       const stagePrompt = fixing
         ? fixPrompt(
             intent,
             finalPlan,
             failureCtx,
             priorSummaries,
-            await worktreeDiff(ctx.root),
+            `${task.dir}/diff.patch`,
             userFacing,
             riskAssessment,
             stageGuidance('fix'),
@@ -2542,6 +2864,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           prompt: stagePrompt,
           access: ctx.config.implementerAccess === 'full' ? 'full' : 'write',
           outFile: `${task.dir}/implement.log.md`,
+          additionalDirs: fixing ? [task.dir] : undefined,
         })
       )
 
@@ -2589,7 +2912,12 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     await setStatus(task, 'reviewing')
     const diff = await worktreeDiff(ctx.root)
     const diffPath = `${task.dir}/diff.patch`
+    const priorDiff = await readArtifact(task, 'diff.patch')
+    const previousDiffPath = priorDiff ? `${task.dir}/diff.previous.patch` : null
     const baselineDiffPath = baselineHasChanges ? `${task.dir}/baseline.patch` : null
+    if (priorDiff) {
+      await writeArtifact(task, 'diff.previous.patch', priorDiff)
+    }
     await writeArtifact(task, 'diff.patch', diff)
     const reviewer = ctx.agents.reviewer
     const legacyReviewEntries: Array<WorkforceEntry<ReviewLens>> = [
@@ -2635,7 +2963,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       review: legacyReviewEntries,
     }
     let reviewEntries = reviewWorkforceForDiff(ctx, workforcePlan ?? legacyReview, userFacing, diff)
-    if (attempt > 0) {
+    if (attempt > 0 || manualContinuationEpoch) {
       // Fix-pass panels are scoped to the gating lenses (correctness, security,
       // ux-when-relevant). Risk and deploy safety are advisory scorers — they
       // already assessed the change on the first pass, and re-running the full
@@ -2650,7 +2978,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // both directions in turn — churn no fingerprint can catch). The reviewers
     // also see the human answers so settled decisions and explicitly accepted
     // risks stop resurfacing as findings.
-    const priorReview = attempt > 0 ? await readArtifact(task, 'consolidated.md') : null
+    const priorReview = await readArtifact(task, 'consolidated.md')
     const agents = agentChoiceMap(ctx)
     const panel: Array<{ key: string; label: string; agent: Agent; prompt: string }> = []
     for (const entry of reviewEntries) {
@@ -2671,7 +2999,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
               await renderPolicies(ctx, entry.policies, 'review.correctness')
             ),
             answers,
-            priorReview
+            priorReview,
+            previousDiffPath
           ),
         })
       } else if (entry.kind === 'security') {
@@ -2689,7 +3018,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
               await renderPolicies(ctx, entry.policies, 'review.security')
             ),
             answers,
-            priorReview
+            priorReview,
+            previousDiffPath
           ),
         })
       } else if (entry.kind === 'risk') {
@@ -2737,7 +3067,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
               await renderPolicies(ctx, entry.policies, 'review.ux')
             ),
             answers,
-            priorReview
+            priorReview,
+            previousDiffPath
           ),
         })
       }
@@ -2787,6 +3118,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // feeds the same auto-fix loop; advisory findings live in consolidated.md
     // (read with `factory show <id> consolidate`) and never block.
     await progress(ctx, task, 'consolidate', 'consolidate — judging the panel')
+    await rollArtifactHistory(task, 'consolidated.md')
     const consolidated = await agentStep(
       meter,
       'consolidate',
@@ -2855,15 +3187,12 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         return needsInput(ctx, task, meter, stats, action.questions)
       }
       const rescued = await rescueOnce(consolidated)
-      if (rescued?.kind === 'continue') {
-        attempt++
+      const recovery = await handleRescue(rescued, consolidated)
+      if (recovery === 'continue') {
         continue
       }
-      if (rescued?.kind === 'retry') {
-        return retryLater(ctx, task, meter, stats, rescued.reason)
-      }
-      if (rescued?.kind === 'needs-input') {
-        return needsInput(ctx, task, meter, stats, rescued.questions)
+      if (recovery) {
+        return recovery
       }
       return blocked(
         ctx,
@@ -2908,15 +3237,12 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
           return needsInput(ctx, task, meter, stats, action.questions)
         }
         const rescued = await rescueOnce(v.detail)
-        if (rescued?.kind === 'continue') {
-          attempt++
+        const recovery = await handleRescue(rescued, v.detail)
+        if (recovery === 'continue') {
           continue
         }
-        if (rescued?.kind === 'retry') {
-          return retryLater(ctx, task, meter, stats, rescued.reason)
-        }
-        if (rescued?.kind === 'needs-input') {
-          return needsInput(ctx, task, meter, stats, rescued.questions)
+        if (recovery) {
+          return recovery
         }
         return blocked(
           ctx,
@@ -2936,6 +3262,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         // judge chooses whether to fix code, retry later, ask, or stop.
         const entry: Failure = {
           attempt,
+          strategyEpoch: task.meta.strategyEpoch,
           gate: 'verify',
           summary: firstLine(v.detail).slice(0, 200),
           detail: v.detail,
@@ -2961,6 +3288,9 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
               return retryLater(ctx, task, meter, stats, judged.action.reason)
             case 'needs-input':
               return needsInput(ctx, task, meter, stats, judged.action.questions)
+            case 'replan':
+            case 'decompose':
+              return needsInput(ctx, task, meter, stats, judged.action.direction)
             case 'terminal':
               return blocked(
                 ctx,
@@ -3024,7 +3354,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       // A newly discovered commit hook failure gets its own bounded repair budget.
       // Earlier review fixes must not consume every chance to address a gate that
       // could only run after review and verification passed.
-      const commitAttempt = gateCodeFixAttemptCount(failures, 'commit')
+      const commitAttempt = gateCodeFixAttemptCount(failures, 'commit', task.meta.strategyEpoch)
       const action = await assessFailure(
         ctx,
         task,
@@ -3047,15 +3377,12 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         return needsInput(ctx, task, meter, stats, action.questions)
       }
       const rescued = await rescueOnce(detail)
-      if (rescued?.kind === 'continue') {
-        attempt++
+      const recovery = await handleRescue(rescued, detail)
+      if (recovery === 'continue') {
         continue
       }
-      if (rescued?.kind === 'retry') {
-        return retryLater(ctx, task, meter, stats, rescued.reason)
-      }
-      if (rescued?.kind === 'needs-input') {
-        return needsInput(ctx, task, meter, stats, rescued.questions)
+      if (recovery) {
+        return recovery
       }
       return blocked(
         ctx,

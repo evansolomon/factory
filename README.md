@@ -155,7 +155,9 @@ task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.m
   8. SELECT      codex picks or merges the stronger plan    (read-only)
                  → clean plan written to plansDir (committed docs)
   8.5 RISK       [complex path] score plan risk and          (read-only)
-                 verification focus, advisory to implement
+                 verification focus; classify ATOMIC vs
+                 STAGED execution before code is edited
+        ├─ STAGED → save decomposition.md and pause
   8.6 PROTOTYPE  [complex path] best-effort autonomous       (read-only)
                  decision: create a standalone pre-impl
                  artifact only when it materially derisks
@@ -177,8 +179,8 @@ task.md (intent) + meta.json (verify, optional declared complexity) [+ answers.m
   └──── consolidated FAIL / real code defect / commit failure → auto-fix;
         a convergence judge keeps
         iterating while each failure is NEW, stops when it's going in circles
-        (config.retries is the hard-cap backstop); rescue gets one last
-        read-only strategy pass before a terminal block.
+        (config.retries is the hard-cap backstop); rescue may replace a bad
+        plan, require decomposition, or take one last distinct fix pass.
         A flake or an environment problem it can't fix → set-aside (backoff)
         │ (pass)
   commit (message from diff + author/repo history) → 14. SHIP (if configured)
@@ -211,6 +213,13 @@ single fix pass; advisory ones live in
 `consolidated.md` (read with `factory show <id> consolidate`) and never block.
 This keeps one consolidated fix per cycle instead of separate gates ping-ponging,
 and makes a new expert a one-prompt addition that can't independently thrash.
+
+Review rounds keep a durable issue ledger in `consolidated.md`, with stable ids
+and open/resolved/superseded state. On fix rounds the previous patch is saved as
+`diff.previous.patch`; gating reviewers compare it with the current patch,
+verify known fixes, and inspect affected boundaries instead of treating every
+round as an unrelated fresh audit. Prior verdicts roll into
+`consolidated.history.md`.
 
 The risk lens is deliberately advisory: it answers "0 to 10, how risky is this?"
 with concrete drivers and verification focus. Deploy safety is more concrete: it
@@ -256,6 +265,16 @@ A `needs-input` task is **set aside, not crashing**: the loop stays up, waits
 for your answer, and picks the task back up — in watch mode on a terminal it
 prompts you inline.
 
+Complex plans also pass an execution-shape valve. `EXECUTION: ATOMIC` proceeds
+in the current worktree. A non-atomic or malformed first assessment gets an
+independent confirmation so one noisy classifier cannot park otherwise runnable
+work. Confirmed `EXECUTION: STAGED` means correctness, rollout order, or an
+explicit requirement needs independently delivered units; Factory writes
+`decomposition.md` and pauses before editing. This preserves the one-task/
+one-worktree model instead of implementing a prose multi-MR manifest as one mega
+diff. Dispatch the units through the backlog/fleet, or reply exactly `atomic` to
+make the consequential one-worktree override explicit.
+
 ## Usage
 
 `factory` is the CLI binary.
@@ -287,6 +306,13 @@ factory version | --version                         # print the current CLI vers
 factory upgrade                                     # install the latest GitHub Release
 factory completion zsh                              # print the zsh completion script
 ```
+
+Source-mode replays invoke the current Factory entrypoint by absolute path while
+running against the historical worktree. Replay worktrees also carry
+`FACTORY_EVAL_REPLAY=1`; a nested `factory evals run` from an implementer is a
+successful no-op, and every agent stage is explicitly told not to copy
+candidates or change `FACTORY_HOME` to bypass that guard. This prevents
+recursive replay fleets; the outer replay remains the source-of-truth gate.
 
 - **`factory run`** is **long-lived by default**: when the stream is idle it polls
   (every 5s) instead of exiting, so tasks added later (`factory add`), unblocked
@@ -368,8 +394,12 @@ fingerprint and a worktree-diff hash, spanning resumes), and after each one a
 **convergence judge** reads the whole history and decides whether to keep going.
 Two bounds are **mechanical, not judged**: a byte-identical failure with an
 unchanged worktree is never re-run (the loop asks the human instead of guessing
-again), and `config.retries` (default 10) is a REAL cap — at the cap the judge's
-CONTINUE is overridden and the human is asked with the failure attached. The
+again), and `config.retries` (default 10) is a REAL cap per strategy epoch. At
+the cap a read-only rescue pass may take one materially different fix, replace
+the plan, require decomposition, retry later, ask, or stop. An autonomous replan
+starts a fresh persisted strategy epoch without erasing history. A human answer
+of exactly `continue` grants a bounded three-attempt epoch instead of permanently
+authorizing only one attempt at a time. The
 history also feeds the next fixer ("these approaches already failed — don't
 repeat them"), and failure detail keeps both the head and tail of gate output so
 the fixer actually sees the assertion diffs.
@@ -511,7 +541,9 @@ Fields:
   per-host layer at `repos/<repo-key>/env/<host>.md`.
 - **`retries`** — hard cap on auto-fix iterations after a failed gate
   (review-panel/verify), **enforced mechanically**: at the cap the judge's
-  CONTINUE is overridden and the human is asked. Two more mechanical bounds ride
+  CONTINUE is routed through structural rescue. A repaired plan starts a new
+  strategy epoch; explicit human `continue` grants three more attempts. Two more
+  mechanical bounds ride
   with it: a byte-identical failure with an unchanged worktree is never re-run
   (stuck → ask), and judge-approved auto-retries stop at an absolute ceiling.
   Default `10`; `0` disables auto-fix.
@@ -810,19 +842,24 @@ or jump-target behavior you want.
   plan.<planner>.v2.md   # revised planner output
   plan.final.md          # selected/merged plan
   plan.md                # selected plan persisted for resume
-  risk.plan.md           # plan risk scores + verification focus, complex path
+  risk.plan.md           # plan risk, execution shape + verification focus
+  risk.shape.md          # independent confirmation of non-atomic/unclear shape
   prototype.md           # prototype decision summary or malformed-output fallback
   prototype.raw.md       # raw model output from the prototype stage
   prototype.meta.json    # prototype decision + primary artifact manifest
   prototype-artifacts/<artifact> # optional standalone primary prototype artifact
   implement.log.md       # implementer final message
   diff.patch             # latest worktree diff under review
+  diff.previous.patch    # previous reviewed snapshot for fix-round comparison
   review.md              # correctness expert report
   security.md            # red-team report, when enabled
   risk.md                # advisory merge-risk scores for the implemented diff
   deploy.md              # deploy-safety report: compatibility/migrations/rollback
   ux.md                  # UX/design report, when applicable
-  consolidated.md        # consolidated review verdict + fix list
+  consolidated.md        # consolidated verdict + durable issue ledger
+  consolidated.history.md # superseded verdict/ledger rounds
+  decomposition.md       # staged-plan units or rescue decomposition guidance
+  plan.recovery.N.md     # raw structurally revised plan from rescue
   converge.md            # latest convergence-judge output
   failures.jsonl         # persisted gate-failure history
   verify.log             # latest verify output

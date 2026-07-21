@@ -61,6 +61,7 @@ import { composeInEditor, openEditor } from './editor.ts'
 import {
   appendEvalResult,
   type EvalResult,
+  evalReplayActive,
   factoryInvocation,
   type LoadedEvalCase,
   listEvalCases,
@@ -558,6 +559,15 @@ function lessonClusterSummary(plan: LessonCuratePlan): void {
 
 type EvalBatchSummary = { total: number; matched: number }
 
+function firstNonBlankLine(text: string): string {
+  return (
+    text
+      .split('\n')
+      .find((line) => line.trim())
+      ?.trim() ?? text.trim()
+  )
+}
+
 function logEvalResult(result: EvalResult): boolean {
   if (result.error) {
     log.fail(`${result.file}: ${result.error}`)
@@ -570,6 +580,9 @@ function logEvalResult(result: EvalResult): boolean {
       `file overlap ${(result.fileJaccard * 100).toFixed(0)}% · ` +
       `${Math.round(result.durationMs / 1000)}s`
   )
+  if (!result.outcomeMatch && result.replayReason) {
+    log.info(`replay stopped because: ${firstNonBlankLine(result.replayReason)}`)
+  }
   return result.outcomeMatch
 }
 
@@ -1766,6 +1779,10 @@ async function evalsCommand(rest: string[]): Promise<number> {
   // The replay runner: re-run harvested eval candidates against the CURRENT
   // factory build and score them. This is the regression gate for changes to
   // prompts, policies, and factory itself.
+  if ((rest[0] ?? 'list') === 'run' && evalReplayActive()) {
+    log.info('eval replay already active; nested replay skipped')
+    return 0
+  }
   const ctx = await loadContext(process.cwd())
   const repoCtx = await loadRepoContext(process.cwd())
   const cases = await listEvalCases(ctx.repoStateDir)
@@ -1815,6 +1832,9 @@ async function evalsCommand(rest: string[]): Promise<number> {
           `${c.file}: ${verdict} (expected ${result.expectedOutcome}, replay ${result.replayStatus}) · ` +
             `file overlap ${(result.fileJaccard * 100).toFixed(0)}% · ${Math.round(result.durationMs / 1000)}s`
         )
+        if (!result.outcomeMatch && result.replayReason) {
+          log.info(`replay stopped because: ${firstNonBlankLine(result.replayReason)}`)
+        }
       }
       log.info(
         `replay summary: ${matched}/${runnable.length} outcome matches · results: ` +
