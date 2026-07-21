@@ -14,6 +14,14 @@ function responseFetch(response: Response): FetchImpl {
   return async (_input: string, _init?: RequestInit) => response
 }
 
+function releaseResponse(tag: string): Response {
+  const response = new Response(null)
+  Object.defineProperty(response, 'url', {
+    value: `https://github.com/evansolomon/factory/releases/tag/${encodeURIComponent(tag)}`,
+  })
+  return response
+}
+
 describe('upgrade version comparison', () => {
   test('normalizes one leading lowercase v', () => {
     expect(normalizeGitHubReleaseVersion('v0.1.0')).toBe('0.1.0')
@@ -28,8 +36,13 @@ describe('upgrade version comparison', () => {
 })
 
 describe('latest release lookup', () => {
-  test('parses the latest GitHub release tag', async () => {
-    const release = await fetchLatestRelease(responseFetch(Response.json({ tag_name: 'v0.1.0' })))
+  test('parses the tag from the followed latest-release redirect', async () => {
+    const release = await fetchLatestRelease(async (input, init) => {
+      expect(input).toBe('https://github.com/evansolomon/factory/releases/latest')
+      expect(init?.method).toBe('HEAD')
+      expect(init?.redirect).toBe('follow')
+      return releaseResponse('v0.1.0')
+    })
 
     expect(release).toEqual({ tagName: 'v0.1.0', version: '0.1.0' })
   })
@@ -44,17 +57,19 @@ describe('latest release lookup', () => {
     )
   })
 
-  test('rejects missing or non-string tag_name', async () => {
-    await expect(fetchLatestRelease(responseFetch(Response.json({})))).rejects.toThrow(UpgradeError)
-    await expect(
-      fetchLatestRelease(responseFetch(Response.json({ tag_name: 123 })))
-    ).rejects.toThrow(UpgradeError)
+  test('rejects a response that did not resolve to a release tag', async () => {
+    await expect(fetchLatestRelease(responseFetch(new Response(null)))).rejects.toThrow(
+      'malformed GitHub latest-release redirect: invalid URL'
+    )
   })
 
-  test('rejects invalid JSON as a malformed response', async () => {
-    await expect(fetchLatestRelease(responseFetch(new Response('{')))).rejects.toThrow(
-      'malformed GitHub release response: invalid JSON'
-    )
+  test('rejects redirects outside the factory release-tag path', async () => {
+    const response = new Response(null)
+    Object.defineProperty(response, 'url', {
+      value: 'https://github.com/evansolomon/factory/releases/latest',
+    })
+
+    await expect(fetchLatestRelease(responseFetch(response))).rejects.toThrow(UpgradeError)
   })
 
   test('rejects non-2xx responses', async () => {
