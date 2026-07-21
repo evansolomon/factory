@@ -50,11 +50,12 @@ its own agents must follow when the repo is the target.
   `COUPLING: LOW|MEDIUM|HIGH`, `CONSEQUENCE: LOW|MEDIUM|HIGH`,
   `COMPLEXITY: TRIVIAL|COMPLEX`, `USER-FACING: YES|NO`,
   `RISK: <0-10>`,
+  `EXECUTION: ATOMIC|STAGED`,
   `IMPLEMENTER: <name|DEFAULT>` (optional; only requested when
   `agents.implementers` has entries besides the reserved `default`, the lead),
   `DELIVERY: NONE|SKILL|POLICY`,
   `VERDICT: PASS|FAIL`,
-  `VERDICT: CONTINUE_CODE_FIX|RETRY_LATER|ASK_HUMAN|TERMINAL`,
+  `VERDICT: CONTINUE_CODE_FIX|REPLAN|DECOMPOSE|RETRY_LATER|ASK_HUMAN|TERMINAL`,
   `VERDICT: ENV-FIXED|ENV-BLOCKED|CODE|FLAKE|GATE-MISCONFIGURED` (+ `GATE-FIX:`),
   `SHIP: OK|FAILED`, `SPEC READY`, `SHARPEN: PASS|REVISE`, and
   `CATEGORY:` / `LESSON:` / `SUMMARY:`.
@@ -89,9 +90,10 @@ its own agents must follow when the repo is the target.
   answering a mid-loop question resumes at the gates (`answerTask`), not with a
   replan. The fix loop terminates by the convergence judge WITHIN mechanical
   bounds enforced in code: identical failure + unchanged worktree is never
-  re-run, `config.retries` is a real cap, and auto-retries have an absolute
-  ceiling — all bounds fail toward asking the human, never silent churn or
-  silent death. Keep new gates on the same auto-fix path, and route transient
+  re-run, `config.retries` is a real per-strategy cap, and auto-retries have an
+  absolute ceiling. At the fix cap, structural rescue may replan or require
+  decomposition; mechanical ambiguity fails toward asking the human, never
+  silent churn or silent death. Keep new gates on the same auto-fix path, and route transient
   failures (verify/ship) to the backoff auto-resume rather than a block.
 - **One loop, one active task.** `factory run` holds a lock per worktree; a second
   fresh `factory add` errors without `--force-new`. The workstream model is one

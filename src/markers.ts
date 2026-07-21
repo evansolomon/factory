@@ -117,6 +117,13 @@ export function parseRiskScore(text: string): number | null {
   return raw === undefined ? null : Number(raw)
 }
 
+export type ExecutionShape = 'ATOMIC' | 'STAGED' | null
+
+export function parseExecutionShape(text: string): ExecutionShape {
+  const value = lastMarkerMatch(text, /^EXECUTION:\s*(ATOMIC|STAGED)\s*$/i)?.[1]?.toUpperCase()
+  return value === 'ATOMIC' || value === 'STAGED' ? value : null
+}
+
 export function parseReviewVerdict(text: string): 'PASS' | 'FAIL' | null {
   const value = lastMarkerMatch(text, /^VERDICT:\s*(PASS|FAIL)\s*$/i)?.[1]?.toUpperCase()
   return value === 'PASS' || value === 'FAIL' ? value : null
@@ -124,6 +131,8 @@ export function parseReviewVerdict(text: string): 'PASS' | 'FAIL' | null {
 
 export type ConvergenceVerdict =
   | 'CONTINUE_CODE_FIX'
+  | 'REPLAN'
+  | 'DECOMPOSE'
   | 'RETRY_LATER'
   | 'ASK_HUMAN'
   | 'TERMINAL'
@@ -132,10 +141,12 @@ export type ConvergenceVerdict =
 export function parseConvergenceVerdict(text: string): ConvergenceVerdict {
   const value = lastMarkerMatch(
     text,
-    /^VERDICT:\s*(CONTINUE_CODE_FIX|RETRY_LATER|ASK_HUMAN|TERMINAL)\s*$/i
+    /^VERDICT:\s*(CONTINUE_CODE_FIX|REPLAN|DECOMPOSE|RETRY_LATER|ASK_HUMAN|TERMINAL)\s*$/i
   )?.[1]?.toUpperCase()
   if (
     value === 'CONTINUE_CODE_FIX' ||
+    value === 'REPLAN' ||
+    value === 'DECOMPOSE' ||
     value === 'RETRY_LATER' ||
     value === 'ASK_HUMAN' ||
     value === 'TERMINAL'

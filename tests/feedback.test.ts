@@ -155,6 +155,7 @@ describe('SHOW_ARTIFACTS', () => {
 
     expect(names.indexOf('feedback.md')).toBeLessThan(names.indexOf('plan.final.md'))
     expect(names).toContain('commit.log')
+    expect(names).toContain('risk.shape.md')
     expect(names).not.toContain('brief.html')
   })
 })
@@ -179,6 +180,9 @@ function task(id: string, updatedAt: string, overrides: Partial<Task['meta']> = 
       resumeKind: null,
       retryAt: null,
       autoRetries: 0,
+      strategyEpoch: 0,
+      strategyBudget: null,
+      executionOverride: null,
       complexity: null,
       taskProfile: null,
       implementer: null,

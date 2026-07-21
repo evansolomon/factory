@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   parseConvergenceVerdict,
+  parseExecutionShape,
   parseReconcileDecision,
   parseRemedy,
   parseReviewVerdict,
@@ -67,6 +68,12 @@ describe('marker parsing', () => {
     expect(parseRiskScore('no score')).toBeNull()
   })
 
+  test('parses execution shape markers, last match wins', () => {
+    expect(parseExecutionShape('EXECUTION: ATOMIC')).toBe('ATOMIC')
+    expect(parseExecutionShape('EXECUTION: ATOMIC\nEXECUTION: STAGED')).toBe('STAGED')
+    expect(parseExecutionShape('EXECUTION: LARGE')).toBeNull()
+  })
+
   test('extracts the raw IMPLEMENTER marker without validating it', () => {
     const base = 'COMPLEXITY: TRIVIAL\nUSER-FACING: NO'
     expect(parseTriage(`${base}\nIMPLEMENTER: quick`).implementer).toBe('quick')
@@ -101,6 +108,8 @@ describe('marker parsing', () => {
     expect(parseConvergenceVerdict('same root cause\n\nVERDICT: TERMINAL')).toBe('TERMINAL')
     expect(parseConvergenceVerdict('VERDICT: RETRY_LATER')).toBe('RETRY_LATER')
     expect(parseConvergenceVerdict('VERDICT: ASK_HUMAN')).toBe('ASK_HUMAN')
+    expect(parseConvergenceVerdict('VERDICT: REPLAN')).toBe('REPLAN')
+    expect(parseConvergenceVerdict('VERDICT: DECOMPOSE')).toBe('DECOMPOSE')
     expect(parseConvergenceVerdict('VERDICT: CONTINUE')).toBeNull()
     expect(parseConvergenceVerdict('VERDICT: STUCK')).toBeNull()
     expect(parseConvergenceVerdict('`VERDICT: CONTINUE_CODE_FIX`')).toBeNull()

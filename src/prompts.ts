@@ -1,7 +1,7 @@
 // Stage prompts for the per-task ensemble. Read-only stages must output only
 // markdown (it's saved verbatim as the artifact). Stages parsed by the conductor
 // or sharpen loop must keep their exact marker lines
-// (DECISION/COMPLEXITY/DELIVERY/PROTOTYPE/ARTIFACT/REASON/VERDICT/SHIP/SPEC READY/SHARPEN).
+// (DECISION/COMPLEXITY/DELIVERY/EXECUTION/PROTOTYPE/ARTIFACT/REASON/VERDICT/SHIP/SPEC READY/SHARPEN).
 
 // Prior human answers, threaded into every pre-implementation stage so a resumed
 // run doesn't re-ask what's already been settled.
@@ -34,12 +34,19 @@ function specialistBlock(policies: string | null): string {
   return policies ? `\n\n## Specialist policies\n${policies}` : ''
 }
 
-function reviewDiffBlock(diffPath: string, baselineDiffPath: string | null): string {
+function reviewDiffBlock(
+  diffPath: string,
+  baselineDiffPath: string | null,
+  previousDiffPath: string | null = null
+): string {
   const baseline = baselineDiffPath
     ? `\nThe worktree already had changes before this factory run. The saved pre-run baseline is at \`${baselineDiffPath}\`; use it to distinguish preexisting changes from this task's changes when reviewing scope.`
     : ''
+  const previous = previousDiffPath
+    ? `\nThe previously reviewed patch is at \`${previousDiffPath}\`. Start with a bounded comparison of that snapshot to the current one so you verify the requested fixes and inspect regressions introduced by them; then revisit affected boundaries. Do not treat every fix round as an unrelated fresh audit.`
+    : ''
   return `## Diff evidence
-The complete current patch, including untracked files, is saved at \`${diffPath}\`. Inspect that artifact and the live worktree rather than asking for the entire patch in one tool response. Start with \`git status --short\`, \`git diff --stat HEAD\`, and \`git diff --numstat HEAD\`, then inspect the relevant files or bounded file-level diffs. The artifact is the durable review snapshot; the live worktree is the source of truth for adjacent code.${baseline}`
+The complete current patch, including untracked files, is saved at \`${diffPath}\`. Inspect that artifact and the live worktree rather than asking for the entire patch in one tool response. Start with \`git status --short\`, \`git diff --stat HEAD\`, and \`git diff --numstat HEAD\`, then inspect the relevant files or bounded file-level diffs. The artifact is the durable review snapshot; the live worktree is the source of truth for adjacent code.${baseline}${previous}`
 }
 
 function riskBlock(riskAssessment: string | null): string {
@@ -875,7 +882,7 @@ export function fixPrompt(
   finalPlan: string,
   failure: string,
   history: string[],
-  diff: string,
+  diffPath: string,
   userFacing: boolean,
   riskAssessment: string | null,
   guidance: string | null,
@@ -898,10 +905,9 @@ ${finalPlan}${humanAnswersBlock(answers)}
 ## What failed (most recent)
 ${failure}${tried}
 
-## Current diff
-\`\`\`diff
-${diff}
-\`\`\`${riskBlock(riskAssessment)}${prototypeBlock(prototypeContext)}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${delegationBlock(delegates)}${uxBuildNote(userFacing)}`
+## Current change evidence
+The complete patch is saved at \`${diffPath}\`. Inspect that artifact and the live worktree, starting with the files named by the failure. Do not load the entire patch into one tool response when bounded file-level inspection will answer the question.
+${riskBlock(riskAssessment)}${prototypeBlock(prototypeContext)}${learnedLessonsBlock(guidance)}${feedbackAnalysisBlock(feedbackAnalysis)}${delegationBlock(delegates)}${uxBuildNote(userFacing)}`
 }
 
 // The verify-gate doctor: runs with FULL access when the verify command fails.
@@ -997,7 +1003,7 @@ export function rescuePrompt(input: {
   intent: string
   finalPlan: string
   verify: string | null
-  currentDiff: string
+  diffPath: string
   failures: string[]
   latestFailure: string
   guidance: string | null
@@ -1020,12 +1026,15 @@ Classify the root cause first:
 
 Verdicts:
 - CONTINUE_CODE_FIX — one more code-fix attempt is likely useful, but only with a concrete materially different direction.
+- REPLAN — the task remains one coherent delivery unit, but evidence invalidated the current plan or the same root-cause family keeps producing local fixes. Return to planning before editing again.
+- DECOMPOSE — the work cannot be made safe and reviewable as one commit/MR/worktree. Name the independently deliverable units and their ordering.
 - RETRY_LATER — the failure is likely external/transient; backoff is better than code churn.
 - ASK_HUMAN — the smallest missing decision/credential/context question would unblock progress.
 - TERMINAL — another autonomous pass would likely repeat, churn, or damage unrelated code.
 
 Rules:
 - Be skeptical of CONTINUE_CODE_FIX after repeated same-root-cause failures. If you choose it, NEXT must be a specific fix strategy the implementer can follow.
+- Choose REPLAN when the implementation strategy is wrong but the delivery unit is still coherent. Choose DECOMPOSE when no single-plan repair solves the execution-shape problem.
 - If you choose ASK_HUMAN, NEXT must be exactly the question to ask. Human answers, when present below, are settled decisions — never re-ask one of them, even reworded.
 - If you choose RETRY_LATER, NEXT must name the external/transient condition.
 - If you choose TERMINAL, NEXT must explain why no autonomous move should continue.
@@ -1036,10 +1045,8 @@ ${input.intent}${verifyBlock(input.verify)}
 ## Final plan
 ${input.finalPlan}${humanAnswersBlock(input.answers ?? null)}
 
-## Current diff
-\`\`\`diff
-${input.currentDiff}
-\`\`\`
+## Current change evidence
+The complete current patch is saved at \`${input.diffPath}\`. Inspect it and the live worktree selectively; use the history below to identify trends across attempts.
 
 ## Failure history
 ${history}
@@ -1050,7 +1057,40 @@ ${input.latestFailure}${learnedLessonsBlock(input.guidance)}
 Output exactly these final marker lines:
 SUMMARY: <one sentence root cause classification and reason>
 NEXT: <one concrete next move, question, transient condition, or terminal explanation>
-VERDICT: CONTINUE_CODE_FIX | RETRY_LATER | ASK_HUMAN | TERMINAL`
+VERDICT: CONTINUE_CODE_FIX | REPLAN | DECOMPOSE | RETRY_LATER | ASK_HUMAN | TERMINAL`
+}
+
+export function replanPrompt(input: {
+  intent: string
+  finalPlan: string
+  diffPath: string
+  failures: string[]
+  direction: string
+  answers: string | null
+}): string {
+  const history = input.failures.map((failure, i) => `${i + 1}. ${failure}`).join('\n')
+  return `The current implementation strategy is not converging. Revise the plan from the root cause before any more code is edited. Preserve the task's settled goal and human decisions; replace invalidated assumptions and local patches with one coherent strategy grounded in the repository and current worktree.
+
+The complete patch is at \`${input.diffPath}\`. Inspect it selectively along with the relevant callers, mutation paths, tests, and repository history. The revised plan must account for work already present: say what to keep, change, or remove. Do not edit files.
+
+Classify the revised execution shape:
+- ATOMIC — still one coherent review/verify/commit/delivery unit.
+- STAGED — correctness or explicit requirements need multiple independently delivered units. List those ordered units; do not pretend a cutting manifest makes an aggregate diff atomic.
+
+## Task
+${input.intent}${humanAnswersBlock(input.answers)}
+
+## Current plan
+${input.finalPlan}
+
+## Rescue direction
+${input.direction}
+
+## Failure trend
+${history || '(none)'}
+
+Output the revised self-contained markdown plan, ending with exactly one marker line:
+EXECUTION: ATOMIC|STAGED`
 }
 
 // Postmortem on a task the fix loop gave up on: a fast triage briefing for the
@@ -1159,7 +1199,8 @@ export function reviewPrompt(
   baselineDiffPath: string | null,
   guidance: string | null,
   answers: string | null = null,
-  priorReview: string | null = null
+  priorReview: string | null = null,
+  previousDiffPath: string | null = null
 ): string {
   return `You are a senior staff engineer pairing with the person who wrote the current change. You didn't write it, so you bring fresh eyes — verify against the actual code rather than assuming the implementer got it right. Your job is to help make this change correct and ship-worthy, not to find fault. Read files in the repo as needed.
 
@@ -1179,7 +1220,7 @@ ${intent}${verifyBlock(verify)}
 ## Agreed plan
 ${finalPlan}${reviewerAnswersBlock(answers)}${priorReviewBlock(priorReview)}
 
-${reviewDiffBlock(diffPath, baselineDiffPath)}${learnedLessonsBlock(guidance)}
+${reviewDiffBlock(diffPath, baselineDiffPath, previousDiffPath)}${learnedLessonsBlock(guidance)}
 
 For each finding, cite the specific code (file:line) and tag it BLOCKING (a correctness, requirements, or test-integrity defect that must be fixed before this ships) or ADVISORY (a real improvement that should not hold up the change). If there are none, say so.`
 }
@@ -1190,13 +1231,19 @@ For each finding, cite the specific code (file:line) and tag it BLOCKING (a corr
 export function planRiskPrompt(intent: string, finalPlan: string): string {
   return `Assess the implementation risk of the plan below. Read the repo as needed and ground the score in concrete facts: touched boundaries, data durability, external APIs, auth/security, concurrency, migrations, rollout order, and verification difficulty.
 
-This is NOT a plan review and NOT a gate. Do not propose a different design unless the plan's risk comes from a specific, concrete flaw; in that case name the flaw as rationale. The goal is calibrated risk metadata that an implementer can use to choose proportionate tests and rollout care.
+This is NOT a plan review. The numeric risk scores are metadata, not a gate; execution shape is a separate safety valve. Do not propose a different design unless the plan's risk comes from a specific, concrete flaw; in that case name the flaw as rationale. The goal is calibrated risk metadata that an implementer can use to choose proportionate tests and rollout care.
 
 Use this 0-10 scale:
 - 0-2: small localized change with obvious behavior and easy verification.
 - 3-5: moderate uncertainty or blast radius; normal tests should cover it.
 - 6-8: multiple boundaries, durable data, compatibility, concurrency, security, or hard-to-observe behavior; verification needs extra care.
 - 9-10: high blast radius, irreversible/destructive behavior, complex rollout, or substantial unknowns.
+
+Also classify the executable delivery shape:
+- ATOMIC — one coherent change that can be reviewed, verified, committed, and delivered from this worktree.
+- STAGED — correctness or the stated requirements require multiple independently reviewed or ordered commits/MRs/deployments. A prose cutting manifest does not make an aggregate implementation atomic.
+
+Choose STAGED only for a real delivery boundary: dependency ordering, mixed-version safety, independently reversible rollout, or an explicit requirement for multiple MRs. Large-but-coherent work may still be ATOMIC. For STAGED, list the ordered delivery units with each unit's outcome and verification so the human can dispatch them independently.
 
 ## Task
 ${intent}
@@ -1217,7 +1264,37 @@ CONFIDENCE: LOW|MEDIUM|HIGH
 <bullets citing the concrete risk drivers>
 
 ## Verification focus
-<bullets naming the proof that matters most>`
+<bullets naming the proof that matters most>
+
+## Delivery units
+<"none" for ATOMIC, otherwise an ordered list of independently shippable units>
+
+EXECUTION: ATOMIC|STAGED`
+}
+
+export function executionShapeConfirmationPrompt(
+  intent: string,
+  finalPlan: string,
+  firstAssessment: string
+): string {
+  return `Independently classify whether this plan can be delivered as one coherent worktree change. This is a confirmation gate because the first assessor did not return an unambiguous ATOMIC decision.
+
+- ATOMIC means the whole plan can be reviewed, verified, committed, reverted, and delivered together. Multiple files or implementation steps do not make it staged.
+- STAGED means correctness or an explicit requirement needs multiple independently reviewed or ordered commits, MRs, or deployments. Use STAGED only for a concrete dependency-order, mixed-version, independently reversible rollout, or explicit multi-MR boundary.
+
+Do not defer to the first assessment. Read the task and plan, inspect the repository when useful, and make an independent decision. If STAGED, list the concrete delivery boundary and independently shippable units.
+
+## Task
+${intent}
+
+## Plan
+${finalPlan}
+
+## First assessment
+${firstAssessment}
+
+Output concise markdown ending with exactly one marker line:
+EXECUTION: ATOMIC|STAGED`
 }
 
 // Post-diff risk lens. It is deliberately advisory: concrete defects belong to
@@ -1275,7 +1352,8 @@ export function securityPrompt(
   baselineDiffPath: string | null,
   guidance: string | null,
   answers: string | null = null,
-  priorReview: string | null = null
+  priorReview: string | null = null,
+  previousDiffPath: string | null = null
 ): string {
   return `You are a red-team security researcher auditing the current change for the task. Assume an adversary controls every input the changed code can reach. You did not write it — trace the data flow through the repo as needed.
 
@@ -1294,7 +1372,7 @@ ${intent}
 ## Agreed plan
 ${finalPlan}${reviewerAnswersBlock(answers)}${priorReviewBlock(priorReview)}
 
-${reviewDiffBlock(diffPath, baselineDiffPath)}${learnedLessonsBlock(guidance)}
+${reviewDiffBlock(diffPath, baselineDiffPath, previousDiffPath)}${learnedLessonsBlock(guidance)}
 
 For each exploitable finding, name the attack and cite the specific code (file:line), then tag it BLOCKING (an exploitable vulnerability that must be fixed before this ships) or ADVISORY (a real but non-exploitable security improvement). If there are none, say so.`
 }
@@ -1355,7 +1433,8 @@ export function uxReviewPrompt(
   baselineDiffPath: string | null,
   guidance: string | null,
   answers: string | null = null,
-  priorReview: string | null = null
+  priorReview: string | null = null,
+  previousDiffPath: string | null = null
 ): string {
   return `You are a senior UI/UX and design-systems engineer pairing on the current USER-FACING change. Read the repo to compare against how this product's UI is already built. Your job is to help the experience and design consistency land well — NOT code correctness or security (others cover those). Judge the user experience, not taste.
 
@@ -1374,7 +1453,7 @@ ${intent}
 ## Agreed plan
 ${finalPlan}${reviewerAnswersBlock(answers)}${priorReviewBlock(priorReview)}
 
-${reviewDiffBlock(diffPath, baselineDiffPath)}${learnedLessonsBlock(guidance)}
+${reviewDiffBlock(diffPath, baselineDiffPath, previousDiffPath)}${learnedLessonsBlock(guidance)}
 
 For each finding, cite the specific code (file:line) and tag it BLOCKING (a material design-system violation or clearly broken/inconsistent UX that must be fixed before this ships) or ADVISORY (a real improvement that should not hold up the change). If there are none, say so.`
 }
@@ -1400,6 +1479,7 @@ Do this:
 - Classify each surviving finding as BLOCKING (a correctness, security, deploy-safety, requirements, or test-integrity defect that must be fixed before this ships) or ADVISORY (a real but non-blocking improvement). The experts' own BLOCKING/ADVISORY tags are hints, not votes — you own this call. Block on genuine defects, including concrete unsafe rollout, migration, compatibility, config, or rollback hazards. Treat general risk scores as context, not a veto; when a finding is borderline or a matter of degree, prefer ADVISORY so good work ships.
 - A finding that reverses guidance a prior review round gave (whether or not the expert marked it \`REVERSAL:\`) is BLOCKING only when it names the concrete defect that guidance causes; otherwise drop it or demote it to ADVISORY, and state the contradiction explicitly. A panel that flips direction round over round makes convergence impossible.
 - Human answers, when present below, are settled decisions: do not block on whether a decided approach is the right call, and never demand it be reversed. A finding about a decided approach stays BLOCKING only when it is a genuine defect within that decision — e.g. the decided behavior is implemented unsafely when a safe implementation exists. When an answer explicitly accepts a class of residual risk, a finding that restates that risk is ADVISORY at most — route it to commit-message/MR documentation, not another fix pass.
+- Maintain the issue ledger across rounds. Reuse a prior issue's stable ID for the same root cause, mark it RESOLVED only with concrete evidence, and retain resolved/superseded entries so later rounds do not rediscover them under new prose. New IDs are for genuinely new root causes, not narrower instances of an existing incomplete boundary analysis.
 
 ## Task
 ${intent}
@@ -1413,8 +1493,14 @@ ${labeledBlocks('Expert report', reports)}
 
 Output in EXACTLY this structure:
 
+## Coverage
+<changed subsystems and acceptance criteria actually inspected; name any material area not inspected>
+
+## Issue ledger
+<one line per current or prior issue: [ID] OPEN|RESOLVED|SUPERSEDED — root cause and evidence; or "none">
+
 ## Blocking
-<numbered list, each citing file:line and the concrete fix — or "none">
+<numbered list referencing its ledger ID, citing file:line and the concrete fix — or "none">
 
 ## Advisory
 <numbered list of non-blocking improvements — or "none">

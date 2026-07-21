@@ -111,6 +111,15 @@ const MetaSchema = z.object({
   // many loop-level retries have been spent against the cap.
   retryAt: z.string().nullable().default(null),
   autoRetries: z.number().int().default(0),
+  // A strategy epoch starts at the original plan and advances only when a
+  // human explicitly grants more attempts or rescue replaces a failing plan.
+  // Fix budgets are scoped to the current epoch so a genuine strategy change
+  // is not born with the previous strategy's budget already exhausted.
+  strategyEpoch: z.number().int().nonnegative().default(0),
+  strategyBudget: z.number().int().nonnegative().nullable().default(null),
+  // A staged plan is an intentional stop in the one-worktree execution model.
+  // The only in-place bypass is the human's explicit `atomic` answer.
+  executionOverride: z.enum(['atomic']).nullable().default(null),
   // Explicit complexity declared by `factory add`; null means runtime triage decides.
   complexity: TaskComplexitySchema.nullable().default(null),
   // Triage's durable task-demand profile. Complexity chooses the route; these
@@ -260,6 +269,9 @@ export async function addTask(
     resumeKind: null,
     retryAt: null,
     autoRetries: 0,
+    strategyEpoch: 0,
+    strategyBudget: null,
+    executionOverride: null,
     complexity: options.complexity ?? null,
     taskProfile: null,
     implementer: null,
@@ -464,6 +476,7 @@ export async function readPlan(task: Task): Promise<string | null> {
 const FailureRemediationSchema = z.enum(['code-fix', 'backoff'])
 const FailureSchema = z.object({
   attempt: z.number().int(),
+  strategyEpoch: z.number().int().nonnegative().default(0),
   gate: z.string(),
   summary: z.string(),
   detail: z.string(),
