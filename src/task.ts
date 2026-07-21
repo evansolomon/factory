@@ -32,6 +32,9 @@ export const StatusSchema = z.enum([
   'retrying',
   'done',
   'blocked',
+  // Terminal in this worktree because an ordered child-workstream chain owns
+  // completion. Unlike `closed`, the parent intent is still actively advancing.
+  'delegated',
   // Terminal without a commit: abandoned or superseded (e.g. the intent landed
   // through other work). `factory close` sets it; nothing reopens it.
   'closed',
@@ -54,13 +57,33 @@ export type TaskComplexity = z.infer<typeof TaskComplexitySchema>
 // once, which made it a black hole — never runnable, never reclaimed. Real tasks
 // fossilized there. Treating it as stranded lets the loop recover it like an
 // interrupted sharpening stage.
-const SETTLED: readonly Status[] = ['ready', 'needs-input', 'retrying', 'done', 'blocked', 'closed']
+const SETTLED: readonly Status[] = [
+  'ready',
+  'needs-input',
+  'retrying',
+  'done',
+  'blocked',
+  'delegated',
+  'closed',
+]
 
-// Terminal = the task record is history: committed work (done) or an abandoned/
-// superseded record (closed). Everything else is the worktree's live task —
+// Terminal = this worktree no longer owns execution: committed work (done), work
+// handed to a child chain (delegated), or an abandoned/superseded record (closed).
+// Everything else is the worktree's live task —
 // `factory add` enforces at most one of those per worktree.
 export function isTerminal(status: Status): boolean {
-  return status === 'done' || status === 'closed'
+  return status === 'done' || status === 'delegated' || status === 'closed'
+}
+
+// v0.2.11 recorded autonomous delegation as `closed` with this note. Recognize
+// those durable records as delegated so upgrading fixes status and prevents a
+// restarted parent watcher from competing with the already-created child chain.
+export function isDelegatedTask(task: { meta: { status: Status; note: string | null } }): boolean {
+  return (
+    task.meta.status === 'delegated' ||
+    (task.meta.status === 'closed' &&
+      /^delegated to \d+ serial workstreams \(.+\)$/.test(task.meta.note ?? ''))
+  )
 }
 
 // A task left in a live stage with no loop on it: its run-loop was killed mid-stage

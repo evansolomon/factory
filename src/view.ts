@@ -11,6 +11,7 @@ import { type Report, readReport } from './metrics.ts'
 import { prototypePrimaryArtifactUrl } from './prototype.ts'
 import {
   findTask,
+  isDelegatedTask,
   type LiveMeter,
   latestTask,
   loadTasks,
@@ -85,7 +86,15 @@ export async function printConfig(ctx: WorkContext): Promise<void> {
 
 // Settled/waiting statuses; anything else (planning…verifying, shipping,
 // sharpening) is a task actively being worked, so new stages show without a list.
-const SETTLED = new Set(['ready', 'needs-input', 'blocked', 'retrying', 'done'])
+const SETTLED = new Set([
+  'ready',
+  'needs-input',
+  'blocked',
+  'retrying',
+  'done',
+  'delegated',
+  'closed',
+])
 
 // Compact "time until" a future ISO instant, for the auto-retry countdown.
 function until(iso: string): string {
@@ -202,6 +211,7 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
   const retrying = tasks.filter((t) => t.meta.status === 'retrying' && notFeedbackPending(t))
   const blocked = tasks.filter((t) => t.meta.status === 'blocked' && notFeedbackPending(t))
   const done = tasks.filter((t) => t.meta.status === 'done' && notFeedbackPending(t))
+  const delegated = tasks.filter((t) => isDelegatedTask(t) && notFeedbackPending(t))
   const ready = tasks.filter((t) => t.meta.status === 'ready' && notFeedbackPending(t))
   const sharpenPending = ready.filter((t) => t.meta.sharpen === 'pending')
   const readyWork = ready.filter((t) => t.meta.sharpen !== 'pending')
@@ -253,6 +263,13 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
   if (done.length > 0) {
     log.log('')
     log.log(`✓ done (${done.length}):  ${done.map((t) => t.id).join('  ')}`)
+  }
+  if (delegated.length > 0) {
+    log.log('')
+    log.log(`⇢ delegated (${delegated.length}):`)
+    for (const t of delegated) {
+      log.log(`   ${t.id}${t.meta.note ? ` — ${t.meta.note}` : ''}`)
+    }
   }
   if (sharpenPending.length > 0) {
     const ids = sharpenPending.map((t) => t.id).join('  ')

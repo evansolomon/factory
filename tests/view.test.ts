@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import type { Config, RoleAgents, WorkContext } from '../src/config.ts'
 import { log } from '../src/log.ts'
 import { writePrototypeOutput } from '../src/prototype.ts'
-import { addTask } from '../src/task.ts'
-import { printShow } from '../src/view.ts'
+import { addTask, setStatus } from '../src/task.ts'
+import { printShow, printStatus } from '../src/view.ts'
 
 const config: Config = {
   retries: 10,
@@ -49,6 +49,10 @@ const agents: RoleAgents = {
 
 async function workContext(): Promise<WorkContext> {
   const root = await mkdtemp(`${tmpdir()}/factory-view-`)
+  const initialized = Bun.spawnSync(['git', 'init', '-q'], { cwd: root })
+  if (initialized.exitCode !== 0) {
+    throw new Error('could not initialize status test repository')
+  }
   const stateDir = `${root}/state`
   return {
     root,
@@ -114,5 +118,34 @@ describe('printShow', () => {
     expect(output).toContain('prototype artifact: file://')
     expect(output).toContain('/prototype-artifacts/mock.html')
     expect(output).not.toContain('do not inline')
+  })
+})
+
+describe('printStatus', () => {
+  test('renders delegated ownership as settled instead of active closed work', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Parent task', null)
+    await setStatus(task, 'delegated', 'delegated to 3 serial workstreams (parent-abcd1234)')
+
+    const lines = await captureLog(async () => {
+      await printStatus(ctx)
+    })
+    const output = lines.join('\n')
+
+    expect(output).toContain('⇢ delegated (1)')
+    expect(output).toContain('delegated to 3 serial workstreams')
+    expect(output).not.toContain('▶ now:')
+  })
+
+  test('renders v0.2.11 closed delegation records as delegated', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Legacy parent', null)
+    await setStatus(task, 'closed', 'delegated to 7 serial workstreams (parent-abcd1234)')
+
+    const lines = await captureLog(async () => {
+      await printStatus(ctx)
+    })
+
+    expect(lines.join('\n')).toContain('⇢ delegated (1)')
   })
 })

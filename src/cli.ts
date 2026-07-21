@@ -76,7 +76,7 @@ import {
   runEvalCase,
 } from './eval-run.ts'
 import { captureCorrection, captureEvalCase } from './evals.ts'
-import { run } from './exec.ts'
+import { run, spawnDetached } from './exec.ts'
 import {
   decideFeedbackRoute,
   feedbackRouteInput,
@@ -118,6 +118,7 @@ import {
   answerTask,
   appendFeedback,
   findTask,
+  isDelegatedTask,
   isStranded,
   isTerminal,
   latestTask,
@@ -183,6 +184,8 @@ COMMANDS
       needs-input answers (no need to switch terminals); set-aside work can still
       be resumed later.
       One run loop per worktree is enforced with a lock; a second loop fails fast.
+      A staged parent exits after delegation; its session-isolated child owns the
+      chain and lifecycle hooks from that point forward.
         --once        do one ready task, then exit (good for trying it out)
         --until-done  exit 0 when the workstream completes, 2 when it blocks,
                       3 when staged children own completion but a dirty aggregate
@@ -945,15 +948,21 @@ async function taskDelivery(
 }
 
 // The lane's state for attention and the idle label: the live task's parked
-// status when it is waiting on a human, 'done' when nothing is live and work
-// finished, else nothing. (Legacy multi-task queues: blocked wins.)
-function queueState(tasks: Task[]): AlertState | null {
+// status when it is waiting on a human, the terminal ownership state when this
+// worktree is finished/delegated, else nothing. (Legacy multi-task queues:
+// blocked wins.)
+type QueueState = AlertState | 'delegated' | null
+
+export function queueState(tasks: Task[]): QueueState {
   const live = tasks.filter((t) => !isTerminal(t.meta.status))
   if (live.length > 0) {
     if (live.some((t) => t.meta.status === 'blocked')) {
       return 'blocked'
     }
     return live.some((t) => t.meta.status === 'needs-input') ? 'needs-input' : null
+  }
+  if (tasks.some(isDelegatedTask)) {
+    return 'delegated'
   }
   return tasks.some((t) => t.meta.status === 'done') ? 'done' : null
 }
@@ -1194,7 +1203,7 @@ async function spawnViaCommand(
 }
 
 // The zero-config spawner: sibling worktree on a factory/<name> branch, task
-// queued with the backlog's name/intent/verify, and a detached
+// queued with the backlog's name/intent/verify, and a session-isolated
 // `factory run --until-done` whose output goes to $FACTORY_HOME/logs/<name>.log.
 // No tmux, no custom layout — configure dispatch.spawn to route through your own
 // tooling when you want those.
@@ -1252,16 +1261,20 @@ async function spawnBuiltin(ctx: RepoContext, entry: BacklogEntry): Promise<bool
   }
   await mkdir(dispatchLogsDir(), { recursive: true })
   const logFile = `${dispatchLogsDir()}/${entry.id}.log`
-  const quoted = invoke.map((part) => `'${part.replaceAll("'", `'\\''`)}'`).join(' ')
-  const detach = await run(
-    ['bash', '-lc', `nohup ${quoted} run --until-done --no-prompt >> '${logFile}' 2>&1 & disown`],
-    { cwd: dir, stdin: '', env }
-  )
-  if (detach.code !== 0) {
-    log.fail(`could not start the run loop for ${entry.id}`)
+  let pid: number
+  try {
+    pid = await spawnDetached([...invoke, 'run', '--until-done', '--no-prompt'], {
+      cwd: dir,
+      logFile,
+      env,
+    })
+  } catch (err) {
+    log.fail(
+      `could not start the run loop for ${entry.id}: ${err instanceof Error ? err.message : err}`
+    )
     return false
   }
-  log.info(`  worktree ${dir} · branch ${branch} · log ${logFile}`)
+  log.info(`  worktree ${dir} · branch ${branch} · pid ${pid} · log ${logFile}`)
   return true
 }
 
@@ -1549,6 +1562,14 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
       // window with the real whole-queue state on every poll.
       const tasks = await loadTasks(ctx)
       const remaining = queueState(tasks)
+      if (remaining === 'delegated') {
+        // The built-in child inherited this loop's lifecycle-hook target. Exit
+        // before attention tracking or any lifecycle emit: even a one-time
+        // "none" from a restarted parent can overwrite the child's live state.
+        log.info('delegated chain owns completion; parent loop exiting')
+        await release()
+        return 0
+      }
       const parked = tasks.flatMap((t) =>
         t.meta.status === 'needs-input' || t.meta.status === 'blocked'
           ? [{ id: t.id, status: t.meta.status }]
@@ -1590,6 +1611,7 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
       outcome = { ok: false, kind: 'blocked', reason }
     }
     if (outcome.ok) {
+      let handedOffChain = false
       await setStatus(task, 'done')
       await captureEvalCase(ctx, task, 'done')
       await emit(ctx.root, ctx.config.hooks, 'task.done', {
@@ -1607,7 +1629,12 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
         log.log(`brief: factory deck ${task.id}`)
       }
       if (task.meta.dispatchChainId) {
-        const next = await dispatchBacklog(await loadRepoContext(ctx.root), {
+        const repoCtx = await loadRepoContext(ctx.root)
+        const chainEntries = orderedChainEntries(
+          await loadBacklog(repoCtx),
+          task.meta.dispatchChainId
+        )
+        const next = await dispatchBacklog(repoCtx, {
           limit: 1,
           dryRun: false,
           chainId: task.meta.dispatchChainId,
@@ -1623,6 +1650,14 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
           await release()
           return 2
         }
+        handedOffChain = chainEntries.length > 0
+      }
+      if (handedOffChain) {
+        // The successor now owns this chain's inherited lifecycle-hook target.
+        // Exit even for an interactively resumed child, and do not clear the
+        // stage after spawn: either would race the successor's first update.
+        await release()
+        return 0
       }
       if (untilDone) {
         // Spawner contract: the workstream's task completed — exit 0 so the
@@ -1643,10 +1678,12 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
           await release()
           return 2
         }
-      } else if (untilDone) {
-        await emit(ctx.root, ctx.config.hooks, 'stage.change', { stage: '', active: false })
+      } else {
+        // Hook ownership moves to the session-isolated child. Do not emit a
+        // final parent stage/idle event after spawn: it can race and overwrite
+        // the child's first stage. This parent has no more work to coordinate.
         await release()
-        if (await hasChanges(ctx.root)) {
+        if (untilDone && (await hasChanges(ctx.root))) {
           log.info(
             `${task.id}: retaining the aggregate source worktree while its staged chain runs`
           )
@@ -2049,6 +2086,16 @@ async function delegateDecomposition(
     )
     previousId = entry.id
   }
+  await setStatus(
+    task,
+    'delegated',
+    `delegated to ${outcome.decomposition.units.length} serial workstreams (${outcome.chainId})`
+  )
+  await emit(ctx.root, ctx.config.hooks, 'task.decomposed', {
+    task: task.id,
+    chain: outcome.chainId,
+    units: outcome.decomposition.units.length,
+  })
   const dispatched = await dispatchBacklog(repoCtx, {
     limit: 1,
     dryRun: false,
@@ -2057,16 +2104,6 @@ async function delegateDecomposition(
   if (dispatched !== 0) {
     return false
   }
-  await setStatus(
-    task,
-    'closed',
-    `delegated to ${outcome.decomposition.units.length} serial workstreams (${outcome.chainId})`
-  )
-  await emit(ctx.root, ctx.config.hooks, 'task.decomposed', {
-    task: task.id,
-    chain: outcome.chainId,
-    units: outcome.decomposition.units.length,
-  })
   log.ok(
     `${task.id}: delegated ${outcome.decomposition.units.length} staged units; ` +
       'the next unit starts only after its predecessor finishes'
@@ -2141,7 +2178,7 @@ async function closeCommand(args: string[]): Promise<number> {
     log.fail(parsed.taskQuery ? `no task matching ${parsed.taskQuery}` : 'no parked task to close')
     return 1
   }
-  if (task.meta.status === 'done' || task.meta.status === 'closed') {
+  if (isTerminal(task.meta.status)) {
     log.fail(`${task.id} is already ${task.meta.status}`)
     return 1
   }

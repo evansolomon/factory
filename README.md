@@ -274,12 +274,15 @@ agents (with one schema-repair attempt) for a zod-validated ordered
 decomposition, writes `decomposition.md`, and queues the units as one serial
 dispatch chain. It spawns only the first worktree; a child releases the next
 unit only after its own review, verification, commit, and configured delivery
-complete. Each child inherits the parent's delivery decision and can inspect an
-aggregate source worktree as read-only evidence. This preserves one task per
-worktree and dependency order without turning correct staging into a human
-copy/paste chore. Malformed decompositions fail closed rather than dispatching
-unsafe work. Replying exactly `atomic` remains an escape hatch for a task parked
-by an older Factory version.
+complete. The parent becomes `delegated` and exits, handing lifecycle-hook
+ownership to the active child. Built-in children run in independent process
+sessions, so terminal Ctrl-C cannot kill supposedly detached work. Each child
+inherits the parent's delivery decision and can inspect an aggregate source
+worktree as read-only evidence. This preserves one task per worktree and
+dependency order without turning correct staging into a human copy/paste chore.
+Malformed decompositions fail closed rather than dispatching unsafe work.
+Replying exactly `atomic` remains an escape hatch for a task parked by an older
+Factory version.
 
 ## Usage
 
@@ -325,7 +328,8 @@ recursive replay fleets; the outer replay remains the source-of-truth gate.
   later (`factory retry`), **due for an auto-retry**, or **stranded
   mid-stage by a killed loop** (Ctrl-C/crash) get picked up automatically — so
   restarting after a Ctrl-C just resumes the interrupted task. Its lifetime = the
-  tmux window's lifetime.
+  tmux window's lifetime. The exception is a successfully delegated staged parent:
+  it exits immediately because its child now owns execution and lifecycle hooks.
   - `--once` — process one ready task, then exit (for proving things out).
   - `--until-done` — exit 0 when the task completes, 2 when it blocks, or 3 when
     staged children own completion but a dirty aggregate source worktree must be
@@ -609,7 +613,7 @@ Fields:
   confirm).
 - **`dispatch`** — optional override for `factory dispatch` and autonomous staged
   delivery. The zero-config default spawns each backlog item as a sibling worktree on a `factory/<name>`
-  branch running a detached `factory run --until-done` (logs under
+  branch running a session-isolated `factory run --until-done` (logs under
   `$FACTORY_HOME/logs/`). Set `{ "spawn": "<command>" }` to route through your
   own tooling instead (tmux windows, custom worktree layout): one backlog item
   per spawn, `FACTORY_INTENT`/`FACTORY_NAME`/`FACTORY_VERIFY` in its env, exit 0
@@ -1027,7 +1031,8 @@ non-trivial tasks), then continue through `reviewing` → `verifying` → `shipp
 → `done`. Other resting states are `needs-input` (paused for you), `retrying`
 (transient verify or ship failure waiting on backoff), and `blocked` (human
 attention required: no changes, review-panel failure, convergence stuck, or retry
-cap exhausted).
+cap exhausted). A staged parent rests as `delegated`: its ordered child chain owns
+completion, so it is terminal in the parent worktree without implying abandonment.
 `needs-input`, `retrying`, and `blocked` are set aside; `factory` moves on.
 State-aware `factory add` returns a `needs-input` task to `ready`; `factory retry`
 returns a blocked/retrying/stranded task to `ready`; due auto-retries are promoted
