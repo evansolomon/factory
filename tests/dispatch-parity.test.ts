@@ -99,6 +99,49 @@ async function runFactory(args: string[], cwd: string, home: string): Promise<Cl
 }
 
 describe('add parsing parity', () => {
+  test('dispatched children persist chain and inherited delivery state', async () => {
+    const cwd = await gitRepo()
+    const home = await tempDir('home')
+    const result = await runCommand(
+      ['bun', cliPath, 'add', '--raw', '--name', 'child-unit', 'Implement child'],
+      cwd,
+      envWith({
+        FACTORY_HOME: home,
+        AGENT_WORK_EDITOR: 'true',
+        FACTORY_DISPATCH_CHAIN_ID: 'parent-1234',
+        FACTORY_DISPATCH_DELIVERY: JSON.stringify({
+          mode: 'skill',
+          skill: 'ship',
+          source: 'manual',
+          confidence: 'high',
+          reason: 'Inherited.',
+        }),
+      })
+    )
+    expect(result.code).toBe(0)
+    const meta = await Bun.file(`${await sessionTasksDir(cwd, home)}/child-unit/meta.json`).json()
+    expect(meta.dispatchChainId).toBe('parent-1234')
+    expect(meta.delivery).toMatchObject({ mode: 'skill', skill: 'ship', source: 'manual' })
+  })
+
+  test('invalid inherited delivery fails at the child boundary', async () => {
+    const cwd = await gitRepo()
+    const home = await tempDir('home')
+    const result = await runCommand(
+      ['bun', cliPath, 'add', '--raw', '--name', 'invalid-child', 'Implement child'],
+      cwd,
+      envWith({
+        FACTORY_HOME: home,
+        AGENT_WORK_EDITOR: 'true',
+        FACTORY_DISPATCH_DELIVERY: '{"mode":"unknown"}',
+      })
+    )
+    expect(result.code).toBe(1)
+    expect(`${result.stdout}${result.stderr}`).toContain(
+      'FACTORY_DISPATCH_DELIVERY is not a valid task delivery value'
+    )
+  })
+
   test('complexity flags after --verify are rejected', async () => {
     const cwd = await gitRepo()
     const home = await tempDir('home')

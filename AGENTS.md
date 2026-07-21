@@ -91,10 +91,13 @@ its own agents must follow when the repo is the target.
   replan. The fix loop terminates by the convergence judge WITHIN mechanical
   bounds enforced in code: identical failure + unchanged worktree is never
   re-run, `config.retries` is a real per-strategy cap, and auto-retries have an
-  absolute ceiling. At the fix cap, structural rescue may replan or require
-  decomposition; mechanical ambiguity fails toward asking the human, never
-  silent churn or silent death. Keep new gates on the same auto-fix path, and route transient
-  failures (verify/ship) to the backoff auto-resume rather than a block.
+  absolute ceiling. At the fix cap, structural rescue may replan or decompose.
+  Confirmed staged work is zod-validated into an ordered dispatch chain: one child
+  worktree runs at a time, inherits the parent's delivery decision, and releases
+  its successor only after completion. Schema ambiguity fails closed; mechanically
+  copying known units into worktrees is not a human decision. Keep new gates on the
+  same auto-fix path, and route transient failures (verify/ship) to the backoff
+  auto-resume rather than a block.
 - **One loop, one active task.** `factory run` holds a lock per worktree; a second
   fresh `factory add` errors without `--force-new`. The workstream model is one
   task per worktree (spawner tools create/tear down worktrees per task); task

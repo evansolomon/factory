@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { addBacklog, loadBacklog, removeBacklog } from '../src/backlog.ts'
+import { addBacklog, loadBacklog, orderedChainEntries, removeBacklog } from '../src/backlog.ts'
 import type { Config, RepoContext, RoleAgents, WorkContext } from '../src/config.ts'
 import {
   addTask,
@@ -272,6 +272,7 @@ describe('task state transitions', () => {
     expect(task?.meta.strategyEpoch).toBe(0)
     expect(task?.meta.strategyBudget).toBeNull()
     expect(task?.meta.executionOverride).toBeNull()
+    expect(task?.meta.dispatchChainId).toBeNull()
     expect(task?.meta.complexity).toBeNull()
     expect(task?.meta.implementer).toBeNull()
     expect(task?.meta.delivery).toEqual({ mode: 'pending' })
@@ -557,6 +558,59 @@ describe('task state transitions', () => {
 })
 
 describe('backlog removal', () => {
+  test('persists ordered chain metadata and reuses the same queued unit', async () => {
+    const ctx = repoContext(await tempDir('backlog-chain'))
+    const options = {
+      suggestedId: 'parent-schema',
+      chainId: 'parent-1234',
+      chainOrder: 0,
+      previousId: 'parent-bootstrap',
+      delivery: {
+        mode: 'none' as const,
+        source: 'manual' as const,
+        confidence: null,
+        reason: 'Inherited.',
+      },
+    }
+    const first = await addBacklog(ctx, 'Add schema', 'bun test', options)
+    const repeated = await addBacklog(ctx, 'Add schema', 'bun test', options)
+
+    expect(repeated.id).toBe(first.id)
+    expect(await loadBacklog(ctx)).toEqual([first])
+    expect(first).toMatchObject({
+      id: 'parent-schema',
+      chainId: 'parent-1234',
+      chainOrder: 0,
+      previousId: 'parent-bootstrap',
+      delivery: { mode: 'none' },
+    })
+  })
+
+  test('selects only one chain in dependency order', async () => {
+    const ctx = repoContext(await tempDir('backlog-order'))
+    const later = await addBacklog(ctx, 'Later', null, {
+      chainId: 'target',
+      chainOrder: 2,
+    })
+    const unrelated = await addBacklog(ctx, 'Unrelated', null, {
+      chainId: 'other',
+      chainOrder: 0,
+    })
+    const first = await addBacklog(ctx, 'First', null, {
+      chainId: 'target',
+      chainOrder: 0,
+    })
+
+    expect(
+      orderedChainEntries([later, unrelated, first], 'target').map((entry) => entry.id)
+    ).toEqual([first.id, later.id])
+    expect(orderedChainEntries([later, unrelated, first], undefined)).toEqual([
+      later,
+      unrelated,
+      first,
+    ])
+  })
+
   test('removes an exact match', async () => {
     const ctx = repoContext(await tempDir('backlog'))
     const entry = await addBacklog(ctx, 'Exact task', null)

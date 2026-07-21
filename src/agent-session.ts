@@ -24,6 +24,8 @@ const ARTIFACT_ORDER = [
   'risk.plan.md',
   'risk.shape.md',
   'decomposition.md',
+  'decomposition.raw.json',
+  'decomposition.repair.json',
   'prototype.md',
   'implement.log.md',
   'diff.patch',
