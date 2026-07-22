@@ -220,9 +220,10 @@ const ConfigSchema = z.object({
   // workspace-write sandbox on implementation anyway.
   implementerAccess: z.enum(['write', 'full']).default('full'),
   // OPTIONAL override for how `factory dispatch` turns a backlog item into a
-  // live workstream. The built-in default needs no config: it creates a sibling
-  // worktree on a factory/<name> branch and starts a detached
-  // `factory run --until-done` in it, logging under $FACTORY_HOME/logs/. Set a
+  // live workstream. The built-in default needs no config: it creates a worktree
+  // under $FACTORY_HOME/worktrees/<repo-key> on a factory/<name> branch and
+  // starts a detached `factory run --until-done` in it, logging under
+  // $FACTORY_HOME/logs/. Set a
   // custom spawn command to route through your own tooling instead (tmux
   // windows, custom worktree layout): it runs once per item via `bash -lc` with
   // FACTORY_INTENT / FACTORY_NAME / FACTORY_VERIFY in its environment; exit 0
@@ -357,6 +358,13 @@ export function globalSkillsDir(): string {
 // Where the built-in dispatcher writes each spawned workstream's run output.
 export function dispatchLogsDir(): string {
   return `${factoryHome()}/logs`
+}
+
+// Built-in dispatcher checkouts are runtime-owned and must stay outside both
+// the source checkout and a potentially in-repo relative state dir.
+export async function dispatchWorktreesDir(root: string): Promise<string> {
+  const mainRoot = await mainWorktreeRoot(root)
+  return `${factoryHome()}/worktrees/${repoKey(await originUrl(mainRoot), mainRoot)}`
 }
 
 // Each session (per-worktree) state dir records which worktree it belongs to,

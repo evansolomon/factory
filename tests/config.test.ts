@@ -2,7 +2,14 @@ import { describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { $ } from 'bun'
-import { ConfigError, loadConfig, loadContext, normalizeOrigin, repoKey } from '../src/config.ts'
+import {
+  ConfigError,
+  dispatchWorktreesDir,
+  loadConfig,
+  loadContext,
+  normalizeOrigin,
+  repoKey,
+} from '../src/config.ts'
 
 async function tempDir(prefix: string): Promise<string> {
   return await mkdtemp(`${tmpdir()}/factory-${prefix}-`)
@@ -450,6 +457,19 @@ describe('cascade deep-merge for agents and specialists', () => {
 import { repoConfigFile } from '../src/config.ts'
 
 describe('repo-identity config layer', () => {
+  test('built-in worktrees stay under Factory home even with in-repo state', async () => {
+    await withFactoryHome(async (home) => {
+      const root = await tempDir('dispatch-worktrees')
+      await $`git -C ${root} init`.quiet()
+      await $`git -C ${root} remote add origin git@github.com:evansolomon/factory.git`.quiet()
+      await writeJson(`${root}/.factory.json`, { dir: '.factory-state' })
+
+      expect(await dispatchWorktreesDir(root)).toBe(
+        `${home}/worktrees/github.com-evansolomon-factory`
+      )
+    })
+  })
+
   test('repo config.json sits between global and .factory.json in the cascade', async () => {
     await withFactoryHome(async (home) => {
       const base = await tempDir('repo-layer')
