@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { agentLabel } from './agents.ts'
 import { configSources, globalConfigFile, type WorkContext } from './config.ts'
 import { deliveryLabel } from './delivery.ts'
+import { readDispatchChain } from './dispatch-chain.ts'
 import { currentBranch } from './git.ts'
 import { log } from './log.ts'
 import { type Report, readReport } from './metrics.ts'
@@ -268,7 +269,14 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
     log.log('')
     log.log(`⇢ delegated (${delegated.length}):`)
     for (const t of delegated) {
-      log.log(`   ${t.id}${t.meta.note ? ` — ${t.meta.note}` : ''}`)
+      const legacyChainId = /\(([^()]+)\)$/.exec(t.meta.note ?? '')?.[1]
+      const chainId = t.meta.dispatchChainId ?? legacyChainId
+      const chain = chainId ? await readDispatchChain(ctx.repoStateDir, chainId) : null
+      const chainSummary = chain
+        ? `${chain.status}${chain.currentUnit ? ` at ${chain.currentUnit}` : ''}` +
+          `${chain.reason ? ` — ${chain.reason}` : ''}`
+        : t.meta.note
+      log.log(`   ${t.id}${chainSummary ? ` — ${chainSummary}` : ''}`)
     }
   }
   if (sharpenPending.length > 0) {

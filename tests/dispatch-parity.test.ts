@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
@@ -109,7 +109,7 @@ async function runFactory(
 }
 
 describe('delegated run ownership', () => {
-  test('a restarted v0.2.11 parent exits instead of competing with its child hooks', async () => {
+  test('the parent stays up as the foreground supervisor without competing with child hooks', async () => {
     const cwd = await gitRepo()
     const home = await tempDir('home')
     const hookLog = `${cwd}/parent-hooks.log`
@@ -122,18 +122,152 @@ describe('delegated run ownership', () => {
         },
       })
     )
-    await writeTask(
-      await sessionTasksDir(cwd, home),
-      'parent',
-      'closed',
-      'delegated to 7 serial workstreams (parent-abcd1234)'
+    const task = await writeTask(await sessionTasksDir(cwd, home), 'parent', 'delegated')
+    const meta = await Bun.file(task.metaPath).json()
+    meta.dispatchChainId = 'parent-abcd1234'
+    await Bun.write(task.metaPath, JSON.stringify(meta))
+    const toplevel = await repoToplevel(cwd)
+    const repoKey = toplevel.replace(/\//g, '-').replace(/^-+/, '')
+    const chainsDir = `${home}/repos/${repoKey}/chains`
+    await mkdir(chainsDir, { recursive: true })
+    await Bun.write(
+      `${chainsDir}/parent-abcd1234.json`,
+      JSON.stringify({
+        id: 'parent-abcd1234',
+        parentTaskId: 'parent',
+        units: ['child-unit'],
+        currentUnit: 'child-unit',
+        status: 'running',
+        reason: null,
+        updatedAt: new Date().toISOString(),
+      })
     )
 
-    const result = await runFactory(['run'], cwd, home, 2_000)
+    const result = await runFactory(['run'], cwd, home, 300)
+
+    expect(result.code).not.toBe(0)
+    expect(result.stdout).toContain('parent: staged chain running — child-unit')
+    expect(await Bun.file(hookLog).exists()).toBe(false)
+  })
+
+  test('factory add in the parent routes answers to the active staged child', async () => {
+    const cwd = await gitRepo()
+    const home = await tempDir('home')
+    await Bun.write(`${cwd}/README.md`, 'test\n')
+    for (const cmd of [
+      ['git', 'add', 'README.md'],
+      ['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'init'],
+    ]) {
+      expect((await runCommand(cmd, cwd, envWith({}))).code).toBe(0)
+    }
+    const toplevel = await repoToplevel(cwd)
+    const repoKey = toplevel.replace(/\//g, '-').replace(/^-+/, '')
+    const childRoot = `${home}/worktrees/${repoKey}/child-unit`
+    await mkdir(`${home}/worktrees/${repoKey}`, { recursive: true })
+    expect(
+      (
+        await runCommand(
+          ['git', 'worktree', 'add', '-qb', 'factory/child-unit', childRoot],
+          cwd,
+          envWith({})
+        )
+      ).code
+    ).toBe(0)
+
+    const parent = await writeTask(await sessionTasksDir(cwd, home), 'parent', 'delegated')
+    const parentMeta = await Bun.file(parent.metaPath).json()
+    parentMeta.dispatchChainId = 'parent-route1234'
+    await Bun.write(parent.metaPath, JSON.stringify(parentMeta))
+    const childTasksDir = await sessionTasksDir(childRoot, home)
+    const child = await writeTask(childTasksDir, 'child-unit', 'needs-input')
+    await Bun.write(
+      `${childTasksDir.replace(/\/tasks$/, '')}/run.lock`,
+      JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })
+    )
+    const chainsDir = `${home}/repos/${repoKey}/chains`
+    await mkdir(chainsDir, { recursive: true })
+    await Bun.write(
+      `${chainsDir}/parent-route1234.json`,
+      JSON.stringify({
+        id: 'parent-route1234',
+        parentTaskId: 'parent',
+        units: ['child-unit'],
+        currentUnit: 'child-unit',
+        status: 'needs-input',
+        reason: 'awaiting answer',
+        updatedAt: new Date().toISOString(),
+      })
+    )
+
+    const result = await runFactory(['add', 'use the recommendation'], cwd, home)
 
     expect(result.code).toBe(0)
-    expect(result.stdout).toContain('delegated chain owns completion; parent loop exiting')
-    expect(await Bun.file(hookLog).exists()).toBe(false)
+    expect(result.stdout).toContain('routing to active staged unit')
+    expect(result.stdout).toContain('child-unit: routed as answer')
+    expect((await Bun.file(child.metaPath).json()).status).toBe('ready')
+  })
+
+  test('--until-done exits only after the durable chain reaches done', async () => {
+    const cwd = await gitRepo()
+    const home = await tempDir('home')
+    await Bun.write(`${cwd}/README.md`, 'test\n')
+    for (const cmd of [
+      ['git', 'add', 'README.md'],
+      ['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'init'],
+    ]) {
+      expect((await runCommand(cmd, cwd, envWith({}))).code).toBe(0)
+    }
+    const task = await writeTask(await sessionTasksDir(cwd, home), 'parent', 'delegated')
+    const meta = await Bun.file(task.metaPath).json()
+    meta.dispatchChainId = 'parent-done1234'
+    await Bun.write(task.metaPath, JSON.stringify(meta))
+    const toplevel = await repoToplevel(cwd)
+    const repoKey = toplevel.replace(/\//g, '-').replace(/^-+/, '')
+    const childRoot = `${home}/worktrees/${repoKey}/child-unit`
+    await mkdir(`${home}/worktrees/${repoKey}`, { recursive: true })
+    expect(
+      (
+        await runCommand(
+          ['git', 'worktree', 'add', '-qb', 'factory/child-unit', childRoot],
+          cwd,
+          envWith({})
+        )
+      ).code
+    ).toBe(0)
+    const childTasksDir = await sessionTasksDir(childRoot, home)
+    await writeTask(childTasksDir, 'child-unit', 'done')
+    const chainsDir = `${home}/repos/${repoKey}/chains`
+    await mkdir(chainsDir, { recursive: true })
+    await Bun.write(
+      `${chainsDir}/parent-done1234.json`,
+      JSON.stringify({
+        id: 'parent-done1234',
+        parentTaskId: 'parent',
+        units: ['child-unit'],
+        currentUnit: 'child-unit',
+        status: 'done',
+        reason: null,
+        updatedAt: new Date().toISOString(),
+      })
+    )
+
+    const result = await runFactory(['run', '--until-done'], cwd, home)
+
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain('parent: staged chain complete')
+    expect((await Bun.file(task.metaPath).json()).status).toBe('done')
+    expect(
+      await stat(childRoot).then(
+        () => true,
+        () => false
+      )
+    ).toBe(false)
+    expect(
+      await stat(childTasksDir).then(
+        () => true,
+        () => false
+      )
+    ).toBe(false)
   })
 })
 

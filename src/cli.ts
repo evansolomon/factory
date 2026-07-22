@@ -43,6 +43,7 @@ import {
   type Agent,
   ConfigError,
   dispatchLogsDir,
+  dispatchWorktreesDir,
   globalConfigFile,
   globalSkillsDir,
   loadContext,
@@ -65,6 +66,7 @@ import {
   type TaskDelivery,
   TaskDeliverySchema,
 } from './delivery.ts'
+import { createDispatchChain, readDispatchChain, updateDispatchChain } from './dispatch-chain.ts'
 import { composeInEditor, openEditor } from './editor.ts'
 import {
   appendEvalResult,
@@ -110,7 +112,7 @@ import {
 import { acquireRunLock, RunLockError, runLockHolder } from './lock.ts'
 import { log } from './log.ts'
 import { parseMoot } from './markers.ts'
-import { startPromptWorker } from './prompt.ts'
+import { type PromptWorker, startPromptWorker } from './prompt.ts'
 import { mootCheckPrompt, taskNamePrompt } from './prompts.ts'
 import { parseFormattedQuestions, sharpen } from './sharpen.ts'
 import {
@@ -184,12 +186,11 @@ COMMANDS
       needs-input answers (no need to switch terminals); set-aside work can still
       be resumed later.
       One run loop per worktree is enforced with a lock; a second loop fails fast.
-      A staged parent exits after delegation; its session-isolated child owns the
-      chain and lifecycle hooks from that point forward.
+      A staged parent stays as the foreground supervisor while session-isolated
+      children execute the chain and own their task-stage hooks.
         --once        do one ready task, then exit (good for trying it out)
-        --until-done  exit 0 when the workstream completes, 2 when it blocks,
-                      3 when staged children own completion but a dirty aggregate
-                      source worktree must be retained
+        --until-done  exit 0 when the workstream or staged chain completes,
+                      2 when it blocks
         --no-prompt   don't prompt inline; needs-input waits for factory add
 
   factory retry [task-id] [-m <note> | --edit]
@@ -350,6 +351,255 @@ CONFIG (.factory.json — cascades up the dir tree, closest wins)
 `
 
 const POLL_MS = 5000
+const ownedDispatchChains = new Set<string>()
+const followedDispatchLogs = new Map<string, number>()
+const announcedDispatchStates = new Map<string, string>()
+const supervisedPromptWorkers = new Map<string, { unit: string; worker: PromptWorker }>()
+
+function delegatedChainId(task: Task | undefined): string | null {
+  return task?.meta.dispatchChainId ?? /\(([^()]+)\)$/.exec(task?.meta.note ?? '')?.[1] ?? null
+}
+
+async function activeDelegatedContext(ctx: WorkContext): Promise<WorkContext | null> {
+  const parent = (await loadTasks(ctx)).find(isDelegatedTask)
+  const chainId = delegatedChainId(parent)
+  if (!chainId) {
+    return null
+  }
+  const chain = await readDispatchChain(ctx.repoStateDir, chainId)
+  if (!chain?.currentUnit || ctx.config.dispatch) {
+    return null
+  }
+  const dir = `${await dispatchWorktreesDir(ctx.root)}/${chain.currentUnit}`
+  try {
+    return await loadContext(dir)
+  } catch {
+    return null
+  }
+}
+
+async function restartDetachedWorker(ctx: WorkContext, task: Task): Promise<void> {
+  if ((await runLockHolder(ctx.stateDir)) !== null) {
+    return
+  }
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) {
+      env[key] = value
+    }
+  }
+  await mkdir(dispatchLogsDir(), { recursive: true })
+  const logFile = `${dispatchLogsDir()}/${task.id}.log`
+  const pid = await spawnDetached([...factoryInvocation(), 'run', '--until-done', '--no-prompt'], {
+    cwd: ctx.root,
+    logFile,
+    env,
+  })
+  log.info(`restarted staged unit ${task.id} · pid ${pid} · log ${logFile}`)
+}
+
+async function syncDelegatedPromptWorker(
+  ctx: WorkContext,
+  chainId: string,
+  unit: string | null,
+  interactive: boolean
+): Promise<void> {
+  if (!interactive || ctx.config.dispatch || !unit) {
+    return
+  }
+  const existing = supervisedPromptWorkers.get(chainId)
+  if (existing?.unit === unit) {
+    return
+  }
+  if (existing) {
+    supervisedPromptWorkers.delete(chainId)
+    void existing.worker.stop()
+  }
+  const dir = `${await dispatchWorktreesDir(ctx.root)}/${unit}`
+  try {
+    const childCtx = await loadContext(dir)
+    supervisedPromptWorkers.set(chainId, { unit, worker: startPromptWorker(childCtx) })
+  } catch {
+    // The durable chain record can advance just before the worktree is visible.
+    // The next supervisor poll retries without disturbing execution.
+  }
+}
+
+async function reportDispatchChain(
+  ctx: WorkContext,
+  task: Task,
+  patch: Parameters<typeof updateDispatchChain>[2]
+): Promise<void> {
+  const chainId = task.meta.dispatchChainId
+  if (!chainId) {
+    return
+  }
+  try {
+    const updated = await updateDispatchChain(ctx.repoStateDir, chainId, patch)
+    if (!updated) {
+      // Upgrade recovery: older parents delegated without a repo-level chain
+      // record. The first upgraded child adopts the live chain so the original
+      // foreground supervisor becomes useful again.
+      const repoCtx = await loadRepoContext(ctx.root)
+      const remainingUnits = orderedChainEntries(await loadBacklog(repoCtx), chainId).map(
+        (entry) => entry.id
+      )
+      await createDispatchChain(ctx.repoStateDir, {
+        id: chainId,
+        parentTaskId: '',
+        units: [task.id, ...remainingUnits.filter((unit) => unit !== task.id)],
+      })
+      await updateDispatchChain(ctx.repoStateDir, chainId, patch)
+    }
+  } catch (err) {
+    log.warn(
+      `dispatch chain state update failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+async function relayDispatchLog(chainId: string, unit: string): Promise<void> {
+  const path = `${dispatchLogsDir()}/${unit}.log`
+  const file = Bun.file(path)
+  if (!(await file.exists())) {
+    return
+  }
+  const content = await file.text()
+  const knownOffset = followedDispatchLogs.get(unit)
+  if (knownOffset === undefined && !ownedDispatchChains.has(chainId)) {
+    followedDispatchLogs.set(unit, content.length)
+    return
+  }
+  const offset = knownOffset ?? 0
+  if (content.length <= offset) {
+    return
+  }
+  for (const line of content.slice(offset).split('\n')) {
+    if (line) {
+      log.log(line)
+    }
+  }
+  followedDispatchLogs.set(unit, content.length)
+}
+
+async function cleanupDispatchWorktrees(ctx: RepoContext, units: string[]): Promise<void> {
+  if (ctx.config.dispatch) {
+    return
+  }
+  const worktreesDir = await dispatchWorktreesDir(ctx.mainRoot)
+  for (const unit of units) {
+    const dir = `${worktreesDir}/${unit}`
+    const exists = await stat(dir).then(
+      (value) => value.isDirectory(),
+      () => false
+    )
+    if (!exists) {
+      continue
+    }
+    const childStateDir = await loadContext(dir).then(
+      (child) => child.stateDir,
+      () => null
+    )
+    const removed = await run(['git', '-C', ctx.mainRoot, 'worktree', 'remove', dir], {
+      cwd: ctx.mainRoot,
+      stdin: '',
+    })
+    if (removed.code === 0) {
+      if (childStateDir) {
+        await rm(childStateDir, { recursive: true, force: true })
+      }
+      log.info(`cleaned up ${dir}`)
+    } else {
+      log.warn(`retaining ${dir}: ${(removed.stderr || removed.stdout).trim()}`)
+    }
+  }
+}
+
+type DelegatedState = 'running' | 'done' | 'blocked' | 'needs-input' | 'unknown'
+
+async function superviseDelegatedChain(
+  ctx: WorkContext,
+  tasks: Task[],
+  interactive: boolean
+): Promise<DelegatedState> {
+  const parent = tasks.find(isDelegatedTask)
+  const chainId = delegatedChainId(parent)
+  if (!parent || !chainId) {
+    return 'unknown'
+  }
+  const repoCtx = await loadRepoContext(ctx.root)
+  const chain = await readDispatchChain(dirname(repoCtx.backlogDir), chainId)
+  if (!chain) {
+    if (announcedDispatchStates.get(chainId) !== 'unknown') {
+      announcedDispatchStates.set(chainId, 'unknown')
+      log.warn(`${parent.id}: staged chain state is not available yet; still supervising`)
+    }
+    return 'unknown'
+  }
+  await syncDelegatedPromptWorker(ctx, chainId, chain.currentUnit, interactive)
+  const childCtx = await activeDelegatedContext(ctx)
+  const childLock = childCtx ? await runLockHolder(childCtx.stateDir) : null
+  const chainAge = Date.now() - Date.parse(chain.updatedAt)
+  if (childCtx && chainAge > POLL_MS * 2 && childLock === null) {
+    const childTask = (await loadTasks(childCtx)).find(
+      (task) =>
+        task.meta.status === 'ready' ||
+        task.meta.status === 'retrying' ||
+        isStranded(task.meta.status)
+    )
+    if (childTask) {
+      await restartDetachedWorker(childCtx, childTask)
+    }
+  }
+  if (chain.currentUnit) {
+    await relayDispatchLog(chainId, chain.currentUnit)
+  }
+  const announcement = `${chain.status}:${chain.currentUnit ?? ''}:${chain.reason ?? ''}`
+  if (announcedDispatchStates.get(chainId) !== announcement) {
+    announcedDispatchStates.set(chainId, announcement)
+    if (chain.status === 'running') {
+      log.info(
+        `${parent.id}: staged chain running${chain.currentUnit ? ` — ${chain.currentUnit}` : ''}`
+      )
+    } else if (chain.status === 'done') {
+      log.ok(`${parent.id}: staged chain complete`)
+    } else {
+      log.warn(
+        `${parent.id}: staged chain ${chain.status}${chain.currentUnit ? ` at ${chain.currentUnit}` : ''}` +
+          `${chain.reason ? ` — ${chain.reason}` : ''}`
+      )
+    }
+  }
+  if (chain.status === 'done') {
+    // The child records completion just before releasing its lock. Wait for the
+    // process to leave the worktree before attempting teardown.
+    if (childLock !== null) {
+      return 'running'
+    }
+    const prompt = supervisedPromptWorkers.get(chainId)
+    if (prompt) {
+      supervisedPromptWorkers.delete(chainId)
+      void prompt.worker.stop()
+    }
+    await cleanupDispatchWorktrees(repoCtx, chain.units)
+    await setStatus(parent, 'done', `staged chain ${chain.id} completed`)
+  } else if (chain.status === 'blocked' || chain.status === 'needs-input') {
+    if (chain.status === 'blocked') {
+      const prompt = supervisedPromptWorkers.get(chainId)
+      if (prompt) {
+        supervisedPromptWorkers.delete(chainId)
+        void prompt.worker.stop()
+      }
+    }
+    const note =
+      `staged chain ${chain.status}${chain.currentUnit ? ` at ${chain.currentUnit}` : ''}` +
+      `${chain.reason ? `: ${chain.reason}` : ''}`
+    if (parent.meta.note !== note) {
+      await setStatus(parent, 'delegated', note)
+    }
+  }
+  return chain.status
+}
 
 type MainOptions = {
   argv?: string[]
@@ -1202,13 +1452,13 @@ async function spawnViaCommand(
   return true
 }
 
-// The zero-config spawner: sibling worktree on a factory/<name> branch, task
+// The zero-config spawner: Factory-home worktree on a factory/<name> branch, task
 // queued with the backlog's name/intent/verify, and a session-isolated
 // `factory run --until-done` whose output goes to $FACTORY_HOME/logs/<name>.log.
-// No tmux, no custom layout — configure dispatch.spawn to route through your own
+// No tmux — configure dispatch.spawn to route through your own
 // tooling when you want those.
 async function spawnBuiltin(ctx: RepoContext, entry: BacklogEntry): Promise<boolean> {
-  const dir = `${ctx.mainRoot}-${entry.id}`
+  const dir = `${await dispatchWorktreesDir(ctx.mainRoot)}/${entry.id}`
   const branch = `factory/${entry.id}`
   let base = 'HEAD'
   if (entry.chainId) {
@@ -1240,6 +1490,7 @@ async function spawnBuiltin(ctx: RepoContext, entry: BacklogEntry): Promise<bool
       base = remoteHead.stdout.trim()
     }
   }
+  await mkdir(dirname(dir), { recursive: true })
   const wt = await run(['git', '-C', ctx.mainRoot, 'worktree', 'add', '-b', branch, dir, base], {
     cwd: ctx.mainRoot,
     stdin: '',
@@ -1317,7 +1568,11 @@ async function addCommand(args: string[]): Promise<number> {
     log.fail('add needs an intent (argument, editor, or stdin)')
     return 1
   }
-  const ctx = await loadContext(process.cwd())
+  const sourceCtx = await loadContext(process.cwd())
+  const ctx = (await activeDelegatedContext(sourceCtx)) ?? sourceCtx
+  if (ctx !== sourceCtx) {
+    log.info(`routing to active staged unit in ${ctx.root}`)
+  }
   const tasks = await loadTasks(ctx)
   const routeTasks = await addRouteTasks(tasks)
   const dirty = await hasChanges(ctx.root)
@@ -1362,6 +1617,9 @@ async function addCommand(args: string[]): Promise<number> {
   const task = findLoadedTask(tasks, route.taskId)
   if (route.kind === 'answer') {
     await answerTask(task, base.intent, { repoStateDir: ctx.repoStateDir })
+    if (ctx !== sourceCtx) {
+      await restartDetachedWorker(ctx, task)
+    }
     log.ok(`${task.id}: routed as answer — ${route.reason}`)
     return 0
   }
@@ -1372,6 +1630,9 @@ async function addCommand(args: string[]): Promise<number> {
     task.meta.autoRetries = 0
     task.meta.retryAt = null
     await setStatus(task, 'ready')
+    if (ctx !== sourceCtx) {
+      await restartDetachedWorker(ctx, task)
+    }
     log.ok(`${task.id}: routed as retry — ${route.reason}`)
     return 0
   }
@@ -1563,12 +1824,27 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
       const tasks = await loadTasks(ctx)
       const remaining = queueState(tasks)
       if (remaining === 'delegated') {
-        // The built-in child inherited this loop's lifecycle-hook target. Exit
-        // before attention tracking or any lifecycle emit: even a one-time
-        // "none" from a restarted parent can overwrite the child's live state.
-        log.info('delegated chain owns completion; parent loop exiting')
-        await release()
-        return 0
+        // Child worktrees own their task stages, but the process the human
+        // started remains the foreground supervisor for the whole chain. It
+        // follows child output and deliberately emits no competing idle/attention
+        // hooks while a child is active.
+        const chainState = await superviseDelegatedChain(ctx, tasks, interactive)
+        if (chainState === 'done') {
+          if (untilDone) {
+            await release()
+            return 0
+          }
+          continue
+        }
+        if ((chainState === 'blocked' || chainState === 'needs-input') && untilDone) {
+          await release()
+          return 2
+        }
+        if (once) {
+          break
+        }
+        await Bun.sleep(POLL_MS)
+        continue
       }
       const parked = tasks.flatMap((t) =>
         t.meta.status === 'needs-input' || t.meta.status === 'blocked'
@@ -1600,6 +1876,11 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
     attention.taskStarted(task.id)
     await setAlert('none')
     await emit(ctx.root, ctx.config.hooks, 'task.start', { task: task.id })
+    await reportDispatchChain(ctx, task, {
+      currentUnit: task.id,
+      status: 'running',
+      reason: null,
+    })
     // Isolate the task: any unhandled error blocks just this task (logged
     // clearly) and the loop keeps going, rather than killing the whole run.
     let outcome: TaskOutcome
@@ -1659,6 +1940,11 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
         await release()
         return 0
       }
+      await reportDispatchChain(ctx, task, {
+        currentUnit: task.id,
+        status: 'done',
+        reason: null,
+      })
       if (untilDone) {
         // Spawner contract: the workstream's task completed — exit 0 so the
         // surrounding tooling (tmux window, worktree teardown) can proceed.
@@ -1679,21 +1965,28 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
           return 2
         }
       } else {
-        // Hook ownership moves to the session-isolated child. Do not emit a
-        // final parent stage/idle event after spawn: it can race and overwrite
-        // the child's first stage. This parent has no more work to coordinate.
-        await release()
-        if (untilDone && (await hasChanges(ctx.root))) {
+        // The child owns stage hooks, while this foreground process follows the
+        // durable chain record and its log. Keep the aggregate source worktree
+        // intact as read-only evidence until the chain reaches a terminal state.
+        if (await hasChanges(ctx.root)) {
           log.info(
             `${task.id}: retaining the aggregate source worktree while its staged chain runs`
           )
-          return 3
         }
-        return 0
+        if (once) {
+          await release()
+          return 0
+        }
+        continue
       }
     } else if (outcome.kind === 'needs-input') {
       await setStatus(task, 'needs-input', 'awaiting answer — see questions.md')
       await emit(ctx.root, ctx.config.hooks, 'task.needs_input', { task: task.id })
+      await reportDispatchChain(ctx, task, {
+        currentUnit: task.id,
+        status: 'needs-input',
+        reason: 'awaiting answer',
+      })
       // In interactive mode the prompt worker announces and collects the answer
       // inline; point at state-aware `factory add` when nothing will prompt here.
       if (!interactive) {
@@ -1710,6 +2003,11 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
         reason: outcome.reason,
         retryAt: outcome.retryAt,
       })
+      await reportDispatchChain(ctx, task, {
+        currentUnit: task.id,
+        status: 'running',
+        reason: outcome.reason,
+      })
       const retryCount =
         outcome.autoRetries <= AUTO_CAP
           ? `${outcome.autoRetries}/${AUTO_CAP}`
@@ -1721,6 +2019,11 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
       await captureEvalCase(ctx, task, 'blocked', outcome.reason)
       await emit(ctx.root, ctx.config.hooks, 'task.blocked', {
         task: task.id,
+        reason: outcome.reason,
+      })
+      await reportDispatchChain(ctx, task, {
+        currentUnit: task.id,
+        status: 'blocked',
         reason: outcome.reason,
       })
       log.fail(`${task.id}: blocked — ${outcome.reason}`)
@@ -1872,7 +2175,8 @@ async function retryCommand(command: 'retry' | 'resume', args: string[]): Promis
   // mid-stage by a killed loop). The note is optional and only set via -m/--edit,
   // so a bare `factory retry` still just retries.
   const usage = `usage: factory ${command} [task-id] [-m <note> | --edit]`
-  const ctx = await loadContext(process.cwd())
+  const sourceCtx = await loadContext(process.cwd())
+  const ctx = (await activeDelegatedContext(sourceCtx)) ?? sourceCtx
   const parsed = parseInputArgs(args, usage)
   if (!parsed.ok) {
     log.fail(parsed.error)
@@ -1897,6 +2201,9 @@ async function retryCommand(command: 'retry' | 'resume', args: string[]): Promis
   task.meta.autoRetries = 0
   task.meta.retryAt = null
   await setStatus(task, 'ready')
+  if (ctx !== sourceCtx) {
+    await restartDetachedWorker(ctx, task)
+  }
   log.ok(`${task.id}: retrying — back in queue${note ? ' with note' : ''}`)
   return 0
 }
@@ -2027,8 +2334,21 @@ async function dispatchBacklog(
       continue
     }
     log.step(`dispatching ${entry.id}`)
+    if (entry.chainId) {
+      await updateDispatchChain(dirname(ctx.backlogDir), entry.chainId, {
+        currentUnit: entry.id,
+        status: 'running',
+        reason: null,
+      })
+    }
     const ok = spawn ? await spawnViaCommand(ctx, entry, spawn) : await spawnBuiltin(ctx, entry)
     if (!ok) {
+      if (entry.chainId) {
+        await updateDispatchChain(dirname(ctx.backlogDir), entry.chainId, {
+          status: 'blocked',
+          reason: `could not dispatch ${entry.id}`,
+        })
+      }
       log.info('stopping dispatch; the item stays in the backlog')
       return 1
     }
@@ -2064,6 +2384,7 @@ async function delegateDecomposition(
           }
         : task.meta.delivery
   let previousId: string | undefined
+  const entries: BacklogEntry[] = []
   for (const [index, unit] of outcome.decomposition.units.entries()) {
     const entry = await addBacklog(
       repoCtx,
@@ -2084,8 +2405,16 @@ async function delegateDecomposition(
         delivery,
       }
     )
+    entries.push(entry)
     previousId = entry.id
   }
+  task.meta.dispatchChainId = outcome.chainId
+  await createDispatchChain(dirname(repoCtx.backlogDir), {
+    id: outcome.chainId,
+    parentTaskId: task.id,
+    units: entries.map((entry) => entry.id),
+  })
+  ownedDispatchChains.add(outcome.chainId)
   await setStatus(
     task,
     'delegated',

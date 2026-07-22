@@ -274,9 +274,11 @@ agents (with one schema-repair attempt) for a zod-validated ordered
 decomposition, writes `decomposition.md`, and queues the units as one serial
 dispatch chain. It spawns only the first worktree; a child releases the next
 unit only after its own review, verification, commit, and configured delivery
-complete. The parent becomes `delegated` and exits, handing lifecycle-hook
-ownership to the active child. Built-in children run in independent process
-sessions, so terminal Ctrl-C cannot kill supposedly detached work. Each child
+complete. The parent becomes `delegated` but remains the foreground supervisor:
+it follows the active child's log and exits only when requested or, with
+`--until-done`, when the whole chain finishes or blocks. Built-in children run in
+independent process sessions, so a crashed supervisor does not kill the work; a
+restarted parent resumes from the repo-level chain record. Each child
 inherits the parent's delivery decision and can inspect an aggregate source
 worktree as read-only evidence. This preserves one task per worktree and
 dependency order without turning correct staging into a human copy/paste chore.
@@ -328,12 +330,11 @@ recursive replay fleets; the outer replay remains the source-of-truth gate.
   later (`factory retry`), **due for an auto-retry**, or **stranded
   mid-stage by a killed loop** (Ctrl-C/crash) get picked up automatically — so
   restarting after a Ctrl-C just resumes the interrupted task. Its lifetime = the
-  tmux window's lifetime. The exception is a successfully delegated staged parent:
-  it exits immediately because its child now owns execution and lifecycle hooks.
+  tmux window's lifetime. A successfully delegated staged parent stays up as the
+  foreground supervisor while isolated children own their task-stage hooks.
   - `--once` — process one ready task, then exit (for proving things out).
-  - `--until-done` — exit 0 when the task completes, 2 when it blocks, or 3 when
-    staged children own completion but a dirty aggregate source worktree must be
-    retained (the spawner-teardown contract used by dispatch).
+  - `--until-done` — exit 0 when the task or its staged chain completes, or 2 when
+    it blocks.
 - **`factory add --trivial`** is shorthand for `--complexity trivial`: it skips
   sharpening, persists the declared complexity in `meta.json`, and the later run
   uses the existing trivial fast path without model triage. `--complexity complex`
@@ -612,9 +613,11 @@ Fields:
   reverts to confirming the moment the numbers dip. Default `null` (always
   confirm).
 - **`dispatch`** — optional override for `factory dispatch` and autonomous staged
-  delivery. The zero-config default spawns each backlog item as a sibling worktree on a `factory/<name>`
-  branch running a session-isolated `factory run --until-done` (logs under
-  `$FACTORY_HOME/logs/`). Set `{ "spawn": "<command>" }` to route through your
+  delivery. The zero-config default spawns each backlog item under
+  `$FACTORY_HOME/worktrees/<repo-key>/` on a `factory/<name>` branch running
+  a session-isolated `factory run --until-done` (logs under `$FACTORY_HOME/logs/`).
+  Successful staged chains remove these worktrees; blocked chains retain them for
+  inspection and retry. Set `{ "spawn": "<command>" }` to route through your
   own tooling instead (tmux windows, custom worktree layout): one backlog item
   per spawn, `FACTORY_INTENT`/`FACTORY_NAME`/`FACTORY_VERIFY` in its env, exit 0
   removes the item. Staged chains additionally pass
@@ -908,7 +911,9 @@ exists only for model triage output. Repo-level state lives under the repo state
 dir, shared across linked worktrees and keyed by repo identity unless `dir` is
 relative:
 `LESSONS.md`, `LESSONS.candidates.md`, `metrics.db`, `eval-candidates/`, and
-`backlog/`. Structured learned lessons live in global factory state under
+`backlog/`. Staged execution also keeps small durable records under `chains/`.
+Built-in child checkouts live under `$FACTORY_HOME/worktrees/<repo-key>/`.
+Structured learned lessons live in global factory state under
 `$FACTORY_HOME/guidance/items/*.json`.
 
 factory treats the **whole worktree** as the task surface: it does not try to

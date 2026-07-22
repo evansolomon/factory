@@ -2,9 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import type { Config, RoleAgents, WorkContext } from '../src/config.ts'
+import { createDispatchChain, updateDispatchChain } from '../src/dispatch-chain.ts'
 import { log } from '../src/log.ts'
 import { writePrototypeOutput } from '../src/prototype.ts'
-import { addTask, setStatus } from '../src/task.ts'
+import { addTask, saveMeta, setStatus } from '../src/task.ts'
 import { printShow, printStatus } from '../src/view.ts'
 
 const config: Config = {
@@ -147,5 +148,28 @@ describe('printStatus', () => {
     })
 
     expect(lines.join('\n')).toContain('⇢ delegated (1)')
+  })
+
+  test('shows the active child from durable chain state', async () => {
+    const ctx = await workContext()
+    const task = await addTask(ctx, 'Parent task', null)
+    task.meta.dispatchChainId = 'parent-abcd1234'
+    await saveMeta(task)
+    await setStatus(task, 'delegated', 'delegated')
+    await createDispatchChain(ctx.repoStateDir, {
+      id: 'parent-abcd1234',
+      parentTaskId: task.id,
+      units: ['child-one'],
+    })
+    await updateDispatchChain(ctx.repoStateDir, 'parent-abcd1234', {
+      currentUnit: 'child-one',
+      status: 'running',
+    })
+
+    const lines = await captureLog(async () => {
+      await printStatus(ctx)
+    })
+
+    expect(lines.join('\n')).toContain(`${task.id} — running at child-one`)
   })
 })
