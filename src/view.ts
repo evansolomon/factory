@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { readdir } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { agentLabel } from './agents.ts'
@@ -191,14 +191,36 @@ function liveMeterSummary(meter: LiveMeter | null): string {
   return ` · runtime ${elapsed} · tokens ${input} in → ${output} out (${total} total)`
 }
 
+async function latestActivityAt(task: Task): Promise<string | null> {
+  try {
+    const activityFiles = (await readdir(task.dir)).filter((name) =>
+      name.endsWith('.activity.jsonl')
+    )
+    const modified = await Promise.all(
+      activityFiles.map(async (name) => (await stat(`${task.dir}/${name}`)).mtimeMs)
+    )
+    const latest = Math.max(...modified)
+    return Number.isFinite(latest) ? new Date(latest).toISOString() : null
+  } catch {
+    return null
+  }
+}
+
 // The catch-up dashboard: everything happening in this worktree, derived purely
 // from durable state (meta + questions files), so it's accurate no matter how
 // much scrollback you missed.
-export async function printStatus(ctx: WorkContext): Promise<void> {
+export async function printStatus(
+  ctx: WorkContext,
+  staged?: { parentTaskId: string; unit: string; position: number; total: number }
+): Promise<void> {
   const tasks = await loadTasks(ctx)
   const branch = await currentBranch(ctx.root)
   const plural = tasks.length === 1 ? '' : 's'
-  log.log(`factory — ${tasks.length} task record${plural} · ${branch}`)
+  const ownership = staged
+    ? `${staged.parentTaskId} → ${staged.unit} ` +
+      `(staged unit ${staged.position}/${staged.total}) · `
+    : ''
+  log.log(`factory — ${ownership}${tasks.length} task record${plural} · ${branch}`)
 
   if (tasks.length === 0) {
     log.info('no work in this factory — start with: factory add "…"')
@@ -221,8 +243,13 @@ export async function printStatus(ctx: WorkContext): Promise<void> {
     const meter = await readLiveMeter(t)
     const meterSummary = liveMeterSummary(meter)
     const stageAge = age(t.meta.updatedAt)
+    const activityAt = await latestActivityAt(t)
+    const activitySummary = activityAt ? ` · activity ${age(activityAt)} ago` : ''
     log.log('')
-    log.log(`▶ now:   ${t.id} — ${t.meta.status} (${stageAge} in stage)${meterSummary}`)
+    log.log(
+      `▶ now:   ${t.id} — ${t.meta.status} (${stageAge} in stage)` +
+        `${activitySummary}${meterSummary}`
+    )
   }
 
   if (needsInput.length > 0) {

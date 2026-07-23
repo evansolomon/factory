@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, stat } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
@@ -98,14 +98,73 @@ async function runFactory(
   args: string[],
   cwd: string,
   home: string,
-  timeout?: number
+  timeout?: number,
+  extraEnv: Record<string, string> = {}
 ): Promise<CliResult> {
   return await runCommand(
     ['bun', cliPath, ...args],
     cwd,
-    envWith({ FACTORY_HOME: home, AGENT_WORK_EDITOR: 'true' }),
+    envWith({ FACTORY_HOME: home, AGENT_WORK_EDITOR: 'true', ...extraEnv }),
     timeout
   )
+}
+
+async function delegatedWorktreeFixture(opts: {
+  childStatus: string
+  chainId: string
+  chainStatus: string
+  reason?: string
+  units: string[]
+}): Promise<{
+  cwd: string
+  home: string
+  child: { dir: string; metaPath: string }
+  childTasksDir: string
+}> {
+  const cwd = await gitRepo()
+  const home = await tempDir('home')
+  await Bun.write(`${cwd}/README.md`, 'test\n')
+  for (const cmd of [
+    ['git', 'add', 'README.md'],
+    ['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'init'],
+  ]) {
+    expect((await runCommand(cmd, cwd, envWith({}))).code).toBe(0)
+  }
+  const toplevel = await repoToplevel(cwd)
+  const repoKey = toplevel.replace(/\//g, '-').replace(/^-+/, '')
+  const childRoot = `${home}/worktrees/${repoKey}/child-unit`
+  await mkdir(`${home}/worktrees/${repoKey}`, { recursive: true })
+  expect(
+    (
+      await runCommand(
+        ['git', 'worktree', 'add', '-qb', 'factory/child-unit', childRoot],
+        cwd,
+        envWith({})
+      )
+    ).code
+  ).toBe(0)
+
+  const parent = await writeTask(await sessionTasksDir(cwd, home), 'parent', 'delegated')
+  const parentMeta = await Bun.file(parent.metaPath).json()
+  parentMeta.dispatchChainId = opts.chainId
+  await Bun.write(parent.metaPath, JSON.stringify(parentMeta))
+  const childTasksDir = await sessionTasksDir(childRoot, home)
+  const child = await writeTask(childTasksDir, 'child-unit', opts.childStatus)
+  const chainsDir = `${home}/repos/${repoKey}/chains`
+  await mkdir(chainsDir, { recursive: true })
+  await Bun.write(
+    `${chainsDir}/${opts.chainId}.json`,
+    JSON.stringify({
+      id: opts.chainId,
+      parentTaskId: 'parent',
+      units: opts.units,
+      currentUnit: 'child-unit',
+      status: opts.chainStatus,
+      reason: opts.reason ?? null,
+      updatedAt: new Date().toISOString(),
+    })
+  )
+  return { cwd, home, child, childTasksDir }
 }
 
 describe('delegated run ownership', () => {
@@ -151,53 +210,27 @@ describe('delegated run ownership', () => {
   })
 
   test('factory add in the parent routes answers to the active staged child', async () => {
-    const cwd = await gitRepo()
-    const home = await tempDir('home')
-    await Bun.write(`${cwd}/README.md`, 'test\n')
-    for (const cmd of [
-      ['git', 'add', 'README.md'],
-      ['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'init'],
-    ]) {
-      expect((await runCommand(cmd, cwd, envWith({}))).code).toBe(0)
-    }
-    const toplevel = await repoToplevel(cwd)
-    const repoKey = toplevel.replace(/\//g, '-').replace(/^-+/, '')
-    const childRoot = `${home}/worktrees/${repoKey}/child-unit`
-    await mkdir(`${home}/worktrees/${repoKey}`, { recursive: true })
-    expect(
-      (
-        await runCommand(
-          ['git', 'worktree', 'add', '-qb', 'factory/child-unit', childRoot],
-          cwd,
-          envWith({})
-        )
-      ).code
-    ).toBe(0)
-
-    const parent = await writeTask(await sessionTasksDir(cwd, home), 'parent', 'delegated')
-    const parentMeta = await Bun.file(parent.metaPath).json()
-    parentMeta.dispatchChainId = 'parent-route1234'
-    await Bun.write(parent.metaPath, JSON.stringify(parentMeta))
-    const childTasksDir = await sessionTasksDir(childRoot, home)
-    const child = await writeTask(childTasksDir, 'child-unit', 'needs-input')
+    const { cwd, home, child, childTasksDir } = await delegatedWorktreeFixture({
+      childStatus: 'needs-input',
+      chainId: 'parent-route1234',
+      chainStatus: 'needs-input',
+      reason: 'awaiting answer',
+      units: ['child-unit'],
+    })
+    await Bun.write(
+      `${child.dir}/questions.md`,
+      'DECISION: ASK\n\n- Should the child preserve the existing fallback?\n'
+    )
     await Bun.write(
       `${childTasksDir.replace(/\/tasks$/, '')}/run.lock`,
       JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })
     )
-    const chainsDir = `${home}/repos/${repoKey}/chains`
-    await mkdir(chainsDir, { recursive: true })
-    await Bun.write(
-      `${chainsDir}/parent-route1234.json`,
-      JSON.stringify({
-        id: 'parent-route1234',
-        parentTaskId: 'parent',
-        units: ['child-unit'],
-        currentUnit: 'child-unit',
-        status: 'needs-input',
-        reason: 'awaiting answer',
-        updatedAt: new Date().toISOString(),
-      })
-    )
+
+    const status = await runFactory(['status'], cwd, home)
+    expect(status.code).toBe(0)
+    expect(status.stdout).toContain('parent → child-unit (staged unit 1/1)')
+    expect(status.stdout).toContain('Should the child preserve the existing fallback?')
+    expect(status.stdout).toContain('factory add "…"')
 
     const result = await runFactory(['add', 'use the recommendation'], cwd, home)
 
@@ -205,6 +238,68 @@ describe('delegated run ownership', () => {
     expect(result.stdout).toContain('routing to active staged unit')
     expect(result.stdout).toContain('child-unit: routed as answer')
     expect((await Bun.file(child.metaPath).json()).status).toBe('ready')
+  })
+
+  test('parent inspection follows the active staged child', async () => {
+    const { cwd, home, child } = await delegatedWorktreeFixture({
+      childStatus: 'implementing',
+      chainId: 'parent-observe1234',
+      chainStatus: 'running',
+      units: ['child-unit', 'child-two'],
+    })
+    await Bun.write(
+      `${child.dir}/meter.json`,
+      JSON.stringify({
+        startedAt: new Date(Date.now() - 60_000).toISOString(),
+        updatedAt: new Date().toISOString(),
+        inputTokens: 1200,
+        outputTokens: 300,
+        stages: [],
+      })
+    )
+    await Bun.write(
+      `${child.dir}/implement.log.activity.jsonl`,
+      `${JSON.stringify({ type: 'assistant', message: { content: [] } })}\n`
+    )
+
+    const status = await runFactory(['status'], cwd, home)
+    expect(status.code).toBe(0)
+    expect(status.stdout).toContain('parent → child-unit (staged unit 1/2)')
+    expect(status.stdout).toContain('child-unit — implementing')
+    expect(status.stdout).toContain('activity ')
+    expect(status.stdout).toContain(' ago · runtime')
+    expect(status.stdout).toContain('tokens 1.2k in → 300 out')
+    expect(status.stdout).not.toContain('⇢ delegated')
+
+    const show = await runFactory(['show'], cwd, home)
+    expect(show.code).toBe(0)
+    expect(show.stdout).toContain('parent → active staged unit child-unit')
+    expect(show.stdout).toContain('child-unit  [implementing]')
+    expect(show.stdout).toContain('Fix child-unit')
+    expect(show.stdout).not.toContain('Fix parent')
+
+    const binDir = await tempDir('bin')
+    const fakeClaude = `${binDir}/claude`
+    await Bun.write(
+      fakeClaude,
+      [
+        '#!/bin/sh',
+        'case "$*" in',
+        '  *child-unit*) answer="child context" ;;',
+        '  *) answer="parent context" ;;',
+        'esac',
+        `printf '%s\\n' '{"type":"result","result":"'"$answer"'","usage":{"input_tokens":1,"output_tokens":1}}'`,
+        '',
+      ].join('\n')
+    )
+    await chmod(fakeClaude, 0o755)
+    const ask = await runFactory(['ask', '--print', 'what is happening?'], cwd, home, undefined, {
+      PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
+    })
+    expect(ask.code).toBe(0)
+    expect(ask.stdout).toContain('parent → active staged unit child-unit')
+    expect(ask.stdout).toContain('child context')
+    expect(ask.stdout).not.toContain('parent context')
   })
 
   test('--until-done exits only after the durable chain reaches done', async () => {
