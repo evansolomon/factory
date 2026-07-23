@@ -280,7 +280,11 @@ it follows the active child's log and exits only when requested or, with
 independent process sessions, so a crashed supervisor does not kill the work; a
 restarted parent resumes from the repo-level chain record. Each child
 inherits the parent's delivery decision and can inspect an aggregate source
-worktree as read-only evidence. This preserves one task per worktree and
+worktree as read-only evidence. From the parent worktree, `factory status`,
+unscoped `factory show`, and unscoped `factory ask` follow the active child while
+keeping the parent and staged-unit position visible. A child question therefore
+appears in the parent's status and `factory add "…"` there routes the answer back
+to that child. This preserves one task per worktree and
 dependency order without turning correct staging into a human copy/paste chore.
 Malformed decompositions fail closed rather than dispatching unsafe work.
 Replying exactly `atomic` remains an escape hatch for a task parked by an older

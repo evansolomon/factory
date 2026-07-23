@@ -7,7 +7,7 @@ import { type AddRouteTask, selectAddRoute } from './add-route.ts'
 import { type InteractiveAgent, openAgentSession } from './agent-session.ts'
 import { agentLabel, runAgent } from './agents.ts'
 import { type FlagValues, type Scanned, type ScanResult, scanArgs, scanFlags } from './args.ts'
-import { askFactory } from './ask.ts'
+import { askFactory, parseAskRequest } from './ask.ts'
 import { type AlertState, createAttentionTracker } from './attention.ts'
 import { type AutoUpgradeResult, maybeAutoUpgrade } from './auto-upgrade.ts'
 import {
@@ -66,7 +66,12 @@ import {
   type TaskDelivery,
   TaskDeliverySchema,
 } from './delivery.ts'
-import { createDispatchChain, readDispatchChain, updateDispatchChain } from './dispatch-chain.ts'
+import {
+  createDispatchChain,
+  type DispatchChain,
+  readDispatchChain,
+  updateDispatchChain,
+} from './dispatch-chain.ts'
 import { composeInEditor, openEditor } from './editor.ts'
 import {
   appendEvalResult,
@@ -361,9 +366,19 @@ function delegatedChainId(task: Task | undefined): string | null {
 }
 
 async function activeDelegatedContext(ctx: WorkContext): Promise<WorkContext | null> {
+  return (await activeDelegatedTarget(ctx))?.ctx ?? null
+}
+
+type ActiveDelegatedTarget = {
+  parent: Task
+  chain: DispatchChain
+  ctx: WorkContext
+}
+
+async function activeDelegatedTarget(ctx: WorkContext): Promise<ActiveDelegatedTarget | null> {
   const parent = (await loadTasks(ctx)).find(isDelegatedTask)
   const chainId = delegatedChainId(parent)
-  if (!chainId) {
+  if (!parent || !chainId) {
     return null
   }
   const chain = await readDispatchChain(ctx.repoStateDir, chainId)
@@ -372,10 +387,14 @@ async function activeDelegatedContext(ctx: WorkContext): Promise<WorkContext | n
   }
   const dir = `${await dispatchWorktreesDir(ctx.root)}/${chain.currentUnit}`
   try {
-    return await loadContext(dir)
+    return { parent, chain, ctx: await loadContext(dir) }
   } catch {
     return null
   }
+}
+
+function logDelegatedRoute(target: ActiveDelegatedTarget): void {
+  log.info(`${target.parent.id} → active staged unit ${target.chain.currentUnit}`)
 }
 
 async function restartDetachedWorker(ctx: WorkContext, task: Task): Promise<void> {
@@ -2575,13 +2594,30 @@ async function gcCommand(flags: FlagValues<typeof GC_OPTIONS>): Promise<number> 
 }
 
 async function statusCommand(): Promise<number> {
-  const ctx = await loadContext(process.cwd())
-  await printStatus(ctx)
+  const sourceCtx = await loadContext(process.cwd())
+  const target = await activeDelegatedTarget(sourceCtx)
+  if (!target?.chain.currentUnit) {
+    await printStatus(sourceCtx)
+    return 0
+  }
+  const position = target.chain.units.indexOf(target.chain.currentUnit) + 1
+  await printStatus(target.ctx, {
+    parentTaskId: target.parent.id,
+    unit: target.chain.currentUnit,
+    position,
+    total: target.chain.units.length,
+  })
   return 0
 }
 
 async function askCommand(args: string[]): Promise<number> {
-  const ctx = await loadContext(process.cwd())
+  const sourceCtx = await loadContext(process.cwd())
+  const parentRequest = parseAskRequest(args, await loadTasks(sourceCtx))
+  const target = parentRequest.taskId ? null : await activeDelegatedTarget(sourceCtx)
+  const ctx = target?.ctx ?? sourceCtx
+  if (target) {
+    logDelegatedRoute(target)
+  }
   return askFactory(ctx, args)
 }
 
@@ -2724,7 +2760,13 @@ async function skillsCommand(rest: string[]): Promise<number> {
 }
 
 async function showCommand(args: string[]): Promise<number> {
-  const ctx = await loadContext(process.cwd())
+  const sourceCtx = await loadContext(process.cwd())
+  const explicitParent = args[0] ? await findTask(sourceCtx, args[0]) : null
+  const target = explicitParent ? null : await activeDelegatedTarget(sourceCtx)
+  const ctx = target?.ctx ?? sourceCtx
+  if (target) {
+    logDelegatedRoute(target)
+  }
   return printShow(ctx, args[0], args[1])
 }
 
