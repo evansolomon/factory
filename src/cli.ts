@@ -38,7 +38,13 @@ import {
 } from './commands.ts'
 import { runComplete } from './complete.ts'
 import { runCompletion } from './completion.ts'
-import { AUTO_CAP, deliverTask, runTask, type TaskOutcome } from './conductor.ts'
+import {
+  AUTO_CAP,
+  deliverTask,
+  IMPLEMENTATION_NO_CHANGES,
+  runTask,
+  type TaskOutcome,
+} from './conductor.ts'
 import {
   type Agent,
   ConfigError,
@@ -91,7 +97,7 @@ import {
   latestFeedbackTarget,
   renderTerminalFeedback,
 } from './feedback.ts'
-import { hasChanges, NotARepoError, repoRoot } from './git.ts'
+import { diffSince, hasChanges, NotARepoError, parentSha, repoRoot } from './git.ts'
 import {
   deleteGuidance,
   editGuidance,
@@ -2239,6 +2245,17 @@ async function retryCommand(command: 'retry' | 'resume', args: string[]): Promis
     return 1
   }
   const note = await resolveMessage(parsed, 'optional')
+  if (
+    task.meta.note === IMPLEMENTATION_NO_CHANGES &&
+    task.meta.implementationBaseCommit === null &&
+    !(await hasChanges(ctx.root))
+  ) {
+    const base = await parentSha(ctx.root)
+    if (base && (await diffSince(ctx.root, base))) {
+      task.meta.implementationBaseCommit = base
+      log.warn(`${task.id}: recovering committed implementation from ${base}..HEAD`)
+    }
+  }
   task.meta.resume = true
   task.meta.resumeNote = note
   task.meta.resumeKind = 'manual'

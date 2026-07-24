@@ -365,7 +365,10 @@ recursive replay fleets; the outer replay remains the source-of-truth gate.
   killed loop); an optional note (via `-m` or `--edit`) becomes fix-context for the
   retry. Use it for review-panel blocks (after you've looked) or to force a transient
   retry now. A running `factory run` already auto-reclaims stranded tasks, so this is
-  mainly the manual equivalent when no loop is up. `factory resume` is a deprecated alias.
+  mainly the manual equivalent when no loop is up. If an implementer violated its
+  no-commit contract, Factory reviews and verifies the committed range before adopting
+  HEAD; retry also recovers older false “implementation produced no changes” blocks this
+  way. `factory resume` is a deprecated alias.
 - **`factory feedback`** records critique after you review or test existing task
   progress. It is not new work (`add`) and it is not an ephemeral retry note
   (`retry`): feedback is appended to `human-feedback.md`, shown by `factory show`, and

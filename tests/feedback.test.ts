@@ -173,6 +173,7 @@ function task(id: string, updatedAt: string, overrides: Partial<Task['meta']> = 
       updatedAt,
       commit: null,
       commitStartedAt: null,
+      implementationBaseCommit: null,
       note: null,
       sharpen: 'done',
       resume: false,

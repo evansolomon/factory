@@ -15,6 +15,7 @@ function taskWithProposal(): Task {
       updatedAt: '2026-01-01T00:00:00.000Z',
       commit: null,
       commitStartedAt: null,
+      implementationBaseCommit: null,
       note: null,
       sharpen: 'done',
       resume: true,

@@ -36,6 +36,7 @@ import {
   commitAll,
   commitDiff,
   currentBranch,
+  diffSince,
   hasChanges,
   headSha,
   recentAuthorCommitSubjects,
@@ -429,6 +430,26 @@ type FeedbackContext = {
   analysis: string
 }
 
+async function taskDiff(ctx: WorkContext, task: Task): Promise<string> {
+  const working = await worktreeDiff(ctx.root)
+  if (!task.meta.implementationBaseCommit) {
+    return working
+  }
+  const committed = await diffSince(ctx.root, task.meta.implementationBaseCommit)
+  return [`# git diff ${task.meta.implementationBaseCommit}..HEAD`, committed, '', working].join(
+    '\n'
+  )
+}
+
+async function completedTaskDiff(ctx: WorkContext, task: Task): Promise<string | null> {
+  if (!task.meta.commit) {
+    return null
+  }
+  return task.meta.implementationBaseCommit
+    ? taskDiff(ctx, task)
+    : commitDiff(ctx.root, task.meta.commit)
+}
+
 async function analyzeFeedbackIfPending(
   ctx: WorkContext,
   task: Task,
@@ -450,7 +471,7 @@ async function analyzeFeedbackIfPending(
     agentLabel(ctx.agents.implementer),
     stageAgent(ctx.agents.implementer, {
       root: ctx.root,
-      prompt: feedbackAnalysisPrompt(intent, raw, await worktreeDiff(ctx.root), finalPlan),
+      prompt: feedbackAnalysisPrompt(intent, raw, await taskDiff(ctx, task), finalPlan),
       access: 'read',
       outFile: `${task.dir}/human-feedback.analysis.md`,
     })
@@ -870,7 +891,7 @@ async function postmortem(
   try {
     const intent = await readIntent(task)
     const history = (await readFailures(task)).map((f) => `${f.gate}: ${f.summary}`)
-    const diff = await worktreeDiff(ctx.root)
+    const diff = await taskDiff(ctx, task)
     const out = await agentStep(
       meter,
       'postmortem',
@@ -918,6 +939,7 @@ async function postmortem(
 // Once the cap is spent, the convergence judge decides whether to keep retrying,
 // ask for input, or stop as terminal.
 export const AUTO_CAP = 5
+export const IMPLEMENTATION_NO_CHANGES = 'implementation produced no changes'
 // Absolute ceiling on judge-approved retries past AUTO_CAP. The judge could
 // historically vote RETRY_LATER forever, pinning a task to hourly retries of a
 // deterministic failure with no human contact. Past this, the human is asked.
@@ -2715,7 +2737,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   // fix pass still gets the design-context note. (The UX review gate detects it too.)
   if (resuming && ctx.config.ux) {
     const diffUserFacing =
-      task.meta.userFacing === undefined ? uiInDiff(await worktreeDiff(ctx.root)) : false
+      task.meta.userFacing === undefined ? uiInDiff(await taskDiff(ctx, task)) : false
     userFacing = resumeUserFacing(ctx.config.ux, task.meta.userFacing, diffUserFacing)
   }
 
@@ -2868,7 +2890,8 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
   }
   // On resume with an existing diff, re-enter at the gates: run them against the
   // work already in the worktree, and only implement (a fix pass) if one fails.
-  let skipImplement = resuming && (await hasChanges(ctx.root))
+  let skipImplement =
+    resuming && ((await hasChanges(ctx.root)) || task.meta.implementationBaseCommit !== null)
   // A note-less auto-retry is a transient retry: re-run the gates on the existing
   // diff but DON'T re-implement first (a verify env-flake mustn't churn code). If
   // those gates now surface a real code/review failure, let the normal convergence
@@ -2941,7 +2964,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       const failureCtx = parts.join('\n\n')
       const priorSummaries = failures.slice(0, -1).map((f) => `${f.gate}: ${f.summary}`)
       if (fixing) {
-        await writeArtifact(task, 'diff.patch', await worktreeDiff(ctx.root))
+        await writeArtifact(task, 'diff.patch', await taskDiff(ctx, task))
       }
       const stagePrompt = fixing
         ? fixPrompt(
@@ -2973,6 +2996,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
       // direct evidence the "easy" routing call was wrong.
       const implementAgent = fixing ? lead : routedImplementer
       stats.implementer ??= agentLabel(implementAgent)
+      const implementationHead = await headSha(ctx.root)
       await agentStep(
         meter,
         'implement',
@@ -3009,13 +3033,23 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
         await persistLiveMeter(meter)
       }
 
-      if (!(await hasChanges(ctx.root))) {
+      const implementedHead = await headSha(ctx.root)
+      if (implementationHead !== implementedHead && task.meta.implementationBaseCommit === null) {
+        task.meta.implementationBaseCommit = implementationHead
+        await saveMeta(task)
+        log.warn(
+          `${task.id}: implementer committed despite its no-commit contract; ` +
+            `reviewing ${implementationHead}..${implementedHead}`
+        )
+      }
+
+      if (!(await hasChanges(ctx.root)) && task.meta.implementationBaseCommit === null) {
         return blocked(
           ctx,
           task,
           meter,
           stats,
-          'implementation produced no changes',
+          IMPLEMENTATION_NO_CHANGES,
           undefined,
           stageGuidance('postmortem')
         )
@@ -3028,7 +3062,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // advisory, so adding an expert can't independently block or thrash. Verify
     // stays a separate objective gate after this.
     await setStatus(task, 'reviewing')
-    const diff = await worktreeDiff(ctx.root)
+    const diff = await taskDiff(ctx, task)
     const diffPath = `${task.dir}/diff.patch`
     const priorDiff = await readArtifact(task, 'diff.patch')
     const previousDiffPath = priorDiff ? `${task.dir}/diff.previous.patch` : null
@@ -3278,7 +3312,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
             outFile: `${task.dir}/quickfix.log.md`,
           })
         )
-        await writeArtifact(task, 'diff.patch', await worktreeDiff(ctx.root))
+        await writeArtifact(task, 'diff.patch', await taskDiff(ctx, task))
       }
     }
     if (verdict !== 'PASS') {
@@ -3435,7 +3469,7 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     // convergence loop instead of turning an opaque shell exception into a block.
     const consolidatedVerdict = await readArtifact(task, 'consolidated.md')
     const verifyLog = await readArtifact(task, 'verify.log')
-    const diffForProof = await worktreeDiff(ctx.root)
+    const diffForProof = await taskDiff(ctx, task)
     const proof = [
       `# Proof — ${task.id}`,
       '',
@@ -3458,63 +3492,74 @@ export async function runTask(ctx: WorkContext, task: Task): Promise<TaskOutcome
     ].join('\n')
     await writeArtifact(task, 'proof.md', proof)
 
-    const message = await synthesizeCommitMessage(ctx, task, meter, intent, finalPlan, verify)
-    // Mark commit intent BEFORE running git commit: a crash between the commit and
-    // the meta save must be recoverable (see meta.commitStartedAt).
-    task.meta.commitStartedAt = new Date().toISOString()
-    await saveMeta(task)
-    const commit = await commitAll(ctx.root, message)
-    await writeArtifact(task, 'commit.log', commit.ok ? commit.output : commit.detail)
-    if (!commit.ok) {
-      task.meta.commitStartedAt = null
+    const pendingChanges = await hasChanges(ctx.root)
+    if (!pendingChanges && task.meta.implementationBaseCommit) {
+      task.meta.commit = await headSha(ctx.root)
+      await writeArtifact(
+        task,
+        'commit.log',
+        `adopted implementer commit ${task.meta.commit} after review and verification`
+      )
+    } else {
+      const message = await synthesizeCommitMessage(ctx, task, meter, intent, finalPlan, verify)
+      // Mark commit intent BEFORE running git commit: a crash between the commit and
+      // the meta save must be recoverable (see meta.commitStartedAt).
+      task.meta.commitStartedAt = new Date().toISOString()
       await saveMeta(task)
-      const detail = clipFailureOutput(commit.detail)
-      // A newly discovered commit hook failure gets its own bounded repair budget.
-      // Earlier review fixes must not consume every chance to address a gate that
-      // could only run after review and verification passed.
-      const commitAttempt = gateCodeFixAttemptCount(failures, 'commit', task.meta.strategyEpoch)
-      const action = await assessFailure(
-        ctx,
-        task,
-        meter,
-        intent,
-        failures,
-        commitAttempt,
-        hardCap,
-        'commit',
-        detail
-      )
-      if (action.kind === 'continue') {
-        attempt++
-        continue
+      const commit = await commitAll(ctx.root, message)
+      await writeArtifact(task, 'commit.log', commit.ok ? commit.output : commit.detail)
+      if (!commit.ok) {
+        task.meta.commitStartedAt = null
+        await saveMeta(task)
+        const detail = clipFailureOutput(commit.detail)
+        // A newly discovered commit hook failure gets its own bounded repair budget.
+        // Earlier review fixes must not consume every chance to address a gate that
+        // could only run after review and verification passed.
+        const commitAttempt = gateCodeFixAttemptCount(failures, 'commit', task.meta.strategyEpoch)
+        const action = await assessFailure(
+          ctx,
+          task,
+          meter,
+          intent,
+          failures,
+          commitAttempt,
+          hardCap,
+          'commit',
+          detail
+        )
+        if (action.kind === 'continue') {
+          attempt++
+          continue
+        }
+        if (action.kind === 'retry') {
+          return retryLater(ctx, task, meter, stats, action.reason)
+        }
+        if (action.kind === 'needs-input') {
+          return needsInput(ctx, task, meter, stats, action.questions)
+        }
+        const rescued = await rescueOnce(detail)
+        const recovery = await handleRescue(rescued, detail)
+        if (recovery === 'continue') {
+          continue
+        }
+        if (recovery) {
+          return recovery
+        }
+        return blocked(
+          ctx,
+          task,
+          meter,
+          stats,
+          'commit failed and could not be repaired automatically',
+          detail,
+          stageGuidance('postmortem')
+        )
       }
-      if (action.kind === 'retry') {
-        return retryLater(ctx, task, meter, stats, action.reason)
-      }
-      if (action.kind === 'needs-input') {
-        return needsInput(ctx, task, meter, stats, action.questions)
-      }
-      const rescued = await rescueOnce(detail)
-      const recovery = await handleRescue(rescued, detail)
-      if (recovery === 'continue') {
-        continue
-      }
-      if (recovery) {
-        return recovery
-      }
-      return blocked(
-        ctx,
-        task,
-        meter,
-        stats,
-        'commit failed and could not be repaired automatically',
-        detail,
-        stageGuidance('postmortem')
-      )
+
+      task.meta.commit = await headSha(ctx.root)
+      task.meta.commitStartedAt = null
     }
 
-    task.meta.commit = await headSha(ctx.root)
-    task.meta.commitStartedAt = null
     if (feedbackContext) {
       await refreshFeedbackState(task)
       markFeedbackConsumed(task, feedbackContext.count)
@@ -3544,7 +3589,7 @@ function clipFeedbackInput(text: string | null, max: number = FEEDBACK_INPUT_LIM
 async function writeCompletionFeedback(ctx: WorkContext, task: Task, intent: string, meter: Meter) {
   try {
     await progress(ctx, task, 'feedback', 'summarizing handoff')
-    const diff = task.meta.commit ? await commitDiff(ctx.root, task.meta.commit) : null
+    const diff = await completedTaskDiff(ctx, task)
     await agentStep(
       meter,
       'feedback',
@@ -3575,7 +3620,7 @@ async function writeCompletionFeedback(ctx: WorkContext, task: Task, intent: str
 async function writeCompletionDeck(ctx: WorkContext, task: Task, intent: string, meter: Meter) {
   try {
     await progress(ctx, task, 'deck', 'building brief')
-    const diff = task.meta.commit ? await commitDiff(ctx.root, task.meta.commit) : null
+    const diff = await completedTaskDiff(ctx, task)
     const html = await buildDeckHtml(async () =>
       agentStep(
         meter,

@@ -599,6 +599,70 @@ describe('backlog add parsing parity', () => {
 })
 
 describe('message-command parsing parity', () => {
+  test('retry recovers an implementation committed before the no-changes block', async () => {
+    const cwd = await gitRepo()
+    const home = await tempDir('home')
+    await Bun.write(`${cwd}/base.txt`, 'base\n')
+    expect((await runCommand(['git', 'add', 'base.txt'], cwd, envWith({}))).code).toBe(0)
+    expect(
+      (
+        await runCommand(
+          [
+            'git',
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-qm',
+            'base',
+          ],
+          cwd,
+          envWith({})
+        )
+      ).code
+    ).toBe(0)
+    const base = (
+      await runCommand(['git', 'rev-parse', '--short', 'HEAD'], cwd, envWith({}))
+    ).stdout.trim()
+    const task = await writeTask(
+      await sessionTasksDir(cwd, home),
+      'stuck-task',
+      'blocked',
+      'implementation produced no changes'
+    )
+    await Bun.write(`${cwd}/implementation.txt`, 'implemented\n')
+    expect((await runCommand(['git', 'add', 'implementation.txt'], cwd, envWith({}))).code).toBe(0)
+    expect(
+      (
+        await runCommand(
+          [
+            'git',
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-qm',
+            'implementation',
+          ],
+          cwd,
+          envWith({})
+        )
+      ).code
+    ).toBe(0)
+
+    const result = await runFactory(['retry', 'stuck-task'], cwd, home)
+
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain(
+      `stuck-task: recovering committed implementation from ${base}..HEAD`
+    )
+    const meta = await Bun.file(task.metaPath).json()
+    expect(meta.status).toBe('ready')
+    expect(meta.implementationBaseCommit).toBe(base)
+  })
+
   test('repeated -m: last value wins as the retry note', async () => {
     const cwd = await gitRepo()
     const home = await tempDir('home')

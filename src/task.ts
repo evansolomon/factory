@@ -117,6 +117,11 @@ const MetaSchema = z.object({
   // "no changes" while the real work sat committed. With this flag, a resume
   // that finds a clean tree adopts HEAD as the task's commit instead.
   commitStartedAt: z.string().nullable().default(null),
+  // The HEAD observed before an implementer committed despite its no-commit
+  // contract. Factory reviews the full base-to-HEAD range and any later
+  // worktree fixes, then adopts the verified HEAD instead of blocking on a
+  // falsely clean worktree.
+  implementationBaseCommit: z.string().nullable().default(null),
   // Short human-facing note on the current status: a block reason, or a pointer
   // to questions.md when awaiting input.
   note: z.string().nullable().default(null),
@@ -290,6 +295,7 @@ export async function addTask(
     updatedAt: now,
     commit: null,
     commitStartedAt: null,
+    implementationBaseCommit: null,
     note: null,
     sharpen: options.sharpen ?? 'done',
     resume: false,
