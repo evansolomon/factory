@@ -159,6 +159,19 @@ export async function headSha(root: string): Promise<string> {
   return out.trim()
 }
 
+export async function parentSha(root: string): Promise<string | null> {
+  const out = await $`git -C ${root} rev-parse --short HEAD^`.nothrow().quiet()
+  return out.exitCode === 0 ? out.text().trim() : null
+}
+
+export async function diffSince(root: string, sha: string): Promise<string> {
+  const out = await $`git -C ${root} diff ${sha} HEAD --no-color`.nothrow().quiet()
+  if (out.exitCode !== 0) {
+    throw new Error(`could not read committed implementation diff from ${sha}`)
+  }
+  return out.text().trim()
+}
+
 // The patch a single commit introduced (no message/metadata), for capturing the
 // reference diff of a completed task into an eval candidate.
 export async function commitDiff(root: string, sha: string): Promise<string> {

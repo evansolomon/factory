@@ -273,6 +273,7 @@ describe('task state transitions', () => {
     expect(task?.meta.autoRetries).toBe(0)
     expect(task?.meta.strategyEpoch).toBe(0)
     expect(task?.meta.strategyBudget).toBeNull()
+    expect(task?.meta.implementationBaseCommit).toBeNull()
     expect(task?.meta.executionOverride).toBeNull()
     expect(task?.meta.dispatchChainId).toBeNull()
     expect(task?.meta.complexity).toBeNull()
