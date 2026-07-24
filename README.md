@@ -280,13 +280,18 @@ it follows the active child's log and exits only when requested or, with
 independent process sessions, so a crashed supervisor does not kill the work; a
 restarted parent resumes from the repo-level chain record. Each child
 inherits the parent's delivery decision and can inspect an aggregate source
-worktree as read-only evidence. From the parent worktree, `factory status`,
-unscoped `factory show`, and unscoped `factory ask` follow the active child while
-keeping the parent and staged-unit position visible. A child question therefore
-appears in the parent's status and `factory add "…"` there routes the answer back
-to that child. This preserves one task per worktree and
-dependency order without turning correct staging into a human copy/paste chore.
-Malformed decompositions fail closed rather than dispatching unsafe work.
+worktree as read-only evidence. The original worktree remains the stable user
+interface across nested delegation: `factory status` shows the logical
+parent → child → active-leaf breadcrumb, and unscoped task interaction (`show`,
+`ask`, `add`, `feedback`, `retry`, `delivery`, `report`, and agent sessions)
+follows that leaf without exposing or requiring its checkout path. An explicit
+parent task id still targets the parent's durable record. Questions from any
+nested child therefore appear in the parent's status and inline prompt, and
+`factory add "…"` there routes the answer back to the task that asked. A broken
+delegation chain fails explicitly instead of silently showing stale parent
+state. This preserves one task per worktree and dependency order without turning
+correct staging into a human navigation or copy/paste chore. Malformed
+decompositions fail closed rather than dispatching unsafe work.
 Replying exactly `atomic` remains an escape hatch for a task parked by an older
 Factory version.
 

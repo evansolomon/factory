@@ -4,7 +4,7 @@ import { dirname } from 'node:path'
 import { z } from 'zod'
 import { type ParsedAddOptions, parseAddOptions } from './add-options.ts'
 import { type AddRouteTask, selectAddRoute } from './add-route.ts'
-import { type InteractiveAgent, openAgentSession } from './agent-session.ts'
+import { type InteractiveAgent, openAgentSession, parseAgentSessionArgs } from './agent-session.ts'
 import { agentLabel, runAgent } from './agents.ts'
 import { type FlagValues, type Scanned, type ScanResult, scanArgs, scanFlags } from './args.ts'
 import { askFactory, parseAskRequest } from './ask.ts'
@@ -144,6 +144,13 @@ import {
 import { upgradeFactory } from './upgrade.ts'
 import { FACTORY_VERSION } from './version.ts'
 import { printConfig, printReport, printShow, printStatus } from './view.ts'
+import {
+  type ActiveWorkstream,
+  breadcrumb,
+  delegatedChainId,
+  resolveActiveWorkstream,
+  WorkstreamResolutionError,
+} from './workstream.ts'
 
 const HELP = `factory — a self-improving coding loop.
 
@@ -359,15 +366,10 @@ const POLL_MS = 5000
 const ownedDispatchChains = new Set<string>()
 const followedDispatchLogs = new Map<string, number>()
 const announcedDispatchStates = new Map<string, string>()
-const supervisedPromptWorkers = new Map<string, { unit: string; worker: PromptWorker }>()
-
-function delegatedChainId(task: Task | undefined): string | null {
-  return task?.meta.dispatchChainId ?? /\(([^()]+)\)$/.exec(task?.meta.note ?? '')?.[1] ?? null
-}
-
-async function activeDelegatedContext(ctx: WorkContext): Promise<WorkContext | null> {
-  return (await activeDelegatedTarget(ctx))?.ctx ?? null
-}
+const supervisedPromptWorkers = new Map<
+  string,
+  { unit: string; root: string; worker: PromptWorker }
+>()
 
 type ActiveDelegatedTarget = {
   parent: Task
@@ -375,9 +377,9 @@ type ActiveDelegatedTarget = {
   ctx: WorkContext
 }
 
-async function activeDelegatedTarget(ctx: WorkContext): Promise<ActiveDelegatedTarget | null> {
+async function directDelegatedTarget(ctx: WorkContext): Promise<ActiveDelegatedTarget | null> {
   const parent = (await loadTasks(ctx)).find(isDelegatedTask)
-  const chainId = delegatedChainId(parent)
+  const chainId = parent ? delegatedChainId(parent) : null
   if (!parent || !chainId) {
     return null
   }
@@ -393,8 +395,20 @@ async function activeDelegatedTarget(ctx: WorkContext): Promise<ActiveDelegatedT
   }
 }
 
-function logDelegatedRoute(target: ActiveDelegatedTarget): void {
-  log.info(`${target.parent.id} → active staged unit ${target.chain.currentUnit}`)
+function logWorkstreamRoute(workstream: ActiveWorkstream): void {
+  if (workstream.hops.length > 0) {
+    log.info(`active workstream: ${breadcrumb(workstream.hops)}`)
+  }
+}
+
+async function commandWorkstream(
+  source: WorkContext,
+  taskQuery?: string | null
+): Promise<ActiveWorkstream> {
+  if (taskQuery && (await findTask(source, taskQuery))) {
+    return { source, leaf: source, hops: [] }
+  }
+  return resolveActiveWorkstream(source)
 }
 
 async function restartDetachedWorker(ctx: WorkContext, task: Task): Promise<void> {
@@ -427,17 +441,22 @@ async function syncDelegatedPromptWorker(
     return
   }
   const existing = supervisedPromptWorkers.get(chainId)
-  if (existing?.unit === unit) {
-    return
-  }
-  if (existing) {
-    supervisedPromptWorkers.delete(chainId)
-    void existing.worker.stop()
-  }
   const dir = `${await dispatchWorktreesDir(ctx.root)}/${unit}`
   try {
     const childCtx = await loadContext(dir)
-    supervisedPromptWorkers.set(chainId, { unit, worker: startPromptWorker(childCtx) })
+    const active = await resolveActiveWorkstream(childCtx)
+    if (existing?.unit === unit && existing.root === active.leaf.root) {
+      return
+    }
+    if (existing) {
+      supervisedPromptWorkers.delete(chainId)
+      void existing.worker.stop()
+    }
+    supervisedPromptWorkers.set(chainId, {
+      unit,
+      root: active.leaf.root,
+      worker: startPromptWorker(active.leaf),
+    })
   } catch {
     // The durable chain record can advance just before the worktree is visible.
     // The next supervisor poll retries without disturbing execution.
@@ -542,7 +561,7 @@ async function superviseDelegatedChain(
   interactive: boolean
 ): Promise<DelegatedState> {
   const parent = tasks.find(isDelegatedTask)
-  const chainId = delegatedChainId(parent)
+  const chainId = parent ? delegatedChainId(parent) : null
   if (!parent || !chainId) {
     return 'unknown'
   }
@@ -556,7 +575,7 @@ async function superviseDelegatedChain(
     return 'unknown'
   }
   await syncDelegatedPromptWorker(ctx, chainId, chain.currentUnit, interactive)
-  const childCtx = await activeDelegatedContext(ctx)
+  const childCtx = (await directDelegatedTarget(ctx))?.ctx ?? null
   const childLock = childCtx ? await runLockHolder(childCtx.stateDir) : null
   const chainAge = Date.now() - Date.parse(chain.updatedAt)
   if (childCtx && chainAge > POLL_MS * 2 && childLock === null) {
@@ -1588,10 +1607,9 @@ async function addCommand(args: string[]): Promise<number> {
     return 1
   }
   const sourceCtx = await loadContext(process.cwd())
-  const ctx = (await activeDelegatedContext(sourceCtx)) ?? sourceCtx
-  if (ctx !== sourceCtx) {
-    log.info(`routing to active staged unit in ${ctx.root}`)
-  }
+  const workstream = await resolveActiveWorkstream(sourceCtx)
+  const ctx = workstream.leaf
+  logWorkstreamRoute(workstream)
   const tasks = await loadTasks(ctx)
   const routeTasks = await addRouteTasks(tasks)
   const dirty = await hasChanges(ctx.root)
@@ -2080,13 +2098,16 @@ async function runLoopCommand(flags: FlagValues<typeof RUN_OPTIONS>): Promise<nu
 
 async function answerCommand(args: string[]): Promise<number> {
   const usage = 'usage: factory answer [task-id] [-m <answer> | --edit]'
-  const ctx = await loadContext(process.cwd())
-  log.warn('factory answer is deprecated; use factory add "..." or the inline run prompt')
   const parsed = parseInputArgs(args, usage)
   if (!parsed.ok) {
     log.fail(parsed.error)
     return 1
   }
+  const sourceCtx = await loadContext(process.cwd())
+  const workstream = await commandWorkstream(sourceCtx, parsed.taskQuery)
+  const ctx = workstream.leaf
+  logWorkstreamRoute(workstream)
+  log.warn('factory answer is deprecated; use factory add "..." or the inline run prompt')
   const task = parsed.taskQuery
     ? await findTask(ctx, parsed.taskQuery)
     : await latestTask(ctx, ['needs-input'])
@@ -2108,12 +2129,15 @@ async function answerCommand(args: string[]): Promise<number> {
 
 async function feedbackCommand(args: string[]): Promise<number> {
   const usage = 'usage: factory feedback [task-id] [-m <feedback> | --edit]'
-  const ctx = await loadContext(process.cwd())
   const parsed = parseInputArgs(args, usage)
   if (!parsed.ok) {
     log.fail(parsed.error)
     return 1
   }
+  const sourceCtx = await loadContext(process.cwd())
+  const workstream = await commandWorkstream(sourceCtx, parsed.taskQuery)
+  const ctx = workstream.leaf
+  logWorkstreamRoute(workstream)
   const hasWorktreeDiff = await hasChanges(ctx.root)
   const loopActive = (await runLockHolder(ctx.stateDir)) !== null
   let task: Task | null
@@ -2194,13 +2218,15 @@ async function retryCommand(command: 'retry' | 'resume', args: string[]): Promis
   // mid-stage by a killed loop). The note is optional and only set via -m/--edit,
   // so a bare `factory retry` still just retries.
   const usage = `usage: factory ${command} [task-id] [-m <note> | --edit]`
-  const sourceCtx = await loadContext(process.cwd())
-  const ctx = (await activeDelegatedContext(sourceCtx)) ?? sourceCtx
   const parsed = parseInputArgs(args, usage)
   if (!parsed.ok) {
     log.fail(parsed.error)
     return 1
   }
+  const sourceCtx = await loadContext(process.cwd())
+  const workstream = await commandWorkstream(sourceCtx, parsed.taskQuery)
+  const ctx = workstream.leaf
+  logWorkstreamRoute(workstream)
   const task = parsed.taskQuery
     ? await findTask(ctx, parsed.taskQuery)
     : await latestTask(ctx, RESUMABLE_STATUSES)
@@ -2220,7 +2246,7 @@ async function retryCommand(command: 'retry' | 'resume', args: string[]): Promis
   task.meta.autoRetries = 0
   task.meta.retryAt = null
   await setStatus(task, 'ready')
-  if (ctx !== sourceCtx) {
+  if (workstream.hops.length > 0) {
     await restartDetachedWorker(ctx, task)
   }
   log.ok(`${task.id}: retrying — back in queue${note ? ' with note' : ''}`)
@@ -2595,35 +2621,30 @@ async function gcCommand(flags: FlagValues<typeof GC_OPTIONS>): Promise<number> 
 
 async function statusCommand(): Promise<number> {
   const sourceCtx = await loadContext(process.cwd())
-  const target = await activeDelegatedTarget(sourceCtx)
-  if (!target?.chain.currentUnit) {
-    await printStatus(sourceCtx)
-    return 0
-  }
-  const position = target.chain.units.indexOf(target.chain.currentUnit) + 1
-  await printStatus(target.ctx, {
-    parentTaskId: target.parent.id,
-    unit: target.chain.currentUnit,
-    position,
-    total: target.chain.units.length,
-  })
+  const workstream = await resolveActiveWorkstream(sourceCtx)
+  await printStatus(
+    workstream.leaf,
+    workstream.hops.length > 0 ? breadcrumb(workstream.hops) : undefined
+  )
   return 0
 }
 
 async function askCommand(args: string[]): Promise<number> {
   const sourceCtx = await loadContext(process.cwd())
   const parentRequest = parseAskRequest(args, await loadTasks(sourceCtx))
-  const target = parentRequest.taskId ? null : await activeDelegatedTarget(sourceCtx)
-  const ctx = target?.ctx ?? sourceCtx
-  if (target) {
-    logDelegatedRoute(target)
-  }
-  return askFactory(ctx, args)
+  const workstream = await commandWorkstream(sourceCtx, parentRequest.taskId)
+  logWorkstreamRoute(workstream)
+  return askFactory(workstream.leaf, args)
 }
 
 async function sessionCommand(args: string[]): Promise<number> {
-  const ctx = await loadContext(process.cwd())
-  return openAgentSession(ctx, args, { commandName: 'session' })
+  const sourceCtx = await loadContext(process.cwd())
+  const parsed = parseAgentSessionArgs(args, 'codex')
+  const workstream = parsed.ok
+    ? await commandWorkstream(sourceCtx, parsed.request.taskQuery)
+    : { source: sourceCtx, leaf: sourceCtx, hops: [] }
+  logWorkstreamRoute(workstream)
+  return openAgentSession(workstream.leaf, args, { commandName: 'session' })
 }
 
 async function deckCommand(args: string[]): Promise<number> {
@@ -2632,14 +2653,24 @@ async function deckCommand(args: string[]): Promise<number> {
 }
 
 async function deliveryCommand(scan: ScanResult<typeof DELIVERY_OPTIONS>): Promise<number> {
-  const ctx = await loadContext(process.cwd())
-  return taskDelivery(ctx, scan)
+  const sourceCtx = await loadContext(process.cwd())
+  const taskQuery = scan.ok ? (scan.flags['--task'][0] ?? null) : null
+  const workstream = scan.ok
+    ? await commandWorkstream(sourceCtx, taskQuery)
+    : { source: sourceCtx, leaf: sourceCtx, hops: [] }
+  logWorkstreamRoute(workstream)
+  return taskDelivery(workstream.leaf, scan)
 }
 
 // Shared by `codex` and `claude`.
 async function interactiveSessionCommand(agent: InteractiveAgent, args: string[]): Promise<number> {
-  const ctx = await loadContext(process.cwd())
-  return openAgentSession(ctx, args, { defaultAgent: agent, commandName: agent })
+  const sourceCtx = await loadContext(process.cwd())
+  const parsed = parseAgentSessionArgs(args, agent)
+  const workstream = parsed.ok
+    ? await commandWorkstream(sourceCtx, parsed.request.taskQuery)
+    : { source: sourceCtx, leaf: sourceCtx, hops: [] }
+  logWorkstreamRoute(workstream)
+  return openAgentSession(workstream.leaf, args, { defaultAgent: agent, commandName: agent })
 }
 
 async function configCommand(rest: string[]): Promise<number> {
@@ -2762,12 +2793,9 @@ async function skillsCommand(rest: string[]): Promise<number> {
 async function showCommand(args: string[]): Promise<number> {
   const sourceCtx = await loadContext(process.cwd())
   const explicitParent = args[0] ? await findTask(sourceCtx, args[0]) : null
-  const target = explicitParent ? null : await activeDelegatedTarget(sourceCtx)
-  const ctx = target?.ctx ?? sourceCtx
-  if (target) {
-    logDelegatedRoute(target)
-  }
-  return printShow(ctx, args[0], args[1])
+  const workstream = await commandWorkstream(sourceCtx, explicitParent?.id)
+  logWorkstreamRoute(workstream)
+  return printShow(workstream.leaf, args[0], args[1])
 }
 
 async function lessonsCliCommand(args: string[]): Promise<number> {
@@ -2776,13 +2804,16 @@ async function lessonsCliCommand(args: string[]): Promise<number> {
 }
 
 async function reportCommand(scan: Scanned<typeof REPORT_OPTIONS>): Promise<number> {
-  const ctx = await loadContext(process.cwd())
+  const sourceCtx = await loadContext(process.cwd())
   // Default to the current task (like `show`); `--all` for the repo roll-up.
   if (scan.flags['--all']) {
-    printReport(ctx)
+    printReport(sourceCtx)
     return 0
   }
   const query = scan.positionals[0]
+  const workstream = await commandWorkstream(sourceCtx, query)
+  const ctx = workstream.leaf
+  logWorkstreamRoute(workstream)
   const task = query ? await findTask(ctx, query) : await latestTask(ctx)
   if (!task) {
     if (query) {
@@ -2899,7 +2930,11 @@ export async function runCli(): Promise<void> {
   try {
     process.exit(await main())
   } catch (err) {
-    if (err instanceof ConfigError || err instanceof NotARepoError) {
+    if (
+      err instanceof ConfigError ||
+      err instanceof NotARepoError ||
+      err instanceof WorkstreamResolutionError
+    ) {
       log.fail(err.message)
       process.exit(1)
     }

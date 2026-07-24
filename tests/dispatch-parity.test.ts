@@ -118,6 +118,7 @@ async function delegatedWorktreeFixture(opts: {
 }): Promise<{
   cwd: string
   home: string
+  childRoot: string
   child: { dir: string; metaPath: string }
   childTasksDir: string
 }> {
@@ -164,7 +165,7 @@ async function delegatedWorktreeFixture(opts: {
       updatedAt: new Date().toISOString(),
     })
   )
-  return { cwd, home, child, childTasksDir }
+  return { cwd, home, childRoot, child, childTasksDir }
 }
 
 describe('delegated run ownership', () => {
@@ -228,14 +229,14 @@ describe('delegated run ownership', () => {
 
     const status = await runFactory(['status'], cwd, home)
     expect(status.code).toBe(0)
-    expect(status.stdout).toContain('parent → child-unit (staged unit 1/1)')
+    expect(status.stdout).toContain('parent → child-unit (1/1)')
     expect(status.stdout).toContain('Should the child preserve the existing fallback?')
     expect(status.stdout).toContain('factory add "…"')
 
     const result = await runFactory(['add', 'use the recommendation'], cwd, home)
 
     expect(result.code).toBe(0)
-    expect(result.stdout).toContain('routing to active staged unit')
+    expect(result.stdout).toContain('active workstream: parent → child-unit (1/1)')
     expect(result.stdout).toContain('child-unit: routed as answer')
     expect((await Bun.file(child.metaPath).json()).status).toBe('ready')
   })
@@ -264,7 +265,7 @@ describe('delegated run ownership', () => {
 
     const status = await runFactory(['status'], cwd, home)
     expect(status.code).toBe(0)
-    expect(status.stdout).toContain('parent → child-unit (staged unit 1/2)')
+    expect(status.stdout).toContain('parent → child-unit (1/2)')
     expect(status.stdout).toContain('child-unit — implementing')
     expect(status.stdout).toContain('activity ')
     expect(status.stdout).toContain(' ago · runtime')
@@ -273,7 +274,7 @@ describe('delegated run ownership', () => {
 
     const show = await runFactory(['show'], cwd, home)
     expect(show.code).toBe(0)
-    expect(show.stdout).toContain('parent → active staged unit child-unit')
+    expect(show.stdout).toContain('active workstream: parent → child-unit (1/2)')
     expect(show.stdout).toContain('child-unit  [implementing]')
     expect(show.stdout).toContain('Fix child-unit')
     expect(show.stdout).not.toContain('Fix parent')
@@ -297,9 +298,90 @@ describe('delegated run ownership', () => {
       PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
     })
     expect(ask.code).toBe(0)
-    expect(ask.stdout).toContain('parent → active staged unit child-unit')
+    expect(ask.stdout).toContain('active workstream: parent → child-unit (1/2)')
     expect(ask.stdout).toContain('child context')
     expect(ask.stdout).not.toContain('parent context')
+  })
+
+  test('parent commands follow nested delegated workstreams without exposing paths', async () => {
+    const { cwd, home, childRoot, child } = await delegatedWorktreeFixture({
+      childStatus: 'delegated',
+      chainId: 'parent-nested1234',
+      chainStatus: 'running',
+      units: ['child-unit', 'child-two'],
+    })
+    const childMeta = await Bun.file(child.metaPath).json()
+    childMeta.dispatchChainId = 'child-nested1234'
+    await Bun.write(child.metaPath, JSON.stringify(childMeta))
+
+    const toplevel = await repoToplevel(cwd)
+    const repoKey = toplevel.replace(/\//g, '-').replace(/^-+/, '')
+    const grandchildRoot = `${home}/worktrees/${repoKey}/grandchild-unit`
+    expect(
+      (
+        await runCommand(
+          ['git', 'worktree', 'add', '-qb', 'factory/grandchild-unit', grandchildRoot],
+          cwd,
+          envWith({})
+        )
+      ).code
+    ).toBe(0)
+    const grandchild = await writeTask(
+      await sessionTasksDir(grandchildRoot, home),
+      'grandchild-unit',
+      'needs-input'
+    )
+    await Bun.write(
+      `${grandchild.dir}/questions.md`,
+      'DECISION: ASK\n\n- Which nested behavior should the implementation preserve?\n'
+    )
+    await Bun.write(
+      `${home}/repos/${repoKey}/chains/child-nested1234.json`,
+      JSON.stringify({
+        id: 'child-nested1234',
+        parentTaskId: 'child-unit',
+        units: ['nested-one', 'grandchild-unit'],
+        currentUnit: 'grandchild-unit',
+        status: 'needs-input',
+        reason: 'awaiting answer',
+        updatedAt: new Date().toISOString(),
+      })
+    )
+
+    const status = await runFactory(['status'], cwd, home)
+    expect(status.code).toBe(0)
+    expect(status.stdout).toContain('parent → child-unit (1/2) → grandchild-unit (2/2)')
+    expect(status.stdout).toContain('Which nested behavior should the implementation preserve?')
+    expect(status.stdout).not.toContain(childRoot)
+    expect(status.stdout).not.toContain(grandchildRoot)
+
+    const answer = await runFactory(['add', 'preserve the existing behavior'], cwd, home)
+    expect(answer.code).toBe(0)
+    expect(answer.stdout).toContain(
+      'active workstream: parent → child-unit (1/2) → grandchild-unit (2/2)'
+    )
+    expect(answer.stdout).toContain('grandchild-unit: routed as answer')
+    expect((await Bun.file(grandchild.metaPath).json()).status).toBe('ready')
+  })
+
+  test('a broken nested delegation chain fails instead of showing stale parent state', async () => {
+    const { cwd, home, child } = await delegatedWorktreeFixture({
+      childStatus: 'delegated',
+      chainId: 'parent-broken1234',
+      chainStatus: 'running',
+      units: ['child-unit'],
+    })
+    const childMeta = await Bun.file(child.metaPath).json()
+    childMeta.dispatchChainId = 'missing-child-chain'
+    await Bun.write(child.metaPath, JSON.stringify(childMeta))
+
+    const status = await runFactory(['status'], cwd, home)
+
+    expect(status.code).toBe(1)
+    expect(status.stdout).toContain(
+      'parent → child-unit (1/1): delegated chain missing-child-chain is missing'
+    )
+    expect(status.stdout).not.toContain('⇢ delegated')
   })
 
   test('--until-done exits only after the durable chain reaches done', async () => {

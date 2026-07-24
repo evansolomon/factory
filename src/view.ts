@@ -209,17 +209,11 @@ async function latestActivityAt(task: Task): Promise<string | null> {
 // The catch-up dashboard: everything happening in this worktree, derived purely
 // from durable state (meta + questions files), so it's accurate no matter how
 // much scrollback you missed.
-export async function printStatus(
-  ctx: WorkContext,
-  staged?: { parentTaskId: string; unit: string; position: number; total: number }
-): Promise<void> {
+export async function printStatus(ctx: WorkContext, workstream?: string): Promise<void> {
   const tasks = await loadTasks(ctx)
   const branch = await currentBranch(ctx.root)
   const plural = tasks.length === 1 ? '' : 's'
-  const ownership = staged
-    ? `${staged.parentTaskId} → ${staged.unit} ` +
-      `(staged unit ${staged.position}/${staged.total}) · `
-    : ''
+  const ownership = workstream ? `${workstream} · ` : ''
   log.log(`factory — ${ownership}${tasks.length} task record${plural} · ${branch}`)
 
   if (tasks.length === 0) {
